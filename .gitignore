@@ -1,0 +1,8 @@
+.DS_Store
+.clj-kondo/
+.lsp/
+.idea/
+.codebase-memory/
+.code-review-graph/
+target/
+*.log

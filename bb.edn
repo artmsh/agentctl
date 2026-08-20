@@ -1,0 +1,6 @@
+{:paths ["src"]
+ :tasks
+ {test {:doc "Run unit and end-to-end tests"
+        :task (shell "tests/run.sh")}
+  agentctl {:doc "Run agentctl"
+            :task (apply shell "./agentctl" *command-line-args*)}}}

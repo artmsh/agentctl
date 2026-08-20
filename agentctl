@@ -1,0 +1,4 @@
+#!/usr/bin/env zsh
+set -eu
+ROOT=${0:A:h}
+exec bb -cp "$ROOT/src" -m agentctl.main "$@"
