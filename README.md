@@ -105,3 +105,7 @@ does not modify your real agent configuration.
 See [SECURITY.md](SECURITY.md). Before publishing a configuration, keep secret
 values in environment variables or Bitwarden references and review the output
 of `agentctl import`.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
