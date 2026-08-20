@@ -14,7 +14,7 @@
 (def usage
   (str/join
    "\n"
-   ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp)"
+   ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp, llm)"
     ""
     "USAGE"
     "  agentctl <command> [options]"
@@ -29,7 +29,7 @@
     ""
     "OPTIONS"
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
-    "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp"
+    "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"
     "                       settings mcps skills providers memory projects skill-packs"
     "  -p, --project ID     Restrict to one declared project (repeatable); selects"

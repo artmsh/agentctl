@@ -649,6 +649,26 @@
                           ops))))
     (is (not (str/includes? out "sk-live-abc")))))
 
+(deftest removing-a-json-entry-leaves-its-neighbours-alone
+  (let [dir (temp-dir) f (str dir "/claude.json")]
+    (u/write-json! f {:projects {:proj {:mcpServers {:gone {:command "/bin/echo"}
+                                                    :stays {:command "/bin/cat"}}
+                                        :allowedTools ["Bash"]}}})
+    (let [op (plan/json-unset-op {:tool :claude :kind :mcps :id :proj/gone
+                                  :file f :path [:projects :proj :mcpServers :gone]
+                                  :summary "removed from agents.edn"})]
+      (is (= :delete (:action op)))
+      ((:exec! op))
+      (let [after (u/read-json f)]
+        (testing "only the named entry goes"
+          (is (nil? (get-in after [:projects :proj :mcpServers :gone])))
+          (is (some? (get-in after [:projects :proj :mcpServers :stays])))
+          (is (= ["Bash"] (get-in after [:projects :proj :allowedTools]))))))
+    (testing "an entry already gone is not an op"
+      (is (nil? (plan/json-unset-op {:tool :claude :kind :mcps :id :proj/gone
+                                     :file f
+                                     :path [:projects :proj :mcpServers :gone]}))))))
+
 (deftest a-checked-setting-that-already-agrees-is-one-line
   (let [dir (temp-dir) f (str dir "/settings.json")]
     (spit f "{\"ultracode\": true, \"skipAutoPermissionPrompt\": true}")

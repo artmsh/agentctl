@@ -10,14 +10,15 @@
             [clojure.string :as str]
             [clojure.walk :as walk]))
 
-(def all-tools [:claude :codex :pi :omp])
+(def all-tools [:claude :codex :pi :omp :llm])
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
   {:claude #{:settings :mcps :skills :memory :projects :permissions}
    :codex  #{:settings :mcps :skills :memory :projects :providers}
    :pi     #{:settings :mcps :skills :memory :providers :projects}
-   :omp    #{:settings :mcps :skills :memory :providers}})
+   :omp    #{:settings :mcps :skills :memory :providers}
+   :llm    #{:providers :settings}})
 
 (defn supports? [tool kind] (contains? (get capabilities tool #{}) kind))
 

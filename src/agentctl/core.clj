@@ -3,6 +3,7 @@
   (:require [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.llm :as llm]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
@@ -15,7 +16,8 @@
   {:claude {:plan claude/plan :present? claude/present?}
    :codex  {:plan codex/plan  :present? codex/present?}
    :pi     {:plan pi/plan     :present? pi/present?}
-   :omp    {:plan omp/plan    :present? omp/present?}})
+   :omp    {:plan omp/plan    :present? omp/present?}
+   :llm    {:plan llm/plan    :present? llm/present?}})
 
 (defn- selected-tools
   "`--tool` is a direct order and outranks the config; without one the config

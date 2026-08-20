@@ -6,6 +6,7 @@
    created before the next apply."
   (:require [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
+            [agentctl.adapters.llm :as llm]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.refs :as refs]
@@ -57,7 +58,10 @@
              {:model (get-in c [:modelRoles :default])
               :model-roles (not-empty (into {} (get c :modelRoles)))
               :personality (:personality c)
-              :thinking (:defaultThinkingLevel c)})))}))
+              :thinking (:defaultThinkingLevel c)})))
+    :llm (let [d (some-> (u/slurp-safe (llm/default-model-file)) str/trim)
+               aliases (u/read-json (llm/aliases-file))]
+           (not-empty (u/prune-nils {:model d :aliases (not-empty aliases)})))}))
 
 ;; ---------------------------------------------------------------- shared
 
@@ -149,7 +153,15 @@
                            (do (note! (str "omp provider " (name nm)
                                            " has a plaintext apiKey — emitted as !bw:// placeholder"))
                                (refs/redact (str "provider-" (name nm)) :apiKey)))
-                    :api (:api p)}))
+                    :api (:api p)})
+                 (for [[base es] (group-by :api_base (or (u/read-yaml (llm/models-file)) []))
+                       :when base]
+                   {:id (provider-id base nil) :tool :llm
+                    :url base
+                    :key-name (:api_key_name (first es))
+                    :models (vec (sort (map :model_id es)))}))
+        ;; llm entries are keyed by host, so fold them into the named provider
+        ;; that serves the same endpoint instead of inventing a second provider
         by-url (into {} (for [e entries
                               :when (not (derived-id? (:id e)))]
                           [(str/replace (str (:url e)) #"/+$" "") (:id e)]))

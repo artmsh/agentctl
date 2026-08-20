@@ -275,6 +275,31 @@
 
 ;; ---------------------------------------------------------------- generic file ops
 
+(defn- dissoc-in
+  "Remove one key deep inside a map, leaving its parents alone."
+  [m path]
+  (if (= 1 (count path))
+    (dissoc m (first path))
+    (if (get-in m (butlast path))
+      (update-in m (butlast path) dissoc (last path))
+      m)))
+
+(defn json-unset-op
+  "Op that removes `path` from a JSON file. Nothing to remove is no op at all —
+   an entry agentctl once wrote may already be gone by hand."
+  [{:keys [tool kind id file path summary note risk project]}]
+  (let [before (get-in (u/read-json file) path)]
+    (when (some? before)
+      (op {:project project :action :delete :tool tool :kind kind :id id
+           :target file
+           :summary (or summary (str/join "." (map u/kw->str path)))
+           :note note
+           :diffs [{:key (last path) :before before :after nil}]
+           :risk (or risk :medium)
+           :exec! (fn []
+                    (u/backup! file)
+                    (u/write-json! file (dissoc-in (or (u/read-json file) {}) path)))}))))
+
 (defn json-set-op
   "Op that sets `path` (vector of keys) to `value` inside a JSON file."
   [{:keys [tool kind id file path value summary note risk compare-as project

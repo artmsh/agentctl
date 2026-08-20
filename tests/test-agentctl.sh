@@ -180,4 +180,59 @@ hits = [p for p, v in d.get("projects", {}).items()
 assert hits, "local-scope server not written into ~/.claude.json"
 PY
 
+echo "13. a project's server dropped from the config is pruned from local scope"
+mkdir -p "$SB/dproj"
+cat > "$SB/drop-with.edn" <<EDN
+{:mcps {:leaver {:cmd "/bin/echo hi" :tools [:claude]}}
+ :projects {:dproj {:path "$SB/dproj" :executors {:claude {}} :mcp [:leaver]}}}
+EDN
+cat > "$SB/drop-without.edn" <<EDN
+{:projects {:dproj {:path "$SB/dproj" :executors {:claude {}}}}}
+EDN
+run apply! -f "$SB/drop-with.edn" -y > /dev/null
+python3 - "$SB/.claude.json" <<'PY' || fail "local-scope server not written"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [p for p, v in d.get("projects", {}).items()
+        if p.endswith("/dproj") and "leaver" in v.get("mcpServers", {})]
+PY
+set +e
+run apply -f "$SB/drop-without.edn" > "$SB/plan13.txt"; code=$?
+set -e
+grep -q -- '- projects/dproj mcps/leaver' "$SB/plan13.txt" \
+  || { cat "$SB/plan13.txt"; fail "dropped project server not planned for prune"; }
+run apply! -f "$SB/drop-without.edn" -y > /dev/null
+python3 - "$SB/.claude.json" <<'PY' || fail "project server left behind in ~/.claude.json"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert not [p for p, v in d.get("projects", {}).items()
+            if "leaver" in v.get("mcpServers", {})]
+PY
+set +e
+run apply -f "$SB/drop-without.edn" > "$SB/plan13b.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/plan13b.txt"; fail "prune left drift behind"; }
+
+echo "14. a hand-made project server is never pruned"
+mkdir -p "$SB/hproj"
+cat > "$SB/hand.edn" <<EDN
+{:projects {:hproj {:path "$SB/hproj" :executors {:claude {}}}}}
+EDN
+run apply! -f "$SB/hand.edn" -y > /dev/null
+python3 - "$SB/.claude.json" "$SB/hproj" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d.setdefault("projects", {}).setdefault(sys.argv[2], {})["mcpServers"] = {
+    "handmade": {"command": "/bin/echo"}}
+json.dump(d, open(p, "w"))
+PY
+run apply! -f "$SB/hand.edn" -y > /dev/null
+python3 - "$SB/.claude.json" <<'PY' || fail "agentctl pruned a server it never installed"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [p for p, v in d.get("projects", {}).items()
+        if "handmade" in v.get("mcpServers", {})]
+PY
+
 echo "all agentctl e2e checks passed"

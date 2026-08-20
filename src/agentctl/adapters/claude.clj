@@ -42,7 +42,7 @@
   "Declared key -> [native-key value], one entry per native key. Two spellings
    of one setting (`:effort` and `:thinking` are both effortLevel) would
    otherwise queue two writes to the same place. Which of the two wins is map
-   order, so declaring both is a coin toss — validate flags it as a duplicate."
+   order, so declaring both is a coin toss. Nothing warns about it today."
   [settings]
   (->> settings
        (keep (fn [[k v]] (when-let [nk (get setting-keys k)] [k nk v])))
@@ -246,6 +246,36 @@
                                  ", the copy carries a credential"))}))
      (project-mcp-writes cfg id proj))))
 
+(defn- project-mcp-prune-ops
+  "A project's server dropped from agents.edn. The user-wide prune loop skips a
+   namespaced id on purpose — it would `claude mcp remove --scope user` the
+   wrong server — so the project's own entry has to be cleaned up here, or
+   moving a server out of a project would leak it forever.
+
+   Both scopes are checked because the entry may have been written under either
+   one, and a scope flip is indistinguishable from a removal in the manifest."
+  [cfg st]
+  (let [desired (into #{} (for [[pid proj] (:projects cfg)
+                                :when (contains? (:for-tools proj) tool)
+                                [mid _] (common/project-mcps cfg proj tool)]
+                            (keyword (name pid) (u/kw->str mid))))
+        managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
+    (for [id managed
+          :when (and (namespace id) (not (contains? desired id)))
+          :let [proj (get-in cfg [:projects (keyword (namespace id))])]
+          ;; a project gone from agents.edn takes its path with it, and the
+          ;; manifest never recorded one — nothing left to point a delete at
+          :when proj
+          [file path] [[runtime-file [:projects (keyword (:path proj))
+                                      :mcpServers (keyword (name id))]]
+                       [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
+          :let [op (plan/json-unset-op {:tool tool :kind :mcps :id id
+                                        :project (keyword (namespace id))
+                                        :file file :path path
+                                        :summary "removed from agents.edn"})]
+          :when op]
+      op)))
+
 (defn- project-ops-for [cfg id proj]
   (let [pfile (project-settings-file proj)
         tool-settings (get-in proj [:tools tool])
@@ -337,12 +367,14 @@
        op))))
 
 (defn project-ops [cfg st]
-  (mapcat (fn [[id proj]]
-            (when (contains? (:for-tools proj) tool)
-              (concat (project-ops-for cfg id proj)
-                      (project-mcp-ops cfg id proj)
-                      (project-skill-ops cfg id proj st))))
-          (:projects cfg)))
+  (concat
+   (mapcat (fn [[id proj]]
+             (when (contains? (:for-tools proj) tool)
+               (concat (project-ops-for cfg id proj)
+                       (project-mcp-ops cfg id proj)
+                       (project-skill-ops cfg id proj st))))
+           (:projects cfg))
+   (project-mcp-prune-ops cfg st)))
 
 ;; ---------------------------------------------------------------- entry
 
