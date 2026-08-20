@@ -1,5 +1,6 @@
 (ns agentctl-test
-  (:require [agentctl.adapters.common :as common]
+  (:require [agentctl.adapters.claude :as claude]
+            [agentctl.adapters.common :as common]
             [agentctl.config :as config]
             [agentctl.core :as core]
             [agentctl.imports :as imports]
@@ -637,7 +638,9 @@
                                :projects {:proj {:path proj :executors #{:claude}
                                                  :mcp [:shared]}}}
                               "x")
-        ops (core/build-plan cfg state/empty-state {})
+        ;; the adapter directly: `build-plan` skips a tool whose CLI is not
+        ;; installed, and CI has no `claude` binary
+        ops (claude/plan cfg state/empty-state)
         warn (first (filter :warn ops))
         out (plan/render-plan ops {})]
     (testing "the leftover copy is named, with its credential called out"

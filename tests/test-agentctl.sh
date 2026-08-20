@@ -10,6 +10,17 @@ trap 'rm -rf "$SB"' EXIT
 export AGENTCTL_HOME="$SB"
 run() { "$ROOT/agentctl" "$@"; }
 
+# agentctl skips a tool whose CLI is not installed, so without these the suite
+# would quietly plan nothing on a machine that has no agent installed — which
+# is every CI runner. The adapters exercised here write files directly; the
+# stubs only have to exist and succeed.
+mkdir -p "$SB/bin"
+for cli in claude codex pi omp llm; do
+  printf '#!/bin/sh\nexit 0\n' > "$SB/bin/$cli"
+  chmod +x "$SB/bin/$cli"
+done
+export PATH="$SB/bin:$PATH"
+
 mkdir -p "$SB/packs/demo/skills/demo-skill" "$SB/brain"
 printf -- '---\nname: demo-skill\ndescription: Demo.\n---\n\nbody\n' \
   > "$SB/packs/demo/skills/demo-skill/SKILL.md"
