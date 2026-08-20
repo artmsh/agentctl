@@ -28,7 +28,7 @@ owns.
 ## Quick start
 
 ```sh
-git clone https://github.com/YOUR-ORG/agentctl.git
+git clone https://github.com/artmsh/agentctl.git
 cd agentctl
 chmod +x agentctl
 ./agentctl --help
