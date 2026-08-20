@@ -136,6 +136,14 @@
 
 (def secret-key-pattern #"(?i)(api[-_]?key|apikey|token|secret|password|passwd|credential|bearer)")
 
+(def indirection-key-pattern
+  "Keys that name where a secret lives rather than holding one: `:key-name`
+   points at an entry in llm's keys.json, and anything spelled `…-env` names an
+   environment variable. Their values are identifiers and belong in a config
+   file — flagging them as plaintext credentials trains the reader to ignore
+   the warning that matters."
+  #"(?i)(^key-name$|[-_]env$|[-_]env[-_]var$|[-_]key[-_]name$)")
+
 (def credential-value-patterns
   "Vendor prefixes nothing but a credential carries."
   [#"^sk-[A-Za-z0-9\-_]{10,}"

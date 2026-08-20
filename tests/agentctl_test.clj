@@ -310,6 +310,7 @@
 (deftest capability-table
   (is (config/supports? :codex :mcps))
   (is (not (config/supports? :unknown :mcps)))
+  (is (not (config/supports? :llm :mcps)))
   (is (= [:claude :codex :pi :omp] (config/tools-for :skills))))
 
 ;; ---------------------------------------------------------------- settings schema
@@ -648,6 +649,22 @@
                                 (not= :noop (:action %)))
                           ops))))
     (is (not (str/includes? out "sk-live-abc")))))
+
+(deftest a-key-that-names-an-env-var-is-not-a-plaintext-secret
+  ;; `:bearer-token-env "MCP_BEARER_TOKEN"` holds the variable's name, not the
+  ;; token — flagging it teaches the reader to skip the warning that matters
+  (let [findings #(map :message
+                       (validate/check-config-secrets
+                        (config/normalize % "agents.edn")))]
+    (testing "indirection keys are quiet"
+      (is (empty? (findings {:mcps {:remote {:url "https://notes.example.com/mcp"
+                                             :bearer-token-env "MCP_BEARER_TOKEN"}}})))
+      (is (empty? (findings {:extra-providers
+                             {:gateway {:url "https://api.example.com/v1"
+                                        :key-name "gateway-llm-cli"}}}))))
+    (testing "an actual literal still gets caught"
+      (is (seq (findings {:mcps {:remote {:url "https://notes.example.com/mcp"
+                                          :env {"API_TOKEN" "abcdef0123456789"}}}}))))))
 
 (deftest removing-a-json-entry-leaves-its-neighbours-alone
   (let [dir (temp-dir) f (str dir "/claude.json")]

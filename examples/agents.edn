@@ -1,0 +1,74 @@
+{;; ---- root-level bindings; `$name` expands anywhere below -----------------
+ ;; Root level only: :#let inside a project or an mcp is an error, not a scope.
+ ;; A SHOUTED $NAME that is not bound here stays an environment reference.
+ :#let {effort "high"
+        workspace "~/projects"}
+
+ ;; ---- global per-CLI settings -------------------------------------------
+ ;; :on / :off are the terse spelling of boolean flags.
+ :executors
+ {:claude {:model "sonnet" :output-style "Proactive" :thinking $effort
+           :on #{:auto-compact}}
+  :codex  {:model "gpt-5.6-sol" :personality "pragmatic" :reasoning-effort $effort}
+  :pi     {:model "coder-small" :provider "gateway" :thinking $effort}
+  :omp    {:personality "pragmatic"
+           :model-roles {:default "gateway/vendor/model-a"
+                         :tiny    "gateway/anthropic/claude-haiku-4.5"}}
+  :llm    {:model "gpt-5.6-luna" :aliases {:fast "vendor-mini"}}}
+
+ ;; ---- MCP servers, fanned out to the tools that support them ------------
+ ;; A server a project names is provisioned into that project; the rest are
+ ;; machine-wide. A bare string is the whole declaration: a command line, or a URL.
+ ;; :cmd is the same shell line inside a map; :command + :args is it exploded.
+ ;; :type is an alias for :transport.
+ :mcps
+ {:search  "/usr/local/bin/search-mcp --stdio"
+  :repl    "bun run $workspace/skills-repo/mcp-servers/repl-mcp/index.ts"
+  :tracker {:command "~/.local/bin/tracker-mcp"
+            :args ["-t" "stdio" "-url" "http://tracker.internal"]
+            :env {"TRACKER_ACCESS_TOKEN" "!bw://dev-keys/tracker/token"}
+            :tools [:claude :codex]}
+  :notes   {:url "https://notes.example.com/mcp" :bearer-token-env "MCP_BEARER_TOKEN"
+            :type :http
+            :tools [:codex]}}
+
+ ;; ---- where skills come from -------------------------------------------
+ :skill-packs
+ {:shared      {:uri "https://github.com/example/agent-skills" :ref "main" :dir "skills"}
+  :skills-repo {:uri "file://$HOME/projects/skills-repo"       :dir "skills"}}
+
+ ;; ---- installed skills --------------------------------------------------
+ :skills
+ {:review {:from :skills-repo :tools [:claude :codex :pi :omp]}
+  :adhoc  {:path "~/experiments/skills/adhoc" :mode :copy :tools [:claude]}}
+
+ ;; ---- one memory file, linked into every agent --------------------------
+ :memory
+ {:shared {:from "~/notes/AGENTS.md" :mode :symlink}}
+
+ ;; ---- providers and provider overrides ----------------------------------
+ :extra-providers
+ {:gateway {:url "https://api.example.com/v1" :key $EXAMPLE_API_KEY
+            :api "responses" :models :all}
+  :hosted  {:url "https://api.vendor.example" :key "!bw://dev-keys/hosted/api-key"}
+  :local   {:url "http://127.0.0.1:8080" :models ["vendor/model-a"]
+            :overrides {"vendor/model-a" {:maxTokens 128000}}
+            :tools [:pi :omp :llm]}}
+
+ ;; ---- per-project overrides ---------------------------------------------
+ ;; :permissions is a mini-DSL:
+ ;;   {:Bash ["bb:*"]}             -> "Bash(bb:*)"
+ ;;   {:Bash :all}                 -> "Bash"
+ ;;   {:Mcp {:repl #{list_repls}}} -> "mcp__repl__list_repls"
+ ;;   {:Mcp {:repl :all}}          -> "mcp__repl"
+ ;; A flat vector of rule strings is already canonical and passes through.
+ :projects
+ {:sample {:parent $workspace                        ; or :path for the full location
+                                                     ; default: ~/projects/<key>
+           :trusted true
+           :executors {:claude {:model "opus" :on #{:ultracode}}}
+           :permissions {:allow {:Bash ["bb:*" "clj:*"]
+                                 :Mcp {:repl #{list_repls}}}
+                         :ask   {:Mcp {:repl #{eval}}}}
+           :mcp [:tracker :search :repl]
+           :skills [:review]}}}

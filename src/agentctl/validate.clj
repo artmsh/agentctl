@@ -331,6 +331,7 @@
          (doseq [[k v] x
                  :when (and (string? v) (>= (count v) 12)
                             (re-find refs/secret-key-pattern (u/kw->str k))
+                            (not (re-find refs/indirection-key-pattern (u/kw->str k)))
                             (= :literal (:ref/kind (refs/parse v))))]
            (vswap! hits conj (u/kw->str k))))
        x)
