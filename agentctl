@@ -1,4 +1,12 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
+# Resolve through symlinks: this file is usually reached via a link on PATH,
+# and the classpath is relative to the real checkout, not to the link.
 set -eu
-ROOT=${0:A:h}
+src=${BASH_SOURCE[0]}
+while [ -L "$src" ]; do
+  dir=$(cd -P "$(dirname "$src")" && pwd)
+  src=$(readlink "$src")
+  case $src in /*) ;; *) src=$dir/$src ;; esac
+done
+ROOT=$(cd -P "$(dirname "$src")" && pwd)
 exec bb -cp "$ROOT/src" -m agentctl.main "$@"
