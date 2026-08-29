@@ -134,7 +134,9 @@
 
 ;; ---------------------------------------------------------------- redaction
 
-(def secret-key-pattern #"(?i)(api[-_]?key|apikey|token|secret|password|passwd|credential|bearer)")
+;; `authorization` is here for the http-MCP header, whose value is the whole
+;; credential while the key name says nothing about it
+(def secret-key-pattern #"(?i)(api[-_]?key|apikey|token|secret|password|passwd|credential|bearer|authorization)")
 
 (def indirection-key-pattern
   "Keys that name where a secret lives rather than holding one: `:key-name`

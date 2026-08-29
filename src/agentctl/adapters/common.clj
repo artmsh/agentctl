@@ -50,8 +50,9 @@
 
 (def project-skill-tools
   "Tools with a project-level skills directory. The rest read skills only from
-   the user's own home."
-  #{:claude})
+   the user's own home. Antigravity walks up from the working directory to the
+   repository root looking for `.agents/`, so a project can carry its own."
+  #{:claude :antigravity})
 
 (def project-scopes
   "Scopes that belong to one project: `:local` writes into the user's own

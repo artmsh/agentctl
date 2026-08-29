@@ -10,15 +10,22 @@
             [clojure.string :as str]
             [clojure.walk :as walk]))
 
-(def all-tools [:claude :codex :pi :omp :llm])
+(def all-tools [:claude :codex :pi :omp :llm :antigravity])
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
-  {:claude #{:settings :mcps :skills :memory :projects :permissions}
-   :codex  #{:settings :mcps :skills :memory :projects :providers}
-   :pi     #{:settings :mcps :skills :memory :providers :projects}
-   :omp    #{:settings :mcps :skills :memory :providers}
-   :llm    #{:providers :settings}})
+  {:claude      #{:settings :mcps :skills :memory :projects :permissions}
+   :codex       #{:settings :mcps :skills :memory :projects :providers}
+   :pi          #{:settings :mcps :skills :memory :providers :projects}
+   :omp         #{:settings :mcps :skills :memory :providers}
+   :llm         #{:providers :settings}
+   :antigravity #{:settings :mcps :skills :memory :projects}})
+
+(def cli-names
+  "The binary each tool is invoked as, where it differs from the tool key."
+  {:antigravity "agy"})
+
+(defn cli-name [tool] (get cli-names tool (name tool)))
 
 (defn supports? [tool kind] (contains? (get capabilities tool #{}) kind))
 
@@ -467,17 +474,25 @@
 
 ;; ---------------------------------------------------------------- entry
 
+(defn parse-config
+  "Normalize config *text*, which need not be what `path` currently holds — the
+   GUI plans against an unsaved buffer. `path` names the source in messages and
+   is what every relative path in the result is resolved against."
+  [text path]
+  (let [path (u/abs-path path)
+        raw (try (edn/read-string text)
+                 (catch Exception e
+                   (throw (ex-info (str "cannot parse " (u/tilde path) ": " (.getMessage e))
+                                   {:path path}))))]
+    (when-not (map? raw)
+      (throw (ex-info "agents.edn must contain a map" {:path path})))
+    (let [{:keys [raw findings]} (expand-lets raw)]
+      (normalize raw path findings))))
+
 (defn load-config
   ([] (load-config default-path))
   ([path]
    (let [path (u/abs-path path)]
      (when-not (u/exists? path)
        (throw (ex-info (str "config not found: " (u/tilde path)) {:path path})))
-     (let [raw (try (edn/read-string (slurp path))
-                    (catch Exception e
-                      (throw (ex-info (str "cannot parse " (u/tilde path) ": " (.getMessage e))
-                                      {:path path}))))]
-       (when-not (map? raw)
-         (throw (ex-info "agents.edn must contain a map" {:path path})))
-       (let [{:keys [raw findings]} (expand-lets raw)]
-         (normalize raw path findings))))))
+     (parse-config (slurp path) path))))

@@ -1,8 +1,10 @@
 (ns agentctl-test
-  (:require [agentctl.adapters.claude :as claude]
+  (:require [agentctl.adapters.antigravity :as antigravity]
+            [agentctl.adapters.claude :as claude]
             [agentctl.adapters.common :as common]
             [agentctl.config :as config]
             [agentctl.core :as core]
+            [agentctl.gui :as gui]
             [agentctl.imports :as imports]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
@@ -312,7 +314,37 @@
   (is (config/supports? :codex :mcps))
   (is (not (config/supports? :unknown :mcps)))
   (is (not (config/supports? :llm :mcps)))
-  (is (= [:claude :codex :pi :omp] (config/tools-for :skills))))
+  (is (config/supports? :antigravity :skills))
+  (is (not (config/supports? :antigravity :providers)))
+  (is (= "agy" (config/cli-name :antigravity)))
+  (is (= "codex" (config/cli-name :codex)))
+  (is (= [:claude :codex :pi :omp :antigravity] (config/tools-for :skills))))
+
+(deftest antigravity-speaks-its-own-mcp-dialect
+  (let [entry #'antigravity/mcp-entry
+        {:keys [local remote off]}
+        (:mcps (config/normalize {:mcps {:local "/bin/echo hi"
+                                         :remote {:url "https://example.com/sse"
+                                                  :headers {"Authorization" "Bearer y"}}
+                                         :off {:cmd "/bin/echo" :enabled false}}}
+                                 "x"))]
+    (testing "stdio servers carry command/args and an explicit disabled flag"
+      (is (= {:command "/bin/echo" :args ["hi"] :disabled false} (entry local nil))))
+    (testing "the endpoint is serverUrl, never url"
+      (let [e (entry remote nil)]
+        (is (= "https://example.com/sse" (:serverUrl e)))
+        (is (nil? (:url e)))
+        (is (= {"Authorization" "Bearer y"} (:headers e)))))
+    (testing ":enabled false is written as disabled true, not as enabled false"
+      (let [e (entry off nil)]
+        (is (true? (:disabled e)))
+        (is (not (contains? e :enabled)))))
+    (testing "keys antigravity already stores survive a rewrite"
+      (is (= "keep" (:someNativeKey (entry local {:someNativeKey "keep"})))))))
+
+(deftest an-authorization-header-is-masked-in-the-plan
+  ;; the value is the whole credential while the key name says nothing about it
+  (is (refs/credential? "Authorization" "Bearer sk-live-abcdefgh")))
 
 ;; ---------------------------------------------------------------- settings schema
 
@@ -764,6 +796,81 @@
         op (plan/link-op {:tool :claude :kind :skills :id :demo
                           :src src :dest (str dir "/dest-skill")})]
     (is (str/includes? (:summary op) (str "symlink " (u/tilde src) " -> " (u/tilde (str dir "/dest-skill")))))))
+
+
+;; ---------------------------------------------------------------- gui
+
+(def gui-config
+  (str "{:executors {:pi {:model \"m1\" :provider \"prov\"}}\n"
+       " :extra-providers {:prov {:url \"http://127.0.0.1:9999\" :models [\"m1\"] :tools [:pi]}}\n"
+       " :projects {:p {:path \"/tmp/agentctl-gui-p\" :executors {:pi {}}}}}\n"))
+
+(deftest gui-coerces-json-filters-into-keywords
+  (testing "keep-projects compares keywords and does no coercion of its own"
+    (let [o (gui/opts-from-json {:tools ["pi"] :kinds ["mcps"] :projects ["example"] :verbose true}
+                                {:file "x"})]
+      (is (= #{:pi} (:tools o)))
+      (is (= #{:mcps} (:kinds o)))
+      (is (= #{:example} (:projects o)))
+      (is (true? (:verbose o)))
+      (is (false? (:show-noop o)))
+      (is (= "x" (:file o)) "base opts survive"))))
+
+(deftest gui-plans-from-a-buffer-that-was-never-saved
+  (let [dir (temp-dir)
+        path (str dir "/agents.edn")
+        p (gui/plan-for-text gui-config path {:tools #{:pi} :kinds #{} :projects #{}})]
+    (is (true? (:ok p)))
+    (is (not (u/exists? path)) "planning writes nothing, not even the config")
+    (is (string? (:summary p)))
+    (is (nil? (:diffs p)) "ops are rendered, never serialized")))
+
+(deftest gui-answers-a-half-typed-file-with-a-message
+  (testing "the live pane means most keystrokes see invalid edn — that is a payload, not a 500"
+    (let [p (gui/plan-for-text "{:mcps {" "/tmp/agentctl-gui/agents.edn" {})]
+      (is (false? (:ok p)))
+      (is (str/includes? (:error p) "cannot parse"))))
+  (testing "a config error is reported the way apply reports it, and plans nothing"
+    (let [p (gui/plan-for-text "{:mcps {:broken {}}}" "/tmp/agentctl-gui/agents.edn" {})]
+      (is (false? (:ok p)))
+      (is (nil? (:plan p)))
+      (is (some #(= "error" (:level %)) (:findings p))))))
+
+(deftest gui-masks-a-credential-it-reads-out-of-a-tool-config
+  (testing "the plan is rendered text precisely so display-side masking applies"
+    (let [dir (temp-dir)
+          proj (str dir "/proj")
+          _ (fs/create-dirs proj)
+          _ (u/write-json! (str proj "/.mcp.json")
+                           {:mcpServers {:shared {:command "/bin/echo"
+                                                  :env {:TOKEN "sk-live-guitest"}}}})
+          text (str "{:mcps {:shared {:cmd \"/bin/echo hi\" :tools [:claude]}}\n"
+                    " :projects {:proj {:path \"" proj "\" :executors {:claude {}} :mcp [:shared]}}}\n")
+          p (gui/plan-for-text text (str dir "/agents.edn") {:tools #{:claude} :kinds #{} :projects #{}})]
+      (is (not (str/includes? (pr-str p) "sk-live-guitest"))))))
+
+(deftest gui-hands-out-nothing-without-this-runs-token
+  (let [ctx {:tok "sekret" :path "/tmp/agentctl-gui/agents.edn" :base-opts {} :lock (Object.)}
+        req (fn [m] (gui/handler ctx (merge {:request-method :get :uri "/"
+                                             :headers {"host" "127.0.0.1:7777"}} m)))]
+    (is (= 403 (:status (req {}))) "no token")
+    (is (= 403 (:status (req {:headers {"host" "127.0.0.1:7777"} :query-string "t=wrong"}))))
+    (is (= 200 (:status (req {:query-string "t=sekret"}))))
+    (is (= 200 (:status (req {:headers {"host" "localhost:7777" "x-agentctl-token" "sekret"}}))))
+    (testing "a page on another origin can reach 127.0.0.1 — but not under that name"
+      (is (= 403 (:status (req {:headers {"host" "attacker.example"} :query-string "t=sekret"})))))
+    (testing "the page carries the token so the first fetch is authorized"
+      (is (str/includes? (:body (req {:query-string "t=sekret"})) "sekret")))))
+
+(deftest gui-apply-is-gated-on-the-plan-the-user-was-shown
+  (let [dir (temp-dir)
+        path (str dir "/agents.edn")
+        res (gui/apply-for-text! gui-config path
+                                 {:tools #{:pi} :kinds #{} :projects #{}
+                                  :expect "0 to add, 0 to change, 0 to remove, 0 unchanged"})]
+    (is (= 409 (:status res)))
+    (is (true? (:stale res)))
+    (is (not (u/exists? path)) "a refused apply writes nothing")))
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

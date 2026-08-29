@@ -4,7 +4,8 @@
    Secrets are never emitted literally — every credential-shaped value becomes
    a !bw:// placeholder and is reported in the notes so the vault item can be
    created before the next apply."
-  (:require [agentctl.adapters.claude :as claude]
+  (:require [agentctl.adapters.antigravity :as antigravity]
+            [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.llm :as llm]
             [agentctl.adapters.omp :as omp]
@@ -59,6 +60,11 @@
               :model-roles (not-empty (into {} (get c :modelRoles)))
               :personality (:personality c)
               :thinking (:defaultThinkingLevel c)})))
+    :antigravity (let [s (u/read-json antigravity/settings-file)
+                       inv (invert antigravity/setting-keys)]
+                   (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
+                                                           (when (or (string? v) (boolean? v)) [dk v]))))
+                                    s)))
     :llm (let [d (some-> (u/slurp-safe (llm/default-model-file)) str/trim)
                aliases (u/read-json (llm/aliases-file))]
            (not-empty (u/prune-nils {:model d :aliases (not-empty aliases)})))}))
@@ -92,8 +98,10 @@
 ;; ---------------------------------------------------------------- mcps
 
 (def ^:private modelled-mcp-keys
-  #{:command :args :url :env :enabled :type :transport :name :disabled_reason
-    :auth_status :startup_timeout_sec :tool_timeout_sec :cwd})
+  #{:command :args :url :env :headers :enabled :type :transport :name :disabled_reason
+    :auth_status :startup_timeout_sec :tool_timeout_sec :cwd
+    ;; antigravity's spelling of :url / :enabled
+    :serverUrl :disabled})
 
 (defn- normalize-entry [tool nm entry]
   (let [t (or (:transport entry) entry)
@@ -104,6 +112,9 @@
       :args (not-empty (vec (or (:args t) (:args entry))))
       :url (or (:url t) (:url entry))
       :env (not-empty (redact-map nm (or (:env t) (:env entry))))
+      ;; an http server's whole credential rides in a header, so it needs the
+      ;; same redaction as :env — left unmodelled it would land in :extra verbatim
+      :headers (not-empty (redact-map nm (or (:headers t) (:headers entry))))
       :enabled (if (false? (:enabled entry)) false nil)
       :cwd (or (:cwd t) (:cwd entry))
       ;; keys agentctl does not model are round-tripped verbatim
@@ -114,7 +125,15 @@
                (for [[k v] (claude/current-mcps)] [(name k) (normalize-entry :claude (name k) v)])
                (for [[nm v] (codex/mcp-list)] [(name nm) (normalize-entry :codex (name nm) v)])
                (for [[k v] (:mcpServers (u/read-json pi/mcp-file))] [(name k) (normalize-entry :pi (name k) v)])
-               (for [[k v] (:mcpServers (u/read-json omp/mcp-file))] [(name k) (normalize-entry :omp (name k) v)]))]
+               (for [[k v] (:mcpServers (u/read-json omp/mcp-file))] [(name k) (normalize-entry :omp (name k) v)])
+               ;; antigravity spells the endpoint `serverUrl` and inverts the
+               ;; flag; translated here so one server declared for several tools
+               ;; still collapses into a single entry instead of a :per-tool split
+               (for [[k v] (:mcpServers (u/read-json antigravity/mcp-file))]
+                 [(name k) (normalize-entry :antigravity (name k)
+                                            (cond-> (dissoc v :serverUrl :disabled)
+                                              (:serverUrl v) (assoc :url (:serverUrl v))
+                                              (true? (:disabled v)) (assoc :enabled false)))]))]
     (into (sorted-map)
           (for [[nm entries] (group-by first named)]
             [(keyword nm) (with-overrides nm (map second entries))]))))
@@ -180,7 +199,8 @@
   {:claude claude/skills-dir
    :codex codex/skills-dir
    :pi pi/skills-dir
-   :omp omp/skills-dir})
+   :omp omp/skills-dir
+   :antigravity antigravity/skills-dir})
 
 (defn- real-path [p]
   (try (str (fs/real-path p)) (catch Exception _ (u/abs-path p))))
@@ -239,7 +259,8 @@
   {:claude claude/memory-file
    :codex codex/memory-file
    :pi pi/memory-file
-   :omp omp/memory-file})
+   :omp omp/memory-file
+   :antigravity antigravity/memory-file})
 
 (defn scan-memory []
   (let [entries (for [[tool path] memory-files
@@ -266,7 +287,9 @@
         claude-projects (for [[k v] (:projects (u/read-json claude/runtime-file))
                               :when (:hasTrustDialogAccepted v)]
                           [(u/key-str k) true :claude])
-        all (group-by first (concat codex-projects pi-trust claude-projects))
+        agy-trust (for [p (:trustedWorkspaces (u/read-json antigravity/settings-file))]
+                    [(str p) true :antigravity])
+        all (group-by first (concat codex-projects pi-trust claude-projects agy-trust))
         interesting (for [[path entries] all
                           ;; "/" and $HOME are trust artefacts, not projects
                           :when (and (some second entries)

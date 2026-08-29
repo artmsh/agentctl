@@ -14,7 +14,9 @@
   :omp    {:personality "pragmatic"
            :model-roles {:default "gateway/vendor/model-a"
                          :tiny    "gateway/anthropic/claude-haiku-4.5"}}
-  :llm    {:model "gpt-5.6-luna" :aliases {:fast "vendor-mini"}}}
+  :llm    {:model "gpt-5.6-luna" :aliases {:fast "vendor-mini"}}
+  ;; antigravity models are display names, not slugs
+  :antigravity {:model "Gemini 3.7 Flash (Medium)" :mode "accept-edits"}}
 
  ;; ---- MCP servers, fanned out to the tools that support them ------------
  ;; A server a project names is provisioned into that project; the rest are
@@ -39,7 +41,7 @@
 
  ;; ---- installed skills --------------------------------------------------
  :skills
- {:review {:from :skills-repo :tools [:claude :codex :pi :omp]}
+ {:review {:from :skills-repo :tools [:claude :codex :pi :omp :antigravity]}
   :adhoc  {:path "~/experiments/skills/adhoc" :mode :copy :tools [:claude]}}
 
  ;; ---- one memory file, linked into every agent --------------------------

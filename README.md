@@ -1,8 +1,8 @@
 # agentctl
 
 `agentctl` declaratively provisions coding-agent configuration across Claude
-Code, Codex, Pi, OpenCode-compatible OMP installations, and Simon Willison's
-`llm` CLI.
+Code, Codex, Pi, OpenCode-compatible OMP installations, Google's Antigravity
+CLI (`agy`), and Simon Willison's `llm` CLI.
 
 One EDN file describes settings, MCP servers, skills, shared memory, model
 providers, and project-specific configuration. `agentctl` compares that desired
@@ -17,6 +17,7 @@ owns.
 - Secrets are references such as `$ENV_VAR` or `!bw://folder/item/field`, not
   plaintext values.
 - Imports redact credential-shaped values instead of printing them.
+- The GUI plans against the buffer but writes nothing until Apply is confirmed.
 - Unavailable vaults and endpoints are reported as unknown, not as successful.
 
 ## Requirements
@@ -87,10 +88,35 @@ agentctl validate    Check configuration and environment
 agentctl import      Print configuration inferred from the environment
 agentctl import!     Merge inferred configuration into the config file
 agentctl state       Print resources owned by agentctl
+agentctl gui         Edit the config in a browser beside its live dry run
 ```
 
 Use `--tool`, `--kind`, or `--project` to narrow an operation. Set
 `AGENTCTL_HOME` to point all managed paths at a scratch home for testing.
+
+## GUI
+
+```sh
+agentctl gui                 # opens a browser on a free loopback port
+agentctl gui --port 8791 --no-open
+```
+
+The page is `agents.edn` on the left and its dry run on the right. Every
+keystroke re-plans, so the plan answers the buffer rather than the file — the
+same output `apply` prints, rendered from the text you are typing. The tool
+chips and the `verbose` / `show noop` toggles are `--tool`, `-v` and
+`--show-noop`.
+
+**Apply** is the only thing that writes. It asks for confirmation, then saves
+the buffer to `agents.edn` (backed up first) and converges, exactly as
+`apply!` would; the file has to be saved or the next CLI run would plan against
+the old config. A plan whose summary moved between the render and the click is
+refused rather than applied — the environment can change under an open page.
+Backups land under `~/.config/agentctl/backups/gui-<timestamp>-<n>/`.
+
+The server binds to `127.0.0.1`, rejects requests carrying any other `Host`,
+and requires a token generated per run and handed out once, in the URL it
+prints. Nothing else on the machine can reach it.
 
 ## MCP scope
 

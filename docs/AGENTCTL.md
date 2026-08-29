@@ -4,7 +4,8 @@ The reference for the DSL and the decisions behind it. `README.md` is the short
 version: install, safety model, MCP scope, project skills, reading a plan.
 
 Declarative provisioning for coding agents — Terraform/Ansible shaped, but the
-managed infrastructure is `claude`, `codex`, `pi`, `omp` and `llm` on one
+managed infrastructure is `claude`, `codex`, `pi`, `omp`, `llm` and
+`antigravity` (the `agy` CLI) on one
 machine.
 
 One file (`~/.config/agents.edn`) declares the desired state. `agentctl`
@@ -17,6 +18,7 @@ agentctl validate    # check config + environment; exit 1 on errors
 agentctl import      # emit the agents.edn implied by the current environment
 agentctl import!     # write it (existing file backed up first)
 agentctl state       # what agentctl currently owns
+agentctl gui         # the same, in a browser, with the dry run live beside it
 ```
 
 ## Design rules
@@ -43,19 +45,41 @@ agentctl state       # what agentctl currently owns
 
 ## Entities
 
-| Entity | claude | codex | pi | omp | llm |
-|---|---|---|---|---|---|
-| `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases |
-| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — |
-| `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — |
-| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md`&nbsp;¹ | `~/.omp/agent/AGENTS.md`&nbsp;¹ | — |
-| `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` |
-| `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — |
-| `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | |
+| Entity | claude | codex | pi | omp | llm | antigravity |
+|---|---|---|---|---|---|---|
+| `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` |
+| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` |
+| `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` |
+| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md`&nbsp;¹ | `~/.omp/agent/AGENTS.md`&nbsp;¹ | — | `~/.gemini/config/rules/AGENTS.md` |
+| `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — |
+| `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` |
+| `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | |
 
 ¹ Unverified: the claude and codex paths are confirmed, the `pi`/`omp` global
 memory paths are the documented convention but were not tested against a
 running agent. Check before relying on them.
+
+The antigravity binary is `agy`, not the tool key. Its two roots are distinct on
+purpose: `~/.gemini/antigravity-cli` holds the CLI's own settings blob, while
+`~/.gemini/config` is the *customization root* the agent scans — the same layout
+a project's `.agents/` directory uses. `~/.gemini/settings.json`,
+`~/.gemini/GEMINI.md` and `~/.gemini/skills` belong to the separate Gemini CLI
+and are never touched.
+
+Antigravity spells an MCP endpoint `serverUrl` and inverts the flag as
+`disabled`; agentctl translates both directions, so one server declared for
+several tools stays a single entry in `agents.edn`. `agy mcp add` is not used —
+it rejects `--env` on http servers, which makes an http server carrying a token
+unexpressible through the CLI.
+
+`trustedWorkspaces` is a bare array rather than a map keyed by path, so agentctl
+unions the declared projects onto it and never removes an entry. `:trusted
+false` is a no-op there, not a revocation. Because the whole list is written by
+one op, that op carries no project: `-p <id>` provisions the project's skills but
+leaves trust alone. Apply without `-p` to grant it.
+
+`:model` for antigravity is a display name (`"Gemini 3.7 Flash (Medium)"`), not
+a slug — a value copied from another tool's stanza fails silently.
 
 ## DSL
 
@@ -79,7 +103,9 @@ sections below explain each part of it.
   :omp    {:personality "pragmatic"
            :model-roles {:default "gateway/vendor/model-a"
                          :tiny    "gateway/anthropic/claude-haiku-4.5"}}
-  :llm    {:model "gpt-5.6-luna" :aliases {:fast "vendor-mini"}}}
+  :llm    {:model "gpt-5.6-luna" :aliases {:fast "vendor-mini"}}
+  ;; antigravity models are display names, not slugs
+  :antigravity {:model "Gemini 3.7 Flash (Medium)" :mode "accept-edits"}}
 
  ;; ---- MCP servers, fanned out to the tools that support them ------------
  ;; :cmd is one shell line (quotes honoured); :command + :args is the same
@@ -102,7 +128,7 @@ sections below explain each part of it.
 
  ;; ---- installed skills --------------------------------------------------
  :skills
- {:review {:from :skills-repo :tools [:claude :codex :pi :omp]}
+ {:review {:from :skills-repo :tools [:claude :codex :pi :omp :antigravity]}
   :adhoc  {:path "~/experiments/skills/adhoc" :mode :copy :tools [:claude]}}
 
  ;; ---- one memory file, linked into every agent --------------------------
@@ -237,8 +263,8 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
-codex, pi and omp have no project-level MCP config; they report the skip as a
-warning rather than silently installing the server user-wide.
+codex, pi, omp and antigravity have no project-level MCP config; they report the
+skip as a warning rather than silently installing the server user-wide.
 
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` ref that resolves at apply time, or a token
@@ -286,9 +312,10 @@ A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
-Only claude has a project-level skills directory. For codex, pi and omp a
-project's declared skills are installed user-wide instead — that is the only
-place those tools read skills from — and are owned there.
+claude (`<project>/.claude/skills`) and antigravity (`<project>/.agents/skills`)
+have a project-level skills directory. For codex, pi and omp a project's
+declared skills are installed user-wide instead — that is the only place those
+tools read skills from — and are owned there.
 
 ### MCP shorthand
 
@@ -385,6 +412,8 @@ end up writing a resolved secret into a tool's config file are tagged
     --deep         validate: probe the network (provider /models, git remotes)
     --replace      import!: overwrite instead of merging into the existing file
 -y, --yes          apply!: skip the confirmation prompt
+    --port N       gui: listen on this port (default: any free one)
+    --no-open      gui: do not open a browser
 ```
 
 ### Reading a plan
@@ -419,6 +448,36 @@ setting is declared, it was read, and the file agrees.
 drives) at a scratch tree — that is how the e2e test provisions a throwaway
 home.
 
+### gui
+
+A loopback HTTP server and one page: the config on the left, its dry run on the
+right. It adds no capability the CLI does not have — `/api/plan` is `apply` and
+`/api/apply` is `apply!` — and exists because a plan read *while* editing is a
+different thing from a plan read after saving and re-running.
+
+- **The buffer is the config.** `config/parse-config` normalizes text that need
+  not be on disk; the path only names the source and is what relative paths
+  resolve against. Every keystroke re-plans, debounced. Invalid EDN is the
+  normal state of a file being typed into, so it comes back as a message and
+  the last good plan stays on screen, dimmed.
+- **The plan crosses the wire as rendered text, never as ops.** Masking lives in
+  `plan/render-val`; serializing `:diffs` would route around it and put a
+  credential read out of an existing tool config into a JSON payload.
+  `plan/*color*` is bound to `false` and the page colours by sigil.
+- **Apply is gated three ways**: an explicit `confirm` in the request body (the
+  browser dialog is a courtesy, not the gate), a re-plan on the server, and the
+  summary line the user was looking at — a plan that no longer says what it said
+  is refused with 409 rather than applied.
+- **Apply saves the buffer** to `agents.edn` after backing it up. Converging
+  onto text that was never saved would show up as drift on the next CLI run.
+- **A backup directory per request.** `util/backup!` assumes one run per
+  process — its stamp is a per-process `delay` and the first copy of a file
+  wins. A long-lived server breaks that, so each apply binds `*backup-root*` to
+  `backups/gui-<timestamp>-<n>/`.
+- **Loopback only, `Host` checked, one token per run**, handed out once in the
+  URL the command prints. The server writes files; it is a capability, not a
+  page. Plan and apply are serialized against each other.
+
 ## validate
 
 Checks CLI presence, skill sources and `SKILL.md` frontmatter, pack checkouts,
@@ -450,3 +509,8 @@ tests/run.sh                       # everything, against a scratch HOME
 bb -cp src tests/agentctl_test.clj  # unit
 tests/test-agentctl.sh              # e2e
 ```
+
+The e2e suite drives the GUI as a real subprocess (step 16): it parses the URL
+the command prints, plans a buffer the file does not hold, asserts an
+unconfirmed and a stale apply write nothing, and checks that a credential in an
+existing `.mcp.json` never reaches the browser.

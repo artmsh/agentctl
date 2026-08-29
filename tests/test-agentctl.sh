@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end: agentctl converges a scratch HOME, stays converged, and prunes.
-# Uses only the file-driven adapters (pi, omp) so no external CLI is required.
+# Uses only the file-driven adapters (pi, omp, antigravity) so no external CLI is required.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SB=$(mktemp -d "${TMPDIR:-/tmp}/agentctl-e2e.XXXXXX")
 trap 'rm -rf "$SB"' EXIT
+# agentctl normalizes every path it writes; a TMPDIR with a trailing slash would
+# otherwise make the fixture and the file disagree by one character
+SB=$(cd "$SB" && pwd -P)
 
 export AGENTCTL_HOME="$SB"
 run() { "$ROOT/agentctl" "$@"; }
@@ -15,7 +18,7 @@ run() { "$ROOT/agentctl" "$@"; }
 # is every CI runner. The adapters exercised here write files directly; the
 # stubs only have to exist and succeed.
 mkdir -p "$SB/bin"
-for cli in claude codex pi omp llm; do
+for cli in claude codex pi omp llm agy; do
   printf '#!/bin/sh\nexit 0\n' > "$SB/bin/$cli"
   chmod +x "$SB/bin/$cli"
 done
@@ -245,5 +248,171 @@ d = json.load(open(sys.argv[1]))
 assert [p for p, v in d.get("projects", {}).items()
         if "handmade" in v.get("mcpServers", {})]
 PY
+
+echo "15. antigravity converges, and trust is unioned rather than overwritten"
+mkdir -p "$SB/.gemini/antigravity-cli" "$SB/aproj"
+printf '{"trustedWorkspaces": ["%s/handtrusted"], "model": "old"}\n' "$SB" \
+  > "$SB/.gemini/antigravity-cli/settings.json"
+cat > "$SB/agy.edn" <<EDN
+{:executors {:antigravity {:model "Gemini 3.7 Flash (Medium)" :mode "accept-edits"}}
+ :mcps {:agydemo {:command "/bin/echo" :args ["hi"] :tools [:antigravity]}
+        :agyhttp {:url "https://example.com/sse" :headers {"Authorization" "Bearer y"}
+                  :tools [:antigravity]}}
+ :skill-packs {:demo15 {:uri "file://$SB/packs/demo" :dir "skills"}}
+ :skills {:demo-skill {:from :demo15 :tools [:antigravity] :scope :global}}
+ :memory {:shared {:from "$SB/brain/AGENTS.md" :tools [:antigravity]}}
+ :projects {:aproj {:path "$SB/aproj" :trusted true :executors {:antigravity {}}
+                    :skills [:demo15]}}}
+EDN
+run apply! -f "$SB/agy.edn" -t antigravity -y > "$SB/apply15.txt"
+[ -L "$SB/.gemini/config/skills/demo-skill" ] || { cat "$SB/apply15.txt"; fail "antigravity skill not linked"; }
+[ -L "$SB/.gemini/config/rules/AGENTS.md" ] || { cat "$SB/apply15.txt"; fail "antigravity memory not linked"; }
+[ -L "$SB/aproj/.agents/skills/demo-skill" ] || { cat "$SB/apply15.txt"; fail "project skill not linked into .agents"; }
+python3 - "$SB/.gemini/config/mcp_config.json" <<'PY' || fail "antigravity mcp_config.json wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))["mcpServers"]
+assert d["agydemo"] == {"command": "/bin/echo", "args": ["hi"], "disabled": False}, d["agydemo"]
+h = d["agyhttp"]
+assert h["serverUrl"] == "https://example.com/sse", h
+assert h["headers"] == {"Authorization": "Bearer y"}, h
+assert h["disabled"] is False and "url" not in h and "enabled" not in h, h
+PY
+python3 - "$SB/.gemini/antigravity-cli/settings.json" "$SB" <<'PY' || fail "antigravity settings/trust wrong"
+import json, sys
+d = json.load(open(sys.argv[1])); sb = sys.argv[2]
+assert d["model"] == "Gemini 3.7 Flash (Medium)", d
+assert d["agentMode"] == "accept-edits", d
+assert sorted(d["trustedWorkspaces"]) == sorted([sb + "/handtrusted", sb + "/aproj"]), d
+PY
+set +e
+run apply -f "$SB/agy.edn" -t antigravity > "$SB/plan15.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/plan15.txt"; fail "antigravity left drift behind"; }
+run import -f "$SB/none.edn" | grep -v '^;;' > "$SB/imported15.edn"
+grep -q 'serverUrl' "$SB/imported15.edn" && fail "import leaked antigravity's native key spelling"
+# an http server's credential lives in a header, not in :env; unmodelled it would
+# be round-tripped into the generated DSL in the clear
+grep -q 'Bearer y' "$SB/imported15.edn" && fail "import wrote an http MCP credential in plaintext"
+grep -q '!bw://agyhttp/Authorization' "$SB/imported15.edn" \
+  || { cat "$SB/imported15.edn"; fail "http MCP header not redacted to a bw placeholder"; }
+set +e
+# import does not discover a project's own skills for any tool, so only the
+# user-wide kinds are expected to come back converged
+run apply -f "$SB/imported15.edn" -t antigravity -k settings -k mcps -k memory > "$SB/plan15b.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config should already be converged"; }
+
+echo "16. gui plans a buffer live and applies only when confirmed"
+mkdir -p "$SB/gproj" "$SB/gsecret"
+cat > "$SB/gui.edn" <<EDN
+{:executors {:pi {:model "gm" :provider "gprov"}}
+ :mcps {:gdemo {:command "/bin/echo" :args ["hi"] :tools [:pi]}}
+ :extra-providers {:gprov {:url "http://127.0.0.1:9999" :models ["gm"] :tools [:pi]}}
+ :projects {:gproj {:path "$SB/gproj" :executors {:pi {}}}}}
+EDN
+# the buffer the browser holds: one edit on top of what the file says
+{ cat "$SB/gui.edn"; echo ";; edited in the gui"; } > "$SB/gui-buffer.edn"
+
+"$ROOT/agentctl" gui -f "$SB/gui.edn" --port 0 --no-open > "$SB/gui.log" 2>&1 &
+GUI_PID=$!
+trap 'kill "$GUI_PID" 2>/dev/null || true; rm -rf "$SB"' EXIT
+for _ in $(seq 1 100); do grep -q 'http://127.0.0.1' "$SB/gui.log" && break; sleep 0.1; done
+URL=$(grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$SB/gui.log" | head -1)
+[ -n "$URL" ] || { cat "$SB/gui.log"; fail "gui did not print a URL to open"; }
+BASE=${URL%%/\?t=*}
+TOK=${URL##*t=}
+
+gapi() { # gapi <path> [json-body-file]
+  local path=$1 body=${2:-}
+  if [ -n "$body" ]; then
+    curl -sS -X POST -H "X-Agentctl-Token: $TOK" -H 'content-type: application/json' \
+      --data-binary "@$body" "$BASE$path"
+  else
+    curl -sS -H "X-Agentctl-Token: $TOK" "$BASE$path"
+  fi
+}
+gstatus() { # gstatus <path> <json-body-file>
+  curl -sS -o /dev/null -w '%{http_code}' -X POST -H "X-Agentctl-Token: $TOK" \
+    -H 'content-type: application/json' --data-binary "@$2" "$BASE$1"
+}
+body() { # body <config-file> [extra-json] -> request body on stdout
+  local cfg=$1 extra=${2:-}
+  [ -n "$extra" ] || extra='{}'
+  python3 -c 'import json,sys; d=json.loads(sys.argv[2]); d["text"]=open(sys.argv[1]).read(); print(json.dumps(d))' \
+    "$cfg" "$extra"
+}
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/api/state")
+[ "$code" = 403 ] || fail "gui served state without this run's token (got $code)"
+
+gapi /api/config | grep -q 'gprov' || fail "gui did not serve the config file"
+
+body "$SB/gui-buffer.edn" > "$SB/gui-plan.json"
+gapi /api/plan "$SB/gui-plan.json" > "$SB/gui-plan.out"
+python3 - "$SB/gui-plan.out" <<'PY' || fail "gui plan wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"], d
+assert d["changes"] > 0, d
+assert "mcps/gdemo" in d["plan"], d["plan"]
+PY
+grep -q gdemo "$SB/.pi/agent/mcp.json" 2>/dev/null && fail "a gui plan must not write anything"
+grep -q 'edited in the gui' "$SB/gui.edn" && fail "a gui plan must not save the buffer"
+
+echo '{"text": "{:mcps {"}' > "$SB/gui-broken.json"
+gapi /api/plan "$SB/gui-broken.json" | grep -q 'cannot parse' \
+  || fail "half-typed edn should come back as a message, not a failure"
+
+# a credential the plan reads out of an existing tool config is masked, the way
+# the cli masks it — the gui ships rendered text for exactly this reason
+printf '{"mcpServers": {"gshared": {"command": "/bin/echo", "env": {"TOKEN": "sk-live-gui"}}}}\n' \
+  > "$SB/gsecret/.mcp.json"
+cat > "$SB/gui-secret.edn" <<EDN
+{:mcps {:gshared {:cmd "/bin/echo hi" :tools [:claude]}}
+ :projects {:gsecret {:path "$SB/gsecret" :executors {:claude {}} :mcp [:gshared]}}}
+EDN
+body "$SB/gui-secret.edn" > "$SB/gui-secret.json"
+gapi /api/plan "$SB/gui-secret.json" > "$SB/gui-secret.out"
+grep -q 'also declared in' "$SB/gui-secret.out" \
+  || { cat "$SB/gui-secret.out"; fail "orphaned .mcp.json not reported through the gui"; }
+grep -q 'sk-live-gui' "$SB/gui-secret.out" && fail "gui plan leaked a live credential"
+
+body "$SB/gui-buffer.edn" > "$SB/gui-noconfirm.json"
+code=$(gstatus /api/apply "$SB/gui-noconfirm.json")
+[ "$code" = 400 ] || fail "gui applied without an explicit confirmation (got $code)"
+grep -q gdemo "$SB/.pi/agent/mcp.json" 2>/dev/null && fail "unconfirmed apply wrote files"
+
+body "$SB/gui-buffer.edn" '{"confirm": true, "expect": "0 to add, 0 to change, 0 to remove, 0 unchanged"}' \
+  > "$SB/gui-stale.json"
+code=$(gstatus /api/apply "$SB/gui-stale.json")
+[ "$code" = 409 ] || fail "gui applied a plan that no longer matched what was shown (got $code)"
+grep -q gdemo "$SB/.pi/agent/mcp.json" 2>/dev/null && fail "stale apply wrote files"
+
+body "$SB/gui-buffer.edn" '{"confirm": true}' > "$SB/gui-apply.json"
+gapi /api/apply "$SB/gui-apply.json" > "$SB/gui-apply.out"
+python3 - "$SB/gui-apply.out" <<'PY' || fail "gui apply wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"] and d["applied"] > 0 and not d["failed"], d
+assert d["backups"], d
+PY
+grep -q 'gdemo' "$SB/.pi/agent/mcp.json" || fail "gui apply did not converge pi"
+grep -q 'edited in the gui' "$SB/gui.edn" || fail "gui apply did not save the buffer it applied"
+
+# a second apply in the same process must not land in the first one's backup
+# directory, where first-copy-wins would drop the state a backup exists to keep
+{ cat "$SB/gui-buffer.edn"; echo ";; twice"; } > "$SB/gui-buffer2.edn"
+body "$SB/gui-buffer2.edn" '{"confirm": true}' > "$SB/gui-apply2.json"
+gapi /api/apply "$SB/gui-apply2.json" > /dev/null
+[ "$(ls -d "$SB"/.config/agentctl/backups/gui-* | wc -l)" -ge 2 ] \
+  || fail "two gui applies shared one backup directory"
+
+set +e
+run apply -f "$SB/gui.edn" -t pi > "$SB/plan16.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/plan16.txt"; fail "the cli sees drift after a gui apply"; }
+
+kill "$GUI_PID" 2>/dev/null || true
+trap 'rm -rf "$SB"' EXIT
 
 echo "all agentctl e2e checks passed"

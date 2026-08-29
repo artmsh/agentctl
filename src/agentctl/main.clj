@@ -2,6 +2,7 @@
   "CLI entrypoint: apply / apply! / validate / import / import! / plan / state."
   (:require [agentctl.config :as config]
             [agentctl.core :as core]
+            [agentctl.gui :as gui]
             [agentctl.imports :as imports]
             [agentctl.plan :as plan]
             [agentctl.state :as state]
@@ -14,7 +15,7 @@
 (def usage
   (str/join
    "\n"
-   ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp, llm)"
+   ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp, llm, antigravity)"
     ""
     "USAGE"
     "  agentctl <command> [options]"
@@ -26,10 +27,11 @@
     "  import           Show the agents.edn that the current environment implies."
     "  import!          Write that agents.edn (existing file is backed up first)."
     "  state            Show what agentctl currently owns."
+    "  gui              Edit agents.edn in a browser beside its live dry run."
     ""
     "OPTIONS"
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
-    "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm"
+    "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"
     "                       settings mcps skills providers memory projects skill-packs"
     "  -p, --project ID     Restrict to one declared project (repeatable); selects"
@@ -40,6 +42,8 @@
     "      --deep           validate: also probe the network (provider URLs, git remotes)"
     "      --replace        import!: overwrite instead of merging into the existing file"
     "  -y, --yes            apply!: do not prompt before mutating"
+    "      --port N         gui: listen on this port (default: any free one)"
+    "      --no-open        gui: do not open a browser"
     "  -h, --help           This message"]))
 
 (defn parse-args [args]
@@ -56,6 +60,8 @@
         "--deep" (recur (rest args) (assoc opts :deep true))
         "--replace" (recur (rest args) (assoc opts :replace true))
         ("-y" "--yes") (recur (rest args) (assoc opts :yes true))
+        "--port" (recur (drop 2 args) (assoc opts :port (str (second args))))
+        "--no-open" (recur (rest args) (assoc opts :no-open true))
         ("-h" "--help") (recur (rest args) (assoc opts :help true))
         (if (:command opts)
           (recur (rest args) (update opts :rest (fnil conj []) a))
@@ -162,6 +168,16 @@
         (println (format "\n%d managed resource(s)" (count (:managed st))))))
     (System/exit 0)))
 
+(defn cmd-gui [opts]
+  (let [port (some-> (:port opts) str parse-long)]
+    (when (and (:port opts) (nil? port))
+      (println (str "--port wants a number, not " (pr-str (:port opts))))
+      (System/exit 1))
+    (gui/run! (assoc opts
+                     :port (or port 0)
+                     :path (or (:file opts) config/default-path)
+                     :open? (not (:no-open opts))))))
+
 (defn -main [& args]
   (let [{:keys [command help] :as opts} (parse-args args)]
     (cond
@@ -176,6 +192,7 @@
           "import" (cmd-import opts false)
           "import!" (cmd-import opts true)
           "state" (cmd-state opts)
+          "gui" (cmd-gui opts)
           (do (println (str "unknown command: " command "\n"))
               (println usage)
               (System/exit 1)))

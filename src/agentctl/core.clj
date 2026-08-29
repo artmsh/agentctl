@@ -1,6 +1,7 @@
 (ns agentctl.core
   "Planning engine: turn a normalized config into ops, execute them, track state."
-  (:require [agentctl.adapters.claude :as claude]
+  (:require [agentctl.adapters.antigravity :as antigravity]
+            [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
             [agentctl.adapters.llm :as llm]
@@ -17,7 +18,8 @@
    :codex  {:plan codex/plan  :present? codex/present?}
    :pi     {:plan pi/plan     :present? pi/present?}
    :omp    {:plan omp/plan    :present? omp/present?}
-   :llm    {:plan llm/plan    :present? llm/present?}})
+   :llm    {:plan llm/plan    :present? llm/present?}
+   :antigravity {:plan antigravity/plan :present? antigravity/present?}})
 
 (defn- selected-tools
   "`--tool` is a direct order and outranks the config; without one the config
@@ -83,7 +85,7 @@
      [t :skills (keyword (name pid) (name sid))])
    (for [[id p] (:providers cfg) t (:tools p)] [t :providers id])
    (for [[id m] (:memory cfg) t (:tools m)] [t :memory id])
-   (for [[id _] (:projects cfg) t [:claude :codex :pi]] [t :projects id]))))
+   (for [[id _] (:projects cfg) t (config/tools-for :projects)] [t :projects id]))))
 
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.

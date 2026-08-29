@@ -28,7 +28,8 @@
                             (mapcat :tools (vals (:mcps cfg)))
                             (mapcat :tools (vals (:providers cfg)))))]
     (for [t (sort-by name needed)]
-      (if-let [path (u/which (name t))]
+      ;; the binary is not always the tool's own name — antigravity ships `agy`
+      (if-let [path (u/which (config/cli-name t))]
         (f :ok [:cli t] (u/tilde path))
         (f :error [:cli t] "CLI not found on PATH")))))
 
@@ -318,7 +319,8 @@
    [:pi (str u/home "/.pi/agent/models.json")]
    [:pi (str u/home "/.pi/agent/mcp.json")]
    [:omp (str u/home "/.omp/agent/models.yml")]
-   [:claude (str u/home "/.claude.json")]])
+   [:claude (str u/home "/.claude.json")]
+   [:antigravity (str u/home "/.gemini/config/mcp_config.json")]])
 
 (defn check-config-secrets
   "agents.edn is the one file agentctl owns outright, so a secret typed straight
