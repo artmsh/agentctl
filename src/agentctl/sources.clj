@@ -62,13 +62,35 @@
 (defn materialized? [pack]
   (boolean (some-> (pack-skills-dir pack) u/exists?)))
 
+(defn locate-skill
+  "Which declared packs carry a skill directory literally named `id` — the
+   lookup that makes a `:skills {id {:from pack}}` entry optional for the
+   common case. `:found` pairs a pack id with the directory found there;
+   `:not-ready` lists packs not materialized yet, which cannot be ruled out
+   as the skill's home. Two packs shipping the same skill name is not
+   resolved by guessing — the caller decides what to do with more than one
+   `:found` entry."
+  [skill-packs id]
+  (reduce (fn [acc [pid pack]]
+            (if (materialized? pack)
+              (if-let [dir (some #(when (= (name id) (fs/file-name %)) %) (skill-dirs pack))]
+                (update acc :found conj [pid dir])
+                acc)
+              (update acc :not-ready conj pid)))
+          {:found [] :not-ready []}
+          skill-packs))
+
 (defn project-skills
   "What a project's `:skills` names, resolved.
 
-   An id is either a declared skill or a whole pack — naming a pack asks for
-   every skill in it, which is the only way to follow a pack that grows. A pack
-   that is not on disk yet can name nothing, so it is reported as pending
-   rather than silently contributing no skills."
+   An id is, in order: a declared skill, a whole pack — naming a pack asks for
+   every skill in it, which is the only way to follow a pack that grows — or a
+   skill directory found inside exactly one declared pack, which needs no
+   `:skills` entry of its own at all. A pack that is not on disk yet, or that
+   might hold the bare id but hasn't been scanned, can name nothing yet, so it
+   is reported as pending rather than silently contributing no skills. A bare
+   id found in more than one pack is ambiguous — an explicit `:skills {id
+   {:from pack}}` entry is how that gets broken."
   [cfg proj]
   (reduce (fn [acc id]
             (cond
@@ -85,8 +107,18 @@
                           acc (skill-dirs pack))
                   (update acc :pending conj id)))
 
-              :else (update acc :unknown conj id)))
-          {:skills {} :pending [] :unknown []}
+              :else
+              (let [{:keys [found not-ready]} (locate-skill (:skill-packs cfg) id)]
+                (cond
+                  (= 1 (count found))
+                  (let [[pid dir] (first found)
+                        s (pack-skill pid dir)]
+                    (assoc-in acc [:skills (:id s)] s))
+
+                  (seq found) (update acc :ambiguous conj {:id id :packs (mapv first found)})
+                  (seq not-ready) (update acc :pending conj id)
+                  :else (update acc :unknown conj id)))))
+          {:skills {} :pending [] :unknown [] :ambiguous []}
           (sort (:skills proj))))
 
 (defn for-tool

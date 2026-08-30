@@ -412,7 +412,7 @@
    cache is the single copy agentctl keeps current, and the project should read
    from it."
   [cfg id proj st]
-  (let [{:keys [skills pending unknown]} (sources/project-skills cfg proj)
+  (let [{:keys [skills pending unknown ambiguous]} (sources/project-skills cfg proj)
         dir (project-skills-dir proj)
         managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
     (concat
@@ -434,6 +434,12 @@
        (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
                  :id (keyword (name id) (name uid))
                  :summary (str "no skill or skill-pack named " uid " — nothing to link")}))
+     (for [{sid :id packs :packs} ambiguous]
+       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
+                 :id (keyword (name id) (name sid))
+                 :summary (str "skill " (name sid) " exists in more than one pack ("
+                               (str/join ", " (map name packs))
+                               ") — declare :skills {" (name sid) " {:from <pack>}} to disambiguate")}))
      ;; ours to remove: this project's own skills, dropped from agents.edn
      (for [mid managed
            :when (and (= (name id) (namespace mid))

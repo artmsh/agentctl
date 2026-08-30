@@ -5,6 +5,7 @@
    consumes the normalized shape produced here, so adapters never re-interpret
    surface syntax."
   (:require [agentctl.refs :as refs]
+            [agentctl.sources :as sources]
             [agentctl.util :as u]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -370,6 +371,26 @@
                          #{} (:projects cfg)))
       (set all-tools)))
 
+(defn- bare-project-skills
+  "A project can name a skill id that resolves only by scanning a declared
+   pack's contents (`sources/locate-skill`), with no `:skills` entry at all.
+   `scope-skills` derives `:tools` by walking every id a project names, so a
+   bare id needs the same normalized shape as a declared one or it never
+   picks up the executors that named it — this synthesizes that shape for
+   every id that resolves to exactly one pack. Ambiguous, pending and unknown
+   ids are left out; `sources/project-skills` and `structural-findings`
+   resolve those themselves at plan/validate time, where the distinction
+   between the three actually matters."
+  [declared-skills skill-packs projects]
+  (into {}
+        (for [[_ proj] projects
+              sid (:skills proj)
+              :when (not (or (contains? declared-skills sid) (contains? skill-packs sid)))
+              :let [{:keys [found]} (sources/locate-skill skill-packs sid)]
+              :when (= 1 (count found))
+              :let [[pid _] (first found)]]
+          [sid {:id sid :kind :skills :from pid :mode :symlink}])))
+
 (defn- scope-skills
   "A skill a project asks for belongs to that project. Declaring it under
    `:skills` is how it gets a source; naming it in a project's `:skills` is
@@ -404,7 +425,10 @@
           skills)))
 
 (defn normalize [raw path & [load-findings]]
-  (let [projects (into {} (map (fn [[k v]] [k (norm-project k v)])) (:projects raw))]
+  (let [projects (into {} (map (fn [[k v]] [k (norm-project k v)])) (:projects raw))
+        skill-packs (into {} (map (fn [[k v]] [k (norm-pack k v)])) (:skill-packs raw))
+        declared-skills (into {} (map (fn [[k v]] [k (norm-skill k v)])) (:skills raw))
+        bare-skills (bare-project-skills declared-skills skill-packs projects)]
     {:source path
      :raw raw
      :load-findings (vec load-findings)
@@ -412,10 +436,10 @@
                   (or (:executors raw) (:cli-code raw)))
      :mcps (scope-mcps (into {} (map (fn [[k v]] [k (norm-mcp k v)])) (:mcps raw))
                        projects)
-     :skills (scope-skills (into {} (map (fn [[k v]] [k (norm-skill k v)])) (:skills raw))
-                           (:skills raw)
-                           projects)
-     :skill-packs (into {} (map (fn [[k v]] [k (norm-pack k v)])) (:skill-packs raw))
+     ;; a bare id resolved via a pack scan gets the same :tools derivation as
+     ;; a declared skill — see bare-project-skills
+     :skills (scope-skills (merge bare-skills declared-skills) (:skills raw) projects)
+     :skill-packs skill-packs
      :providers (into {} (map (fn [[k v]] [k (norm-provider k v)]))
                       (merge (:extra-providers raw) (:providers raw)))
      :memory (into {} (map (fn [[k v]] [k (norm-memory k v)])) (:memory raw))
@@ -463,12 +487,23 @@
            mid (:mcp proj)
            :when (not (contains? (:mcps cfg) mid))]
        (finding :error [:projects pid :mcp] (str "references undefined mcp " mid)))
+     ;; a bare id can also resolve to a skill directory found inside a
+     ;; declared pack (`sources/locate-skill`) — no `:skills` entry required
+     ;; for that, the common case this DSL is built to avoid
      (for [[pid proj] (:projects cfg)
            sid (:skills proj)
-           :when (not (or (contains? (:skills cfg) sid)
-                          (contains? (:skill-packs cfg) sid)))]
+           :when (not (or (contains? (:skills cfg) sid) (contains? (:skill-packs cfg) sid)))
+           :let [{:keys [found not-ready]} (sources/locate-skill (:skill-packs cfg) sid)]
+           :when (and (empty? found) (empty? not-ready))]
+       (finding :error [:projects pid :skills] (str "references undefined skill or pack " sid)))
+     (for [[pid proj] (:projects cfg)
+           sid (:skills proj)
+           :when (not (or (contains? (:skills cfg) sid) (contains? (:skill-packs cfg) sid)))
+           :let [{:keys [found]} (sources/locate-skill (:skill-packs cfg) sid)]
+           :when (> (count found) 1)]
        (finding :error [:projects pid :skills]
-                (str "references undefined skill or pack " sid)))
+                (str sid " exists in more than one pack (" (str/join ", " (map (comp name first) found))
+                     ") — declare :skills {" (name sid) " {:from <pack>}} to disambiguate")))
      (for [[id m] (:memory cfg) :when (not (u/exists? (:from m)))]
        (finding :error [:memory id] (str "source not found: " (u/tilde (:from m)))))
      (for [[id h] (get-in cfg [:tools :claude :hooks]) :when (nil? (:event h))]

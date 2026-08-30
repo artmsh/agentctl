@@ -1,6 +1,7 @@
 (ns agentctl-test
   (:require [agentctl.adapters.antigravity :as antigravity]
             [agentctl.adapters.claude :as claude]
+            [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
             [agentctl.config :as config]
             [agentctl.core :as core]
@@ -642,8 +643,50 @@
       (is (= :project (get-in cfg [:skills :wrap-up :scope])))
       (is (= :global (get-in cfg [:skills :loose :scope]))))
     (testing "an unfetched pack can enumerate nothing and says so"
+      ;; :nonesuch turns pending too, not unknown — it might yet be a bare
+      ;; skill name hiding inside the pack that has not been cloned
       (let [cfg2 (assoc-in cfg [:skill-packs :superpowers :root] (str dir "/not-cloned"))]
-        (is (= [:superpowers] (:pending (sources/project-skills cfg2 proj))))))))
+        (is (= #{:nonesuch :superpowers} (set (:pending (sources/project-skills cfg2 proj)))))
+        (is (empty? (:unknown (sources/project-skills cfg2 proj))))))))
+
+(deftest a-bare-skill-name-resolves-without-a-skills-entry
+  (let [dir (temp-dir)
+        pack-a (str dir "/pack-a")
+        pack-b (str dir "/pack-b")
+        _ (doseq [[p n] [[pack-a "wrap-up"] [pack-b "shared"] [pack-a "shared"]]]
+            (fs/create-dirs (str p "/skills/" n))
+            (spit (str p "/skills/" n "/SKILL.md") "---\nname: x\n---\n"))
+        cfg (config/normalize {:skill-packs {:a {:uri (str "file://" pack-a)}
+                                             :b {:uri (str "file://" pack-b)}}
+                               :projects {:example {:path (str dir "/example")
+                                                      :executors #{:claude :codex}
+                                                      :skills [:wrap-up :shared]}}}
+                              "x")
+        proj (get-in cfg [:projects :example])
+        {:keys [skills ambiguous unknown]} (sources/project-skills cfg proj)]
+    (testing "found in exactly one pack — no :skills entry needed at all"
+      (is (contains? skills :wrap-up))
+      (is (str/ends-with? (:source (:wrap-up skills)) "pack-a/skills/wrap-up")))
+    (testing "found in more than one pack is reported, not guessed"
+      (is (= 1 (count ambiguous)))
+      (is (= :shared (:id (first ambiguous))))
+      (is (= #{:a :b} (set (:packs (first ambiguous)))))
+      (is (empty? unknown)))
+    (testing "structural-findings agrees: no entry needed, ambiguity is an error"
+      (let [findings (config/structural-findings cfg)]
+        (is (not-any? #(str/includes? (:message %) "wrap-up") findings))
+        (is (some #(and (= :error (:level %)) (str/includes? (:message %) "shared")
+                       (str/includes? (:message %) "more than one pack"))
+                  findings))))
+    (testing "codex has no project skills directory, so a bare-resolved skill still reaches it user-wide"
+      ;; regression: dropping the :skills entry must not silently stop codex
+      ;; (and pi/omp, same shape) from installing a skill it only ever
+      ;; discovered by naming a project's executors — see bare-project-skills
+      (is (contains? (:skills cfg) :wrap-up))
+      (is (contains? (:tools (:wrap-up (:skills cfg))) :codex))
+      (is (contains? (set (core/inventory cfg)) [:codex :skills :wrap-up]))
+      (is (some #(and (= :create (:action %)) (= :wrap-up (:id %)))
+                (codex/skill-ops cfg state/empty-state))))))
 
 (deftest a-project-skill-is-owned-where-it-was-installed
   (let [dir (temp-dir)

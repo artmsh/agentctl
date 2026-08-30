@@ -159,7 +159,7 @@
   "Skills a project named, linked into the project's own `.agents/skills` —
    the workspace customization root agy walks up to from the working directory."
   [cfg id proj st]
-  (let [{:keys [skills pending unknown]} (sources/project-skills cfg proj)
+  (let [{:keys [skills pending unknown ambiguous]} (sources/project-skills cfg proj)
         dir (project-skills-dir proj)
         managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
     (concat
@@ -180,6 +180,12 @@
        (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
                  :id (keyword (name id) (name uid))
                  :summary (str "no skill or skill-pack named " uid " — nothing to link")}))
+     (for [{sid :id packs :packs} ambiguous]
+       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
+                 :id (keyword (name id) (name sid))
+                 :summary (str "skill " (name sid) " exists in more than one pack ("
+                               (str/join ", " (map name packs))
+                               ") — declare :skills {" (name sid) " {:from <pack>}} to disambiguate")}))
      (keep (fn [mid]
              (when (and (= (name id) (namespace mid))
                         (not (contains? skills (keyword (name mid)))))

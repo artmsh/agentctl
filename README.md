@@ -223,19 +223,28 @@ to that tool, not to agents.edn.
 
 ## Project skills
 
-A project's `:skills` names declared skills, whole skill-packs, or both:
+A project's `:skills` names a whole skill-pack, a skill declared under `:skills`,
+or — the common case — a skill directory found inside a declared pack, with no
+`:skills` entry at all:
 
 ```clojure
-:skills   {:review {:from :shared}}
-:projects {:sample {:skills [:shared :review]}}
+:skill-packs {:shared {:uri "https://github.com/example/agent-skills"}}
+:projects    {:sample {:skills [:review]}}
 ```
 
-Naming a pack asks for every skill in it — the way to follow a pack that grows.
-They are linked into `<project>/.claude/skills/`, not the user's home: a skill a
-project asked for is that project's, and a link already pointing elsewhere (a
-hand-made one, or a dangling relative one) is repointed at the pack cache under
-`~/.agents/skill-packs`. `:scope :global` on the declaration keeps a skill
-user-wide even when a project names it.
+`:review` needs no `:skills {:review {:from :shared}}` entry as long as exactly
+one declared pack has a `review` skill directory — that entry only earns its
+keep for an override (`:mode`, `:per-tool`, a non-default `:scope`) or to break
+a tie when the same skill name lives in more than one pack, which is reported
+as an error rather than guessed. Naming a pack instead of a skill asks for
+every skill in it — the way to follow a pack that grows.
+
+Resolved skills are linked into `<project>/.claude/skills/`, not the user's
+home: a skill a project asked for is that project's, and a link already
+pointing elsewhere (a hand-made one, or a dangling relative one) is repointed
+at the pack cache under `~/.agents/skill-packs`. `:scope :global` on an
+explicit `:skills` declaration keeps a skill user-wide even when a project
+names it.
 
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links

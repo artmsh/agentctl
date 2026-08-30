@@ -213,12 +213,24 @@
                                                         (:from decl)
                                                         (not= id (:from decl))))})))})))))
 
+(defn- pack-skill-ids
+  "Every skill id living inside a materialized declared pack — a project's
+   `:skills` can name these directly, with no `:skills` entry of its own."
+  [raw]
+  (let [expanded (try (:raw (config/expand-defs raw)) (catch Exception _ raw))]
+    (distinct
+     (for [[id decl] (:skill-packs expanded)
+           :let [pack (try (config/norm-pack id decl) (catch Exception _ nil))
+                 dirs (try (sources/skill-dirs pack) (catch Exception _ nil))]
+           d dirs]
+       (keyword (fs/file-name d))))))
+
 (defn- schema
   "Sections, in the order the file itself is usually written."
   [raw]
   (let [pack-ids (vec (sort (keys (:skill-packs raw))))
         mcp-ids (vec (sort (keys (:mcps raw))))
-        skill-ids (vec (sort (concat (keys (:skills raw)) pack-ids)))
+        skill-ids (vec (sort (distinct (concat (keys (:skills raw)) pack-ids (pack-skill-ids raw)))))
         project-ids (vec (sort (keys (:projects raw))))]
     [{:key :#def :title "Bindings" :entry "binding" :id-kind :symbol
       :doc "$name expands anywhere below. Root level only."
