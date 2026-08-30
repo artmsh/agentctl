@@ -221,6 +221,20 @@ entries alone, and dropping one from agents.edn prunes only that element.
 Declare only the hooks you actually authored; a third party's hook belongs
 to that tool, not to agents.edn.
 
+Hooks can also be grouped by event instead of id, which reads better once
+several share one:
+
+```clojure
+:hooks {:SessionStart [{:id :session-start :command "$HOME/.claude/hooks/session-start.sh"}
+                       {:id :moshi-hook :command "'/opt/homebrew/bin/moshi-hook' claude-hook"
+                        :async true}]}
+```
+
+`:event` is then implied by the group and left off each entry. `:id` is not
+— it is still what the ownership manifest tracks, so it stays mandatory
+there; a missing one is a structural error, not a guess. Both forms normalize
+to the same thing and can be mixed in one `:hooks` map.
+
 ## Project skills
 
 A project's `:skills` names a whole skill-pack, a skill declared under `:skills`,

@@ -891,6 +891,40 @@
     (is (some #(str/includes? % "needs :event") msgs))
     (is (some #(str/includes? % "needs :command") msgs))))
 
+(deftest hooks-grouped-by-event-normalize-like-the-flat-form
+  (let [cfg (config/normalize
+             {:executors
+              {:claude
+               {:hooks {:SessionStart [{:id :reminder :matcher "startup" :command "reminder.sh"}
+                                       {:id :moshi-hook :command "moshi-hook" :async true}]
+                        ;; the flat, id-keyed form still works in the same map
+                        :lock {:event :PreToolUse :matcher "Write|Edit" :command "lock.sh"}}}}}
+             "x")
+        hooks (get-in cfg [:tools :claude :hooks])]
+    (testing "each grouped entry becomes a flat, id-keyed hook with :event filled in"
+      (is (= {:matcher "startup" :command "reminder.sh" :event :SessionStart}
+             (:reminder hooks)))
+      (is (= {:command "moshi-hook" :async true :event :SessionStart}
+             (:moshi-hook hooks))))
+    (testing "the flat form beside it is untouched"
+      (is (= {:event :PreToolUse :matcher "Write|Edit" :command "lock.sh"} (:lock hooks))))
+    (testing "hook-ops plans all three the same way regardless of which form declared them"
+      (is (= #{:reminder :moshi-hook :lock}
+             (set (map :id (claude/hook-ops cfg state/empty-state))))))
+    (testing "structural-findings has nothing to say when every entry has an :id"
+      (is (empty? (config/structural-findings cfg))))))
+
+(deftest a-grouped-hook-missing-an-id-is-a-structural-error
+  (let [cfg (config/normalize
+             {:executors {:claude {:hooks {:SessionStart [{:command "no-id.sh"}]}}}}
+             "x")
+        msgs (map :message (config/structural-findings cfg))]
+    (is (some #(str/includes? % "needs :id") msgs))
+    ;; a synthesized placeholder id keeps normalization from colliding two
+    ;; id-less hooks onto the same key — it still shows up, not silently
+    ;; dropped, so the finding above has something to point at
+    (is (contains? (get-in cfg [:tools :claude :hooks]) :SessionStart-0))))
+
 (deftest a-key-that-names-an-env-var-is-not-a-plaintext-secret
   ;; `:bearer-token-env "MCP_BEARER_TOKEN"` holds the variable's name, not the
   ;; token — flagging it teaches the reader to skip the warning that matters

@@ -230,6 +230,25 @@ prunes only that element. Declare only hooks you actually authored; a
 third party's own hook does not belong in agents.edn and reproducing it
 here would fight that tool's own writes to the file.
 
+`:hooks` can instead be grouped by event, a vector of declarations per event
+rather than one id-keyed map:
+
+```clojure
+:hooks {:SessionStart [{:id :session-start :command "$HOME/.claude/hooks/session-start.sh"}
+                       {:id :moshi-hook :command "'/opt/homebrew/bin/moshi-hook' claude-hook"
+                        :async true}]}
+```
+
+`config/norm-hooks` flattens this into the same `{id decl}` shape the id-keyed
+form already produces, with `:event` filled in from the group key — every
+other hook-consuming path (`hook-ops`, `core/inventory`, structural
+validation) sees one shape regardless of which was written, and the two
+forms can be mixed in the same `:hooks` map. `:id` stays mandatory per entry:
+it is what the ownership manifest keys on, not `:event`. An entry missing one
+gets a positional placeholder (`:SessionStart-0`) so two id-less hooks can't
+collide onto the same key, and `structural-findings` reports the missing
+`:id` as an error rather than planning against a name nobody chose.
+
 ### Project location
 
 `:path` is the whole location. `:parent` is the directory it sits in, for the

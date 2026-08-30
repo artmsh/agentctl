@@ -288,6 +288,29 @@
       :project (:project decl)
       :tools (tool-selection decl :memory)})))
 
+(defn- norm-hooks
+  "`:hooks` is normally id-keyed, one hook's whole declaration — `:event`
+   included — per id. Grouping by event instead reads better once several
+   hooks share one: `{:SessionStart [{:id ... :command ...} ...]}`. Every
+   entry there still needs its own `:id`, since that is what agentctl's
+   ownership manifest tracks, not the event key it lives under; a missing
+   one gets a positional placeholder so normalization can't collide two
+   hooks onto the same key, and `:hook-id-missing` flags it for
+   `structural-findings` to report as the error it is. Both forms — and a
+   mix of the two in the same map — normalize to one flat {id decl}."
+  [hooks]
+  (into {}
+        (mapcat (fn [[k v]]
+                  (if (sequential? v)
+                    (map-indexed
+                     (fn [i decl]
+                       [(or (:id decl) (keyword (str (u/kw->str k) "-" i)))
+                        (cond-> (assoc (dissoc decl :id) :event k)
+                          (nil? (:id decl)) (assoc :hook-id-missing true))])
+                     v)
+                    [[k v]])))
+        hooks))
+
 (defn- norm-settings
   "Per-tool settings map: values kept as-is, keys normalized to kebab keywords.
 
@@ -298,7 +321,9 @@
         flags (merge (zipmap (map keyword (as-set (:on decl))) (repeat true))
                      (zipmap (map keyword (as-set (:off decl))) (repeat false)))]
     (into flags
-          (map (fn [[k v]] [(keyword (str/replace (u/kw->str k) "_" "-")) v]))
+          (map (fn [[k v]]
+                 (let [k' (keyword (str/replace (u/kw->str k) "_" "-"))]
+                   [k' (if (= k' :hooks) (norm-hooks v) v)])))
           (dissoc decl :on :off))))
 
 (defn- project-executors
@@ -509,7 +534,9 @@
      (for [[id h] (get-in cfg [:tools :claude :hooks]) :when (nil? (:event h))]
        (finding :error [:executors :claude :hooks id] "hook needs :event"))
      (for [[id h] (get-in cfg [:tools :claude :hooks]) :when (nil? (:command h))]
-       (finding :error [:executors :claude :hooks id] "hook needs :command")))))
+       (finding :error [:executors :claude :hooks id] "hook needs :command"))
+     (for [[_ h] (get-in cfg [:tools :claude :hooks]) :when (:hook-id-missing h)]
+       (finding :error [:executors :claude :hooks (:event h)] "hook grouped under :hooks needs :id")))))
 
 ;; ---------------------------------------------------------------- entry
 
