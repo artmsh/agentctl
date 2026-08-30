@@ -6,3 +6,8 @@
 .code-review-graph/
 target/
 *.log
+
+# locally materialized skills (point outside the repo)
+.agents/
+.claude/
+skills-lock.json

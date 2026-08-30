@@ -101,11 +101,45 @@ agentctl gui                 # opens a browser on a free loopback port
 agentctl gui --port 8791 --no-open
 ```
 
-The page is `agents.edn` on the left and its dry run on the right. Every
-keystroke re-plans, so the plan answers the buffer rather than the file — the
-same output `apply` prints, rendered from the text you are typing. The tool
-chips and the `verbose` / `show noop` toggles are `--tool`, `-v` and
-`--show-noop`.
+The right-hand pane is the dry run. The left-hand pane has two tabs over the
+same buffer:
+
+- **setup** — controls. One card per executor, MCP server, skill pack, skill,
+  memory file, provider and project, with the fields each one understands: text
+  boxes, checkboxes, transport and scope pickers, and chips for the tools a
+  resource targets or the servers and skills a project names. The fields on
+  offer for a tool are the settings its adapter actually writes, so a control
+  that exists is a control that does something. `+ field` reveals a key the
+  file does not declare yet; `×` removes one. Anything the form does not model
+  — permissions, model roles, per-tool overrides — is editable as EDN in place,
+  so nothing in the file is out of reach.
+
+  Four of them are worth calling out:
+
+  - **Bindings** is a two-column table — name and value, both editable, with
+    add and delete row. A rename happens in place, so the binding keeps its
+    line, its position and the comment above it. An empty or malformed name is
+    refused, and so is renaming onto a name the map already holds.
+  - **Features** is the `:on` / `:off` sugar as one three-position switch per
+    boolean setting: on, off, or unset. Unset is not off — it leaves the tool's
+    own default alone, which is why the switch has three positions and not two.
+  - A setting is a **picker** only where the tool's own schema closes the set:
+    claude's `theme` and effort level are, its `model` is not — the schema
+    types it as a plain string because a full model id is as valid as an alias,
+    so the aliases are offered as suggestions instead. A value the file already
+    holds outside a set (a `custom:<slug>` theme) stays editable as the text it
+    is, and `other...` in a picker types a fresh one.
+  - **Skills** lists each declared pack with every skill it has on disk as a
+    switch: on when the file installs it, off when it does not. A pack
+    agentctl has not fetched yet says so rather than showing an empty list.
+- **agents.edn** — the text, editable directly.
+
+Both write to the same buffer and re-plan on every change, so the plan answers
+what you are editing rather than what is on disk. Edits go through the server,
+which rewrites only the node you touched: comments, blank lines and `$name`
+references survive, and a `:#def` binding is shown as the reference it is rather
+than the value it expands to. The tool chips in the header and the `verbose` /
+`show noop` toggles are `--tool`, `-v` and `--show-noop`.
 
 **Apply** is the only thing that writes. It asks for confirmation, then saves
 the buffer to `agents.edn` (backed up first) and converges, exactly as
@@ -163,6 +197,29 @@ Claude Code still offers the `.mcp.json` definition.
 
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
+
+## Hooks
+
+Claude Code hooks, global scope, declared under `:executors :claude :hooks`:
+
+```clojure
+:executors
+{:claude {:hooks {:lock-acquire {:event :PreToolUse :matcher "Write|Edit"
+                                 :command "$HOME/.claude/hooks/memory-file-lock.sh acquire"
+                                 :timeout 25}
+                  :session-start {:event :SessionStart
+                                  :command "$HOME/.claude/hooks/session-start.sh"}}}}
+```
+
+Each declared hook owns one element of `settings.json`'s `hooks[event]` array
+— `:matcher` omitted fires the command unconditionally. `hooks` arrays are
+not agentctl's alone: Orca, moshi and similar tools inject their own entries
+directly into the same file. Since a JSON array carries no keys, agentctl
+locates its own element by value, not by position, and never touches an
+entry it did not write — declaring a hook here leaves every other tool's
+entries alone, and dropping one from agents.edn prunes only that element.
+Declare only the hooks you actually authored; a third party's hook belongs
+to that tool, not to agents.edn.
 
 ## Project skills
 

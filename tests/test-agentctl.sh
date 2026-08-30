@@ -412,7 +412,166 @@ run apply -f "$SB/gui.edn" -t pi > "$SB/plan16.txt"; code=$?
 set -e
 [ "$code" = 0 ] || { cat "$SB/plan16.txt"; fail "the cli sees drift after a gui apply"; }
 
+echo "17. gui controls edit the buffer through the server, and only the buffer"
+cat > "$SB/gui-form.edn" <<'EDN'
+{;; hand written, and it stays that way
+ :#def {effort "high"}
+
+ :executors
+ {:claude {:model "sonnet" :thinking $effort}
+  :codex {:model "gpt" :thinking $effort}}
+
+ :mcps {:gsearch "/bin/echo --stdio"}}
+EDN
+before=$(md5 -q "$SB/gui.edn" 2>/dev/null || md5sum "$SB/gui.edn" | cut -d' ' -f1)
+
+edit() { # edit <config-file> <ops-json> -> response on stdout
+  python3 -c 'import json,sys; print(json.dumps({"text": open(sys.argv[1]).read(), "ops": json.loads(sys.argv[2])}))' \
+    "$1" "$2" > "$SB/gui-edit.json"
+  gapi /api/edit "$SB/gui-edit.json"
+}
+
+# one field, changed the way a control changes it
+edit "$SB/gui-form.edn" '[{"op":"set","path":[":executors",":claude",":model"],"type":"scalar","value":"opus"}]' \
+  > "$SB/gui-edit1.out"
+python3 - "$SB/gui-edit1.out" <<'PY' || fail "gui edit wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+t = d["text"]
+assert '"opus"' in t, t
+assert "hand written, and it stays that way" in t, "a control edit erased the comments"
+assert t.count("$effort") == 2, "a control edit baked a :#def binding into the file"
+assert d["form"]["ok"] and d["ok"], d
+PY
+
+# a bare command line becomes the map it is shorthand for, in one request; the
+# controls resend the expansion until they re-render, so it repeats here too and
+# must not undo the field set between the two
+edit "$SB/gui-form.edn" '[{"op":"expand","path":[":mcps",":gsearch"],"edn":"{:cmd \"/bin/echo --stdio\"}"},{"op":"set","path":[":mcps",":gsearch",":cwd"],"type":"scalar","value":"/tmp"},{"op":"expand","path":[":mcps",":gsearch"],"edn":"{:cmd \"/bin/echo --stdio\"}"},{"op":"set","path":[":mcps",":gsearch",":tools"],"type":"kw-set","value":[":claude"]}]' \
+  > "$SB/gui-edit2.out"
+python3 - "$SB/gui-edit2.out" <<'PY' || fail "gui shorthand expansion wrong"
+import json, sys
+t = json.load(open(sys.argv[1]))["text"]
+assert ':gsearch {:cmd "/bin/echo --stdio" :cwd "/tmp" :tools [:claude]}' in t, t
+PY
+
+# add an entry, then take it away again
+edit "$SB/gui-form.edn" '[{"op":"set","path":[":skills",":review"],"edn":"{:from :pack}"}]' \
+  > "$SB/gui-edit3.out"
+python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["text"]; assert "\n\n :skills {:review {:from :pack}}" in t, t' \
+  "$SB/gui-edit3.out" || fail "a new section should be written the way the file is written"
+edit "$SB/gui-form.edn" '[{"op":"unset","path":[":executors",":codex"]}]' > "$SB/gui-edit4.out"
+python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["text"]; assert ":codex" not in t and ":claude" in t, t' \
+  "$SB/gui-edit4.out" || fail "removing an entry removed the wrong thing"
+
+# the form describes what the buffer declares, including the tools on offer
+python3 - "$SB/gui-edit1.out" <<'PY' || fail "gui form model wrong"
+import json, sys
+form = json.load(open(sys.argv[1]))["form"]
+secs = {s["key"]: s for s in form["sections"]}
+assert set(secs) >= {":#def", ":executors", ":mcps", ":skills", ":projects"}, list(secs)
+claude = [e for e in secs[":executors"]["entries"] if e["id"] == ":claude"][0]
+fields = {f["key"]: f for f in claude["fields"]}
+assert fields["thinking"]["value"] == "$effort", fields["thinking"]
+assert fields["model"]["value"] == "opus", fields["model"]
+assert [e for e in secs[":executors"]["entries"] if not e["declared"]], "undeclared tools are offered too"
+PY
+
+# a value that is not readable is a message, not a write and not a stack trace
+python3 -c 'import json,sys; print(json.dumps({"text": open(sys.argv[1]).read(), "ops": [{"op":"set","path":[":mcps",":gsearch",":env"],"type":"edn","value":"{oops"}]}))' \
+  "$SB/gui-form.edn" > "$SB/gui-edit-bad.json"
+code=$(gstatus /api/edit "$SB/gui-edit-bad.json")
+[ "$code" = 400 ] || fail "an unreadable control value should come back as 400 (got $code)"
+
+# a binding is renamed in place: same line, same position, comment kept
+edit "$SB/gui-form.edn" '[{"op":"rename","path":[":#def","effort"],"value":"level"}]' \
+  > "$SB/gui-edit5.out"
+python3 - "$SB/gui-edit5.out" <<'PY' || fail "gui rename wrong"
+import json, sys
+t = json.load(open(sys.argv[1]))["text"]
+assert ' :#def {level "high"}' in t, t
+assert "hand written, and it stays that way" in t, "a rename erased the comments"
+PY
+python3 -c 'import json,sys; print(json.dumps({"text": open(sys.argv[1]).read(), "ops": [{"op":"rename","path":[":#def","effort"],"value":""}]}))' \
+  "$SB/gui-form.edn" > "$SB/gui-rename-bad.json"
+code=$(gstatus /api/edit "$SB/gui-rename-bad.json")
+[ "$code" = 400 ] || fail "an empty binding name should come back as 400 (got $code)"
+python3 -c 'import json,sys; print(json.dumps({"text": "{:#def {a 1 b 2}}", "ops": [{"op":"rename","path":[":#def","a"],"value":"b"}]}))' \
+  > "$SB/gui-rename-dup.json"
+code=$(gstatus /api/edit "$SB/gui-rename-dup.json")
+[ "$code" = 400 ] || fail "a rename onto an existing name should come back as 400 (got $code)"
+
+# feature switches write :on and :off together
+edit "$SB/gui-form.edn" '[{"op":"set","path":[":executors",":claude",":on"],"type":"flag-set","value":["ultracode"]},{"op":"set","path":[":executors",":claude",":off"],"type":"flag-set","value":["auto-compact"]}]' \
+  > "$SB/gui-edit6.out"
+python3 - "$SB/gui-edit6.out" <<'PY' || fail "gui feature switches wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+t = d["text"]
+assert ":on #{:ultracode}" in t, t
+assert ":off #{:auto-compact}" in t, t
+claude = [e for e in [s for s in d["form"]["sections"] if s["key"] == ":executors"][0]["entries"]
+          if e["id"] == ":claude"][0]
+flags = [f for f in claude["fields"] if f["key"] == "features"][0]
+state = {o["key"]: o["state"] for o in flags["options"]}
+assert state["ultracode"] == "on" and state["auto-compact"] == "off", state
+assert state["skip-auto"] == "", "unstated is not off"
+assert not claude["extra"], claude["extra"]
+PY
+
+# a pack on disk lists its skills as switches
+mkdir -p "$SB/pack/skills/review" "$SB/pack/skills/triage"
+echo "# review" > "$SB/pack/skills/review/SKILL.md"
+echo "# triage" > "$SB/pack/skills/triage/SKILL.md"
+cat > "$SB/gui-pack.edn" <<EDN
+{:skill-packs {:kit {:uri "$SB/pack" :type :file}}
+ :skills {:review {:from :kit}}}
+EDN
+edit "$SB/gui-pack.edn" '[{"op":"set","path":[":skills",":triage"],"edn":"{:from :kit}"}]' \
+  > "$SB/gui-edit7.out"
+python3 - "$SB/gui-edit7.out" <<'PY' || fail "gui pack skill switches wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert ":triage {:from :kit}" in d["text"], d["text"]
+group = [s for s in d["form"]["sections"] if s["key"] == ":skills"][0]["groups"][0]
+assert group["id"] == ":kit", group
+assert {o["label"]: o["on"] for o in group["options"]} == {"review": True, "triage": True}, group
+PY
+
+after=$(md5 -q "$SB/gui.edn" 2>/dev/null || md5sum "$SB/gui.edn" | cut -d' ' -f1)
+[ "$before" = "$after" ] || fail "editing through the controls wrote to the config file"
+
 kill "$GUI_PID" 2>/dev/null || true
 trap 'rm -rf "$SB"' EXIT
+
+echo "18. an unfiltered apply! refreshes a hook's stored value even when it plans nothing"
+# Regression for the sync-state!/scoped? wiring: a *scoped* run (-t/-k/-p)
+# that plans nothing for a hook must not overwrite its recorded value (the
+# element could still be unwritten), but an *unfiltered* run that plans
+# nothing is proof the live element already matches the declaration, and
+# must still refresh the manifest — otherwise a later declaration change
+# computes `old` from a stale value nothing on disk holds, and the real
+# element is orphaned instead of replaced. `main.clj`/`gui.clj` must pass
+# `(when (core/scoped? opts) done)`, not a bare `#{}`, at both call sites.
+cat > "$SB/hooks.edn" <<'EDN'
+{:executors {:claude {:hooks {:probe {:event :PreToolUse :matcher "*" :command "v1.sh"}}}}}
+EDN
+run apply! -f "$SB/hooks.edn" -y > /dev/null
+grep -q '"v1.sh"' "$SB/.claude/settings.json" || fail "hook not written"
+grep -q 'v1.sh' "$SB/.config/agentctl/state.edn" || fail "hook value not recorded in state"
+
+# hand-edit the live file to what a future declaration will say — as if a
+# person, not agentctl, made this exact change
+python3 - "$SB/.claude/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = "v2.sh"
+json.dump(d, open(p, "w"))
+PY
+sed -i.bak 's/v1\.sh/v2.sh/' "$SB/hooks.edn" && rm -f "$SB/hooks.edn.bak"
+
+run apply! -f "$SB/hooks.edn" -y > "$SB/hooks-apply.txt"
+grep -q 'no changes' "$SB/hooks-apply.txt" || { cat "$SB/hooks-apply.txt"; fail "expected the hand-edit to already match — no op to plan"; }
+grep -q 'v2.sh' "$SB/.config/agentctl/state.edn" || { cat "$SB/.config/agentctl/state.edn"; fail "unfiltered apply! did not refresh the hook's stored value"; }
 
 echo "all agentctl e2e checks passed"

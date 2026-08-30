@@ -1,7 +1,7 @@
 {;; ---- root-level bindings; `$name` expands anywhere below -----------------
- ;; Root level only: :#let inside a project or an mcp is an error, not a scope.
+ ;; Root level only: :#def inside a project or an mcp is an error, not a scope.
  ;; A SHOUTED $NAME that is not bound here stays an environment reference.
- :#let {effort "high"
+ :#def {effort "high"
         workspace "~/projects"}
 
  ;; ---- global per-CLI settings -------------------------------------------

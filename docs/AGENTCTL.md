@@ -88,9 +88,9 @@ sections below explain each part of it.
 
 ```clojure
 {;; ---- root-level bindings; `$name` expands anywhere below -----------------
- ;; Root level only: :#let inside a project or an mcp is an error, not a scope.
+ ;; Root level only: :#def inside a project or an mcp is an error, not a scope.
  ;; A SHOUTED $NAME that is not bound here stays an environment reference.
- :#let {effort "high"
+ :#def {effort "high"
         workspace "~/projects"}
 
  ;; ---- global per-CLI settings -------------------------------------------
@@ -162,13 +162,13 @@ sections below explain each part of it.
            :skills [:review]}}}
 ```
 
-### `:#let`
+### `:#def`
 
 Root-level bindings, expanded before anything else reads the file. `$name`
 resolves as a bare symbol and inside strings (`"bun run $ws/a/index.ts"`), so a
 binding can be spliced into a path or a command line.
 
-Root level only — a `:#let` nested inside a project or an mcp is an error, not a
+Root level only — a `:#def` nested inside a project or an mcp is an error, not a
 local scope, and a binding may not reference another binding (map order is not
 defined, so it would not be deterministic).
 
@@ -202,6 +202,33 @@ that reading as drift.
 
 Project scope only. Global `~/.claude/settings.json` permissions are hand-curated
 and are never rewritten.
+
+### `:hooks`
+
+Claude Code only, global scope, declared under `:executors :claude :hooks`:
+
+```clojure
+:executors
+{:claude {:hooks {:lock-acquire {:event :PreToolUse :matcher "Write|Edit"
+                                 :command "$HOME/.claude/hooks/memory-file-lock.sh acquire"
+                                 :timeout 25}
+                  :session-start {:event :SessionStart
+                                  :command "$HOME/.claude/hooks/session-start.sh"}}}}
+```
+
+Each id owns one `hooks[event][]` array element — `:matcher` omitted fires
+unconditionally; `:command` defaults `:type` to `"command"`. `:async`,
+`:async-rewake`, `:shell`, `:if`, `:status-message` and `:args` pass through
+to the native command object for the hook kinds that use them.
+
+`settings.json`'s `hooks` arrays are not agentctl's alone — Orca, moshi and
+similar tools inject their own entries directly. An array carries no keys, so
+agentctl locates *its* element by value, not by index or position, and never
+touches an entry it did not write: declaring a hook here never disturbs
+what another tool put in the same array, and dropping one from agents.edn
+prunes only that element. Declare only hooks you actually authored; a
+third party's own hook does not belong in agents.edn and reproducing it
+here would fight that tool's own writes to the file.
 
 ### Project location
 
@@ -460,6 +487,66 @@ different thing from a plan read after saving and re-running.
   resolve against. Every keystroke re-plans, debounced. Invalid EDN is the
   normal state of a file being typed into, so it comes back as a message and
   the last good plan stays on screen, dimmed.
+- **The controls edit the text, not a parsed copy of it.** A form that
+  re-serialized the config would erase the comments, the blank lines and the
+  `$name` references that make it readable, so `agentctl.edit` runs the change
+  through a `rewrite-clj` zipper and touches only the node named — the same
+  rule the codex adapter follows for `config.toml`. A new key copies the line
+  break and indent its siblings already use.
+- **The form is derived from the buffer as written**, `edn/read-string` and not
+  `parse-config`: after `expand-defs`, `:thinking $effort` reads as `"high"`,
+  and writing that back would bake the binding into one tool and silently
+  leave the others pointing at nothing. A field bound to a `$name` shows the
+  reference. Coming the other way, a whole value that reads as `$name` is
+  written as a symbol; anything else, `~/$workspace/x` included, is a string.
+- **A control is a picker only where the tool closes the set.** Claude Code
+  publishes a JSON schema, so `theme` (seven values plus a `custom:<slug>`
+  pattern) and `effortLevel` (low/medium/high/xhigh) are offered as pickers.
+  `model` is deliberately not one: the same schema types it as a plain string,
+  because a full model id is as valid as an alias, and a picker would forbid
+  values the tool accepts — the aliases are suggestions instead. codex, pi, omp
+  and antigravity publish nothing this can be read off, so their settings stay
+  open text. A declared value outside a closed set is not an error either: it
+  falls back to the text box it came from rather than vanishing from a picker
+  that cannot represent it.
+- **`:on` / `:off` are three-position switches**, one per boolean setting the
+  tool has, because the DSL has three states and not two: on, off, and
+  unstated — and unstated leaves the tool's own default alone rather than
+  writing `false`. Moving a flag from one to the other rewrites two nodes, so
+  the switch sends both keys in one batch. Which settings are boolean is read
+  off the same table that types them, so a new flag appears without a second
+  list to keep.
+- **A binding is renamed in place.** `:#def` renders as a table of names and
+  values because both halves are editable, and a rename is its own op: removing
+  and re-adding the key would send it to the bottom of the map and drop the
+  comment above it. A blank or malformed name, and a rename onto a name the map
+  already holds, are refused by `edit` and not only by the browser — a
+  duplicate key does not read back, and the pane that would report the problem
+  is the one that could no longer render. References are deliberately not
+  chased: the now-unbound `$name` shows up as the warning it is.
+- **A pack's skills are switches.** The Skills section lists each declared pack
+  with every skill directory it has on disk, on when the file installs it. The
+  checkout is only known after normalization (`:root` is derived, not written),
+  so the raw declaration goes through `config/norm-pack` first; a pack that is
+  not on disk yet says so, because an empty group and a pack with no skills
+  must not look the same.
+- **The fields on offer come from the adapters** — `claude/setting-keys`,
+  `omp/setting-paths` and the rest, plus `config/capabilities` for which tools
+  can take which kind. A control that exists is one a plan would act on, and it
+  cannot drift from the adapter that writes it.
+- **Everything the schema does not model stays editable as EDN in place**:
+  permissions, `:model-roles`, `:overrides`, `:per-tool`, and any key agentctl
+  does not read. The bar is that nothing in the file is out of reach from the
+  controls, not that every corner of the DSL gets a bespoke widget.
+- **`/api/edit` returns the rewritten buffer and its plan, and writes nothing.**
+  Each request carries the whole buffer, so the page keeps one edit in flight
+  and coalesces the rest behind it; a second request built on pre-edit text
+  would clobber the first, and apply is held until the queue drains so it can
+  never converge a buffer one edit behind. Ops are order-independent within a
+  batch: expanding a shorthand server is `:expand`, which does nothing if the
+  node is already a map, because the controls keep sending it until they get a
+  re-render. The form is never re-rendered under a field that has focus — that
+  eats the caret and the last keystrokes with it.
 - **The plan crosses the wire as rendered text, never as ops.** Masking lives in
   `plan/render-val`; serializing `:diffs` would route around it and put a
   credential read out of an existing tool config into a JSON payload.
@@ -497,7 +584,7 @@ otherwise hand-curated) is a `warn` and never fails the exit code.
 ## Import is lossy w.r.t. sugar
 
 `import!` writes the canonical shape: `:command` + `:args`, explicit booleans,
-compiled permission rule strings. `:#let`, `:on`/`:off`, the permissions
+compiled permission rule strings. `:#def`, `:on`/`:off`, the permissions
 mini-DSL and `:cmd` are surface syntax and do not survive a round trip — the
 result is semantically equal, not textually equal. Import over a hand-written
 file backs the original up first.
@@ -513,4 +600,7 @@ tests/test-agentctl.sh              # e2e
 The e2e suite drives the GUI as a real subprocess (step 16): it parses the URL
 the command prints, plans a buffer the file does not hold, asserts an
 unconfirmed and a stale apply write nothing, and checks that a credential in an
-existing `.mcp.json` never reaches the browser.
+existing `.mcp.json` never reaches the browser. Step 17 drives the controls the
+same way — one field, a shorthand expansion, an added and a removed entry, an
+unreadable value — and asserts the comments, the `:#def` references and the file
+on disk all come through untouched.

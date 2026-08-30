@@ -19,9 +19,16 @@
 (defn sigil [action]
   (case action :create "+" :update "~" :delete "-" :noop "=" "?"))
 
+(def ^:dynamic *color*
+  "Emit ANSI colour? nil asks the environment; false is how the GUI gets plain
+   text it can colour itself."
+  nil)
+
 (defn- colorize [action s]
   (let [code (case action :create "32" :update "33" :delete "31" :noop "90" "0")]
-    (if (System/getenv "NO_COLOR") s (str "\033[" code "m" s "\033[0m"))))
+    (if (if (some? *color*) *color* (nil? (System/getenv "NO_COLOR")))
+      (str "\033[" code "m" s "\033[0m")
+      s)))
 
 (defn- render-val
   "The key comes along so a credential is masked: a plan is read out loud, put
@@ -341,6 +348,66 @@
            :exec! (fn []
                     (u/backup! file)
                     (u/write-json! file (u/dissoc-in (or (u/read-json file) {}) (vec path))))}))))
+
+(defn json-array-merge-op
+  "Op that keeps exactly one caller-owned element inside a JSON array at
+   `path`, leaving every other element untouched — the shape a hooks array
+   needs when another tool (an editor extension, an orchestrator) also
+   appends entries to it. An array carries no keys of its own, so membership
+   is checked by value, not by index.
+
+   `old` is the exact element agentctl wrote for this id last time (from the
+   state manifest; nil if never written before, or already gone by hand).
+   `value` is what it should be now. If `value` already sits in the array,
+   nothing to do; otherwise `old` is removed (if still present) and `value`
+   appended."
+  [{:keys [tool kind id file path old value summary note risk project
+           report-converged?]}]
+  (let [current (vec (or (get-in (u/read-json file) path) []))
+        present? (fn [v] (some #(= (u/norm %) (u/norm v)) current))]
+    (if (present? value)
+      (when report-converged?
+        (op {:project project :action :noop :tool tool :kind kind :id id :target file}))
+      (let [stale? (and (some? old) (present? old))]
+        (op {:project project :action (if stale? :update :create)
+             :tool tool :kind kind :id id
+             :target file
+             :summary summary
+             :note note
+             :diffs [{:key (last path) :before (when stale? old) :after value}]
+             :risk (or risk :low)
+             ;; re-read at execution time: several ops may target one file in
+             ;; a single run, and a stale snapshot would drop earlier writes
+             :exec! (fn []
+                      (u/backup! file)
+                      (let [data (or (u/read-json file) {})
+                            arr (vec (or (get-in data path) []))
+                            arr' (if (some #(= (u/norm %) (u/norm old)) arr)
+                                   (vec (remove #(= (u/norm %) (u/norm old)) arr))
+                                   arr)
+                            arr'' (if (some #(= (u/norm %) (u/norm value)) arr')
+                                    arr'
+                                    (conj arr' value))]
+                        (u/write-json! file (assoc-in data path arr''))))})))))
+
+(defn json-array-unset-op
+  "Op that removes one caller-owned element (`old`) from a JSON array at
+   `path`. Nothing to remove is no op at all — mirrors `json-unset-op`."
+  [{:keys [tool kind id file path old summary note risk project]}]
+  (let [current (vec (or (get-in (u/read-json file) path) []))]
+    (when (some #(= (u/norm %) (u/norm old)) current)
+      (op {:project project :action :delete :tool tool :kind kind :id id
+           :target file
+           :summary (or summary "removed from agents.edn")
+           :note note
+           :diffs [{:key (last path) :before old :after nil}]
+           :risk (or risk :medium)
+           :exec! (fn []
+                    (u/backup! file)
+                    (let [data (or (u/read-json file) {})
+                          arr (vec (or (get-in data path) []))
+                          arr' (vec (remove #(= (u/norm %) (u/norm old)) arr))]
+                      (u/write-json! file (assoc-in data path arr'))))}))))
 
 (defn yaml-set-op
   [{:keys [tool kind id file path value summary risk project]}]

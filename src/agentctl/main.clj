@@ -105,7 +105,8 @@
         (System/exit (if (seq changes) 2 0))
 
         (empty? changes)
-        (do (state/save! (core/sync-state! st cfg)) (System/exit 0))
+        (do (state/save! (core/sync-state! st cfg #{} (when (core/scoped? opts) #{})))
+            (System/exit 0))
 
         :else
         (let [secretive (filter #(= :secret (:risk %)) changes)]
@@ -120,8 +121,14 @@
                 (println "aborted")
                 (System/exit 1))))
           (let [{:keys [done failed]} (core/converge! cfg st opts ops)]
-            ;; never claim ownership of a resource whose creation failed
-            (state/save! (core/sync-state! st cfg (set (map (juxt :tool :kind :id) failed))))
+            ;; never claim ownership of a resource whose creation failed; on a
+            ;; scoped run (-t/-k/-p) a data-carrying id (hooks) only gets its
+            ;; value overwritten if this run actually wrote it — see
+            ;; `core/sync-state!`
+            (state/save! (core/sync-state! st cfg
+                                            (set (map (juxt :tool :kind :id) failed))
+                                            (when (core/scoped? opts)
+                                              (set (map (juxt :tool :kind :id) done)))))
             (println (format "\napplied %d change(s)%s"
                              (count done)
                              (if (seq failed) (str ", " (count failed) " failed") "")))

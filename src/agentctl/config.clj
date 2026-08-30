@@ -67,9 +67,9 @@
 (defn- as-vec [v]
   (cond (nil? v) nil (sequential? v) (vec v) (set? v) (vec (sort-by str v)) :else [v]))
 
-;; ---------------------------------------------------------------- $let
+;; ---------------------------------------------------------------- :#def
 
-(def let-key :#let)
+(def def-key :#def)
 
 (defn- let-name
   "The `name` in a `$name` reference, or nil."
@@ -99,33 +99,33 @@
          :else x))
      form)))
 
-(defn expand-lets
-  "Resolve root-level `:#let` bindings into the `$name` references that use them.
+(defn expand-defs
+  "Resolve root-level `:#def` bindings into the `$name` references that use them.
 
-   Root level only: `:#let` nested inside a project or an mcp is a config error,
+   Root level only: `:#def` nested inside a project or an mcp is a config error,
    not a local scope. An unbound `$NAME` is left untouched — that spelling is
    the environment-variable reference, and shadowing it here would be surprising."
   [raw]
-  (let [bindings (into {} (map (fn [[k v]] [(u/kw->str k) v])) (get raw let-key))
-        body (dissoc raw let-key)
+  (let [bindings (into {} (map (fn [[k v]] [(u/kw->str k) v])) (get raw def-key))
+        body (dissoc raw def-key)
         nested (volatile! false)
-        _ (walk/postwalk (fn [x] (when (and (map? x) (contains? x let-key)) (vreset! nested true)) x) body)
+        _ (walk/postwalk (fn [x] (when (and (map? x) (contains? x def-key)) (vreset! nested true)) x) body)
         self (for [[k v] bindings
                    n (distinct (keep let-name (tree-seq coll? seq v)))
                    :when (contains? bindings n)]
-               (finding :error [let-key (keyword k)]
-                        (str "$" n " — a :#let value cannot reference another binding")))
+               (finding :error [def-key (keyword k)]
+                        (str "$" n " — a :#def value cannot reference another binding")))
         errors (concat (when @nested
-                         [(finding :error [let-key]
-                                   ":#let is only valid at the top level of agents.edn")])
+                         [(finding :error [def-key]
+                                   ":#def is only valid at the top level of agents.edn")])
                        self)
         ;; a lowercase $name that resolves to nothing is far more likely a typo
         ;; than a deliberate env var, which is conventionally SHOUTED
         unbound (when (empty? errors)
                   (for [n (distinct (keep let-name (tree-seq coll? seq body)))
                         :when (and (not (contains? bindings n)) (not= n (str/upper-case n)))]
-                    (finding :warn [let-key]
-                             (str "$" n " is not a :#let binding — resolved as env var $" n))))]
+                    (finding :warn [def-key]
+                             (str "$" n " is not a :#def binding — resolved as env var $" n))))]
     {:raw (if (seq errors) body (substitute body bindings))
      :findings (vec (concat errors unbound))}))
 
@@ -236,7 +236,7 @@
       :per-tool (norm-per-tool id decl norm-skill)
       :tools (tool-selection decl :skills)})))
 
-(defn- norm-pack [id decl]
+(defn norm-pack [id decl]
   (let [decl (or decl {})
         uri (u/expand (:uri decl))
         ;; a declared :type wins: a `file://` URI is usually a directory to
@@ -425,7 +425,7 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :#let})
+    :#def})
 
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]
@@ -470,7 +470,11 @@
        (finding :error [:projects pid :skills]
                 (str "references undefined skill or pack " sid)))
      (for [[id m] (:memory cfg) :when (not (u/exists? (:from m)))]
-       (finding :error [:memory id] (str "source not found: " (u/tilde (:from m))))))))
+       (finding :error [:memory id] (str "source not found: " (u/tilde (:from m)))))
+     (for [[id h] (get-in cfg [:tools :claude :hooks]) :when (nil? (:event h))]
+       (finding :error [:executors :claude :hooks id] "hook needs :event"))
+     (for [[id h] (get-in cfg [:tools :claude :hooks]) :when (nil? (:command h))]
+       (finding :error [:executors :claude :hooks id] "hook needs :command")))))
 
 ;; ---------------------------------------------------------------- entry
 
@@ -486,7 +490,7 @@
                                    {:path path}))))]
     (when-not (map? raw)
       (throw (ex-info "agents.edn must contain a map" {:path path})))
-    (let [{:keys [raw findings]} (expand-lets raw)]
+    (let [{:keys [raw findings]} (expand-defs raw)]
       (normalize raw path findings))))
 
 (defn load-config

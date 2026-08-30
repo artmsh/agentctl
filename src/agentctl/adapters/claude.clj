@@ -54,7 +54,7 @@
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
         kvs (declared-settings settings)
-        unsupported (remove (set (keys setting-keys)) (keys settings))]
+        unsupported (remove (conj (set (keys setting-keys)) :hooks) (keys settings))]
     (concat
      (keep identity
            [(plan/json-set-op {:tool tool :kind :settings :id :$schema
@@ -73,6 +73,72 @@
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for claude — ignored")
                  :warn true})))))
+
+;; ---------------------------------------------------------------- hooks
+
+;; `:hooks` is a nested structure, not a scalar, so it is carved out of
+;; `setting-keys`/`declared-settings` above and handled entirely here — see
+;; `hook-ops`. `settings-ops` excludes it from its "unsupported" sweep by
+;; name, or every declared hook would print a spurious ignored-setting warn.
+(def hook-entry-keys
+  "Declared hook field -> native `hooks[event][].hooks[]` field. `:event` and
+   `:matcher` are consumed separately (they place the entry, they are not
+   part of it); everything else here rides straight into the command object."
+  {:type :type :command :command :timeout :timeout :async :async
+   :async-rewake :asyncRewake :shell :shell :if :if
+   :status-message :statusMessage :args :args})
+
+(defn hook-command
+  "One `hooks[event][].hooks[]` entry. Defaults to a command hook — the only
+   kind agentctl's DSL spells out today; `:type` can override it for a prompt/
+   agent/http/mcp hook, whose extra fields pass through via `hook-entry-keys`."
+  [decl]
+  (u/prune-nils
+   (merge {:type "command"}
+          (into {} (keep (fn [[k v]] (when-let [nk (get hook-entry-keys k)] [nk v]))) decl))))
+
+(defn hook-group
+  "One element of the `hooks[event]` array: a matcher (optional — omitted
+   means the hook fires unconditionally) plus the one command it runs."
+  [decl]
+  (u/prune-nils {:matcher (:matcher decl) :hooks [(hook-command decl)]}))
+
+(defn- hook-path [decl] [:hooks (keyword (u/kw->str (:event decl)))])
+
+(defn hook-ops
+  "Global hooks declared under `:executors :claude :hooks`. Each declared id
+   owns exactly one array element (`json-array-merge-op`), located by value
+   rather than index — a hook injected by another tool into the same event
+   sits in the same array and is never touched, matched, or reported on.
+
+   Update-in-place needs the element as it was last written, which an array
+   cannot hand back by key — `core/inventory` records it (`:path`/`:value`)
+   in the state manifest for exactly this lookup."
+  [cfg st]
+  (let [declared (:hooks (common/settings-for cfg tool))
+        managed (into #{} (map keyword) (state/managed-ids st tool :hooks))]
+    (concat
+     (for [[id decl] declared
+           :let [path (hook-path decl)
+                 value (hook-group decl)
+                 old (:value (state/entry st tool :hooks id))
+                 op (plan/json-array-merge-op
+                     {:tool tool :kind :hooks :id id
+                      :file settings-file :path path :old old :value value
+                      :summary (str "settings.json hooks." (name (last path))
+                                    (when-let [m (:matcher decl)] (str " [" m "]")))})]
+           :when op]
+       op)
+     (for [id managed
+           :when (not (contains? declared id))
+           :let [entry (state/entry st tool :hooks id)
+                 op (when entry
+                      (plan/json-array-unset-op
+                       {:tool tool :kind :hooks :id id
+                        :file settings-file :path (:path entry) :old (:value entry)
+                        :summary "removed from agents.edn"}))]
+           :when op]
+       op))))
 
 ;; ---------------------------------------------------------------- mcps
 
@@ -279,8 +345,17 @@
 (defn- project-ops-for [cfg id proj]
   (let [pfile (project-settings-file proj)
         tool-settings (get-in proj [:tools tool])
-        [kvs _] (common/map-settings tool-settings setting-keys)]
+        [kvs unsupported] (common/map-settings tool-settings setting-keys)]
     (concat
+     ;; hooks have no project scope in the DSL today — `:hooks` under a
+     ;; project's `:executors :claude` would otherwise vanish with no trace;
+     ;; say so instead of silently dropping it
+     (for [k unsupported]
+       (plan/op {:action :noop :warn true :tool tool :kind :projects :project id
+                 :id (keyword (name id) (name k))
+                 :summary (str (if (= :hooks k)
+                                 "hooks have no project scope — declare under the global :executors :claude :hooks"
+                                 (str "unsupported setting " (name k) " for claude — ignored")))}))
      (keep identity
            [(when (or (seq kvs) (seq (:permissions proj)))
               (plan/json-set-op {:tool tool :kind :projects :project id
@@ -380,6 +455,7 @@
 
 (defn plan [cfg st]
   (concat (settings-ops cfg)
+          (hook-ops cfg st)
           (mcp-ops cfg st)
           (skill-ops cfg st)
           (memory-ops cfg)

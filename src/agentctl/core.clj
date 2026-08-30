@@ -37,6 +37,12 @@
   [ops {:keys [projects]}]
   (if (seq projects) (filter #(contains? projects (:project %)) ops) ops))
 
+(defn scoped?
+  "Did `-t`/`-k`/`-p` narrow this run to less than the whole config? Callers
+   use this to decide what `done` to pass `sync-state!` — see its docstring."
+  [{:keys [tools kinds projects]}]
+  (boolean (or (seq tools) (seq kinds) (seq projects))))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -54,6 +60,12 @@
 
 (defn inventory
   "Every (tool, kind, id) the config declares — the basis for prune detection.
+   A tuple may carry a fourth element, `data`, merged into that resource's
+   state-manifest entry; every kind but one leaves it off and is looked up by
+   id alone (an object keyed by name, a symlink at a fixed path). Hooks are
+   the exception: a JSON array has no key of its own, so `hook-ops` needs the
+   exact element it wrote last time (`:path`/`:value`) handed back to it, and
+   the manifest is the only place that survives between runs.
 
    MCP ids carry their scope: a project's server is owned as `:project/server`,
    so it can never be mistaken for the user-wide server of the same name and
@@ -62,6 +74,9 @@
   (filter
    (comp (set (config/active-tools cfg)) first)
    (concat
+   (for [[id decl] (:hooks (get-in cfg [:tools :claude]))
+         :let [path [:hooks (keyword (u/kw->str (:event decl)))]]]
+     [:claude :hooks id {:path path :value (claude/hook-group decl)}])
    (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (:scope m))] [t :mcps id])
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)
@@ -90,14 +105,36 @@
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.
    `failed` (tool kind id) triples are left unrecorded — claiming ownership of
-   something we never managed to create would make a later prune delete it."
-  ([st cfg] (sync-state! st cfg #{}))
-  ([st cfg failed]
+   something we never managed to create would make a later prune delete it.
+
+   `done` (tool kind id) triples are the ops a *scoped* run (`-t`/`-k`/`-p`)
+   actually executed — pass nil, not `#{}`, for an unfiltered run. Most
+   inventory tuples carry no `data` (an id is enough to say ownership), but a
+   few — hooks' `:path`/`:value` — carry the exact value written to disk. On
+   an unfiltered run a hook with no op is positive evidence the declared
+   value already matches disk (that's what `present?` just checked), so
+   refreshing the stored value is correct and `done` is nil to allow it. A
+   scoped run instead may simply never have planned that id at all; there,
+   refreshing on nothing-happened evidence would claim a value is live that
+   this run never wrote, and the next unfiltered run would then fail to find
+   the real element to replace, orphaning it in the array forever — so there,
+   only ids actually in `done` refresh, everything else keeps what the
+   manifest already had."
+  ([st cfg] (sync-state! st cfg #{} nil))
+  ([st cfg failed] (sync-state! st cfg failed nil))
+  ([st cfg failed done]
    (let [owned (remove (fn [[t k id]] (contains? failed [t k id])) (inventory cfg))
          want (set (map (fn [[t k id]] (state/key-for t k id)) owned))
-         stale (remove want (set (keys (:managed st))))]
+         stale (remove want (set (keys (:managed st))))
+         wrote? (fn [t k id] (or (nil? done) (contains? done [t k id])))
+         data-for (fn [t k id data]
+                    (cond
+                      (empty? data) data
+                      (wrote? t k id) data
+                      :else (dissoc (state/entry st t k id) :at)))]
      (as-> st $
-       (reduce (fn [s [t k id]] (state/record s t k id {})) $ owned)
+       (reduce (fn [s [t k id data]] (state/record s t k id (or (data-for t k id data) {})))
+               $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)))))
 
 ;; ---------------------------------------------------------------- apply
