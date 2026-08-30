@@ -713,6 +713,16 @@
     (is (not-any? #(str/includes? % "unsupported setting :hooks") warns))
     (is (some #(str/includes? % "unsupported setting :bogus-setting") warns))))
 
+(deftest model-settings-and-enable-workflows-map-to-their-native-keys
+  (let [cfg (config/normalize {:executors {:claude {:model-settings {:claude-sonnet-5 {:effort-level "high"}}
+                                                    :on #{:enable-workflows}}}
+                               :projects {:p {:path "/tmp/p" :executors #{:claude}}}}
+                              "x")
+        ops (claude/settings-ops cfg)
+        diff-for (fn [k] (first (keep #(some (fn [d] (when (= k (:key d)) d)) (:diffs %)) ops)))]
+    (is (= {:claude-sonnet-5 {:effort-level "high"}} (:after (diff-for :modelSettings))))
+    (is (true? (:after (diff-for :enableWorkflows))))))
+
 (deftest hooks-are-owned-in-the-manifest-with-enough-to-find-them-again
   (let [cfg (config/normalize {:executors {:claude {:hooks {:reminder {:event :SessionStart
                                                                        :matcher "startup"
@@ -1170,7 +1180,8 @@
       (is (= "off" (state "auto-compact")))
       (is (= "" (state "skip-auto")) "unstated is not off — it leaves the tool's default alone"))
     (testing "the switches are the boolean settings the adapter declares"
-      (is (= #{"auto-compact" "skip-auto" "ultracode"} (set (map :key (:options flags))))))
+      (is (= #{"auto-compact" "skip-auto" "ultracode" "enable-workflows"}
+             (set (map :key (:options flags))))))
     (testing "both keys travel with the field: a flag moves between two nodes"
       (is (= [":executors" ":claude" ":on"] (:path flags)))
       (is (= [":executors" ":claude" ":off"] (:off-path flags))))

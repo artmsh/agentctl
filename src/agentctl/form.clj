@@ -40,9 +40,9 @@
   "What kind of value a setting takes, where the shape is the same for every
    tool that has the setting at all."
   {:auto-compact {:type :bool} :ultracode {:type :bool} :skip-auto {:type :bool}
-   :non-workspace-access {:type :bool}
+   :non-workspace-access {:type :bool} :enable-workflows {:type :bool}
    :env {:type :edn} :status-line {:type :edn} :model-roles {:type :edn}
-   :aliases {:type :edn}
+   :aliases {:type :edn} :model-settings {:type :edn}
    :thinking {:suggest ["low" "medium" "high"]}
    :effort {:suggest ["low" "medium" "high"]}
    :reasoning-effort {:suggest ["low" "medium" "high"]}})

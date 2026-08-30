@@ -32,8 +32,10 @@
    :thinking :effortLevel
    :auto-compact :autoCompactEnabled
    :ultracode :ultracode
+   :enable-workflows :enableWorkflows
    :skip-auto :skipAutoPermissionPrompt
    :status-line :statusLine
+   :model-settings :modelSettings
    :env :env})
 
 ;; ---------------------------------------------------------------- settings
