@@ -126,8 +126,8 @@
           (if-let [ids (provider-models p)]
             (concat [(f :ok [:providers id] (str (count ids) " models advertised"))]
                     (for [m (when (vector? (:models p)) (:models p))
-                          :when (not (contains? ids m))]
-                      (f :error [:providers id] (str "pinned model not offered: " m))))
+                          :when (not (contains? ids (:id m)))]
+                      (f :error [:providers id] (str "pinned model not offered: " (:id m)))))
             [(f :unknown [:providers id] "could not list /models")])))))
    (:providers cfg)))
 

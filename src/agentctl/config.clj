@@ -196,10 +196,13 @@
     (nil? decl) {}
     :else {:cmd (str decl)}))
 
+(defn- norm-headers [m]
+  (not-empty (into {} (map (fn [[k v]] [k (refs/parse v)])) m)))
+
 (defn- norm-mcp [id decl]
   (let [decl (mcp-decl decl)
         env (into {} (map (fn [[k v]] [k (refs/parse v)])) (:env decl))
-        headers (into {} (map (fn [[k v]] [k (refs/parse v)])) (:headers decl))
+        headers (norm-headers (:headers decl))
         url (:url decl)
         ;; :cmd is one shell-ish line; :command/:args is the exploded form
         tokens (u/split-cmd (:cmd decl))
@@ -215,7 +218,7 @@
       :args (mapv (comp str u/expand) (concat (when-not (:command decl) (rest tokens)) (:args decl)))
       :env (not-empty env)
       :url url
-      :headers (not-empty headers)
+      :headers headers
       :bearer-token-env (:bearer-token-env decl)
       :cwd (some-> (:cwd decl) u/abs-path)
       :enabled (get decl :enabled true)
@@ -259,6 +262,21 @@
               :git (str u/home "/.agents/skill-packs/" (name id))
               nil)})))
 
+(defn- norm-provider-model
+  "A model is a bare id, or a map carrying what differs about it. The map form
+   is what lets one provider entry serve two pools of the same host: pi, omp
+   and llm all take headers per model, so a routing header can ride on the
+   models it routes instead of forcing a second provider row whose only
+   difference is one header value."
+  [m]
+  (let [m (if (map? m) m {:id m})]
+    (u/prune-nils
+     {:id (str (:id m))
+      :name (:name m)
+      :api (:api m)
+      :url (:url m)
+      :headers (norm-headers (:headers m))})))
+
 (defn- norm-provider [id decl]
   (let [decl (or decl {})]
     (u/prune-nils
@@ -267,11 +285,17 @@
       :url (:url decl)
       :key (refs/parse (:key decl))
       :key-name (:key-name decl)
-      :api (or (:api decl) "openai-completions")
+      ;; a scalar :api is one dialect, as before. A vector is a menu: the
+      ;; provider serves all of them and each tool takes the one it speaks.
+      :api (let [a (:api decl)]
+             (cond (nil? a) "openai-completions"
+                   (sequential? a) (mapv u/kw->str a)
+                   :else (u/kw->str a)))
+      :headers (norm-headers (:headers decl))
       :models (let [m (:models decl)]
                 (cond (nil? m) :all
                       (= :all m) :all
-                      :else (mapv str m)))
+                      :else (mapv norm-provider-model m)))
       :overrides (:overrides decl)
       :per-tool (norm-per-tool id decl norm-provider)
       :tools (tool-selection decl :providers)})))

@@ -287,13 +287,16 @@
       :template "{:url \"\"}"
       :fields [(f :url :scalar) (f :key :scalar :hint "$ENV_VAR or !bw://folder/item/field")
                (f :key-name :scalar)
-               (f :api :scalar :suggest ["openai-completions" "responses" "anthropic"])
-               (f :models :edn :hint ":all or [\"vendor/model\"]")
+               (f :api :edn :hint "one dialect, or a vector of them in preference order"
+                  :suggest ["openai-completions" "responses" "anthropic-messages"])
+               (f :headers :edn :hint "{\"x-header\" \"value or $ENV_VAR\"}")
+               (f :models :edn :hint ":all, [\"vendor/model\"], or [{:id .. :headers {..}}]")
                (f :overrides :edn) (f :tools :kw-set :of :providers) (f :per-tool :edn)]}
 
      {:key :providers :title "Providers (:providers)" :entry "provider" :id-kind :free
       :only-if-present true :template "{:url \"\"}"
-      :fields [(f :url :scalar) (f :key :scalar) (f :api :scalar)
+      :fields [(f :url :scalar) (f :key :scalar) (f :api :edn)
+               (f :headers :edn)
                (f :models :edn) (f :overrides :edn) (f :tools :kw-set :of :providers)]}
 
      {:key :projects :title "Projects" :entry "project" :id-kind :free

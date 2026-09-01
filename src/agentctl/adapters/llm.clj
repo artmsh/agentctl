@@ -31,23 +31,36 @@
 (defn- read-models []
   (or (u/read-yaml (models-file)) []))
 
+(def dialects
+  "extra-openai-models.yaml is an OpenAI-completions file and nothing else --
+   llm has no way to speak the Anthropic wire format from it."
+  #{"openai-completions"})
+
 (defn provider-ops [cfg]
   (let [current (read-models)
         by-id (into {} (map (juxt :model_id identity)) current)]
     (mapcat
      (fn [[id p]]
-       (let [models (if (vector? (:models p)) (:models p) [])
+       (let [d (common/provider-dialect p dialects)
+             models (if d (or (common/declared-models p) []) [])
              ;; reuse whatever key entry llm already points at: renaming it would
              ;; rewrite every model line for no gain
-             existing-key (some (fn [m] (:api_key_name (get by-id m))) models)
+             existing-key (some (fn [m] (:api_key_name (get by-id (:id m)))) models)
              kname (or (:key-name p) existing-key (key-name id))
+             no-dialect (when-not d (plan/op (common/no-dialect-op tool id p)))
              desired (mapv (fn [m]
-                             (let [cur (get by-id m)]
+                             (let [cur (get by-id (:id m))
+                                   ;; llm carries headers per model only, so the
+                                   ;; provider's ride along on each of its models
+                                   headers (common/resolved-headers
+                                            (merge (:headers p) (:headers m)))]
                                (merge cur
-                                      {:model_id m
-                                       :model_name (or (:model_name cur) m)
-                                       :api_base (:url p)
-                                       :api_key_name kname}
+                                      (u/prune-nils
+                                       {:model_id (:id m)
+                                        :model_name (or (:model_name cur) (:name m) (:id m))
+                                        :api_base (or (:url m) (:url d))
+                                        :api_key_name kname
+                                        :headers headers})
                                       (when-not cur {:supports_tools true}))))
                            models)
              key-op (when (refs/secret-ref? (:key p))
@@ -64,7 +77,7 @@
                                              (u/backup! (keys-file))
                                              (let [m (or (u/read-json (keys-file)) {})]
                                                (u/write-json! (keys-file) (assoc m (keyword kname) value))))}))))
-             enumerate-warn (when (= :all (:models p))
+             enumerate-warn (when (and d (= :all (:models p)))
                               (plan/op {:action :noop :tool tool :kind :providers :id id
                                         :summary "llm needs explicit :models — `:models :all` cannot be enumerated offline"
                                         :warn true}))
@@ -84,7 +97,7 @@
                                                         (u/write-yaml! (models-file)
                                                                        (vec (concat others [d])))))}))))
                              desired)]
-         (remove nil? (concat [key-op enumerate-warn] model-ops))))
+         (remove nil? (concat [no-dialect key-op enumerate-warn] model-ops))))
      (common/for-tool-resources (:providers cfg) tool))))
 
 (defn settings-ops [cfg]

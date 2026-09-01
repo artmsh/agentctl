@@ -70,34 +70,49 @@
                                      :path [:mcpServers (keyword (u/kw->str id))]})))
            managed))))
 
-(defn- provider-entry [p cur]
+(def dialects
+  "pi reads the wire format off the provider entry, so every dialect it can
+   speak is one a multi-dialect provider may offer it."
+  #{"anthropic-messages" "anthropic" "openai-completions" "responses"})
+
+(defn- model-entry [m]
+  (u/prune-nils
+   {:id (:id m)
+    :name (or (:name m) (:id m))
+    :api (:api m)
+    :baseUrl (:url m)
+    :headers (common/resolved-headers (:headers m))}))
+
+(defn- provider-entry [p cur d]
   (let [{:keys [status value]} (refs/resolve-ref (:key p))]
     (u/prune-nils
-     {:baseUrl (:url p)
-      :api (:api p)
+     {:baseUrl (:url d)
+      :api (:api d)
+      :headers (common/resolved-headers (:headers p))
       ;; an unresolvable ref (locked vault, unset env) must never wipe a working key
       :apiKey (if (= :ok status) value (:apiKey cur))
-      :models (when (vector? (:models p))
-                (mapv (fn [id] {:id id :name id}) (:models p)))})))
+      :models (some->> (common/declared-models p) (mapv model-entry))})))
 
 (defn provider-ops [cfg]
   (mapcat
    (fn [[id p]]
-     (let [cur (get-in (u/read-json models-file) [:providers (keyword (u/kw->str id))])
-           entry (provider-entry p cur)
-           value (merge (or cur {}) entry)
-           {:keys [status message]} (refs/resolve-ref (:key p))]
-       (remove nil?
-               [(when (and (:key p) (not= :ok status))
-                  (plan/op {:action :noop :tool tool :kind :providers :id id :warn true
-                            :summary (str "key " (refs/describe (:key p)) " unresolved (" (or message (name status))
-                                          ") — existing credential left untouched")}))
-                (plan/json-set-op {:tool tool :kind :providers :id id
-                                   :file models-file
-                                   :path [:providers (keyword (u/kw->str id))]
-                                   :value value
-                                   :risk (if (refs/secret-ref? (:key p)) :secret :low)
-                                   :summary (str "models.json providers." (u/kw->str id))})])))
+     (if-let [d (common/provider-dialect p dialects)]
+       (let [cur (get-in (u/read-json models-file) [:providers (keyword (u/kw->str id))])
+             entry (provider-entry p cur d)
+             value (merge (or cur {}) entry)
+             {:keys [status message]} (refs/resolve-ref (:key p))]
+         (remove nil?
+                 [(when (and (:key p) (not= :ok status))
+                    (plan/op {:action :noop :tool tool :kind :providers :id id :warn true
+                              :summary (str "key " (refs/describe (:key p)) " unresolved (" (or message (name status))
+                                            ") — existing credential left untouched")}))
+                  (plan/json-set-op {:tool tool :kind :providers :id id
+                                     :file models-file
+                                     :path [:providers (keyword (u/kw->str id))]
+                                     :value value
+                                     :risk (if (refs/secret-ref? (:key p)) :secret :low)
+                                     :summary (str "models.json providers." (u/kw->str id))})]))
+       [(plan/op (common/no-dialect-op tool id p))]))
    (common/for-tool-resources (:providers cfg) tool)))
 
 (defn project-ops [cfg]

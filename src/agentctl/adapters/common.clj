@@ -36,6 +36,51 @@
           {:values {} :issues []}
           env))
 
+(def dialect-path
+  "Where each dialect lives under a bare host. Only consulted for a provider
+   that declares several: naming the host once is the whole point of writing
+   them in one entry, and the path root is the part that differs -- an
+   Anthropic-messages client appends `/v1/messages` itself, an OpenAI one
+   expects the base to end at `/v1`."
+  {"anthropic-messages" ""
+   "anthropic" ""
+   "openai-completions" "/v1"
+   "responses" "/v1"})
+
+(defn provider-dialect
+  "The dialect this tool should speak to `p`, and the base URL for it, or nil
+   when the provider serves nothing the tool can speak.
+
+   A scalar :api is passed through untouched, `supported` and all: that is the
+   pre-existing contract, and a provider naming exactly one dialect means it.
+   A vector is a menu, resolved in declaration order."
+  [p supported]
+  (let [api (:api p)]
+    (if (sequential? api)
+      (when-let [d (first (filter supported api))]
+        {:api d
+         :url (str (str/replace (or (:url p) "") #"/+$" "") (get dialect-path d ""))})
+      {:api api :url (:url p)})))
+
+(defn no-dialect-op
+  "A provider whose dialects this tool cannot speak is reported, not skipped:
+   silently writing nothing looks identical to a provider that applied."
+  [tool id p]
+  {:action :noop :tool tool :kind :providers :id id :warn true
+   :summary (str "no dialect " (name tool) " speaks in "
+                 (str/join ", " (:api p)) " — provider skipped")})
+
+(defn declared-models
+  "The provider's models, as maps. `:all` has no list to give."
+  [p]
+  (when (vector? (:models p)) (:models p)))
+
+(defn resolved-headers
+  "Header map with every ref resolved. An unresolvable ref drops its header
+   rather than writing a raw `$VAR` upstream as if it were the value."
+  [headers]
+  (not-empty (:values (resolve-env headers))))
+
 (defn holds-secret?
   "True when the env/header map carries a credential — a secret ref that will be
    resolved at apply time, or a literal already written out in the DSL. A

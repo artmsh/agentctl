@@ -3,6 +3,8 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.llm :as llm]
+            [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
             [agentctl.core :as core]
             [agentctl.edit :as edit]
@@ -306,6 +308,36 @@
       (is (= "SOME_VAR" (get-in cfg [:providers :p :key :ref/var]))))
     (testing "project paths are absolute"
       (is (= "/tmp/proj" (get-in cfg [:projects :proj :path]))))))
+
+(deftest one-provider-entry-serves-two-dialects-and-two-pools
+  (let [cfg (config/normalize
+             {:extra-providers
+              {:router {:url "https://switch.yard/"
+                        :api ["anthropic-messages" "openai-completions"]
+                        :headers {"x-router-tenant" "acme"}
+                        :models [{:id "big" :headers {"x-router-pool" "a"}}
+                                 {:id "small" :headers {"x-router-pool" "b"}}]}}}
+             "/tmp/agents.edn")
+        p (get-in cfg [:providers :router])]
+    (testing "a bare id and a map form normalize alike"
+      (is (= ["big" "small"] (mapv :id (:models p))))
+      (is (= "a" (get-in p [:models 0 :headers "x-router-pool" :ref/value]))))
+    (testing "each tool takes the dialect it speaks, and the path root that goes with it"
+      (is (= {:api "anthropic-messages" :url "https://switch.yard"}
+             (common/provider-dialect p pi/dialects)))
+      (is (= {:api "openai-completions" :url "https://switch.yard/v1"}
+             (common/provider-dialect p llm/dialects))))
+    (testing "a scalar :api is still passed through as-is, path and all"
+      (let [one (get-in (config/normalize
+                         {:extra-providers {:o {:url "https://o.example/v1"}}}
+                         "/tmp/agents.edn")
+                        [:providers :o])]
+        (is (= {:api "openai-completions" :url "https://o.example/v1"}
+               (common/provider-dialect one llm/dialects)))))
+    (testing "a provider offering nothing the tool speaks is reported, not skipped"
+      (let [only-anthropic (assoc p :api ["anthropic-messages"])]
+        (is (nil? (common/provider-dialect only-anthropic llm/dialects)))
+        (is (true? (:warn (common/no-dialect-op :llm :router only-anthropic))))))))
 
 (deftest structural-checks-catch-dangling-references
   (let [cfg (config/normalize sample-config "/tmp/agents.edn")

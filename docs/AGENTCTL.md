@@ -142,6 +142,13 @@ sections below explain each part of it.
   :hosted  {:url "https://api.vendor.example" :key "!bw://dev-keys/hosted/api-key"}
   :local   {:url "http://127.0.0.1:8080" :models ["vendor/model-a"]
             :overrides {"vendor/model-a" {:maxTokens 128000}}
+            :tools [:pi :omp :llm]}
+  ;; one host, two wire formats and two upstream pools behind one router
+  :router  {:url "https://router.example" :key $ROUTER_TOKEN
+            :api ["anthropic-messages" "openai-completions"]
+            :headers {"x-router-tenant" "acme"}
+            :models [{:id "big"   :headers {"x-router-pool" "fast"}}
+                     {:id "small" :headers {"x-router-pool" "cheap"}}]
             :tools [:pi :omp :llm]}}
 
  ;; ---- per-project overrides ---------------------------------------------
@@ -434,6 +441,36 @@ onto the existing entry and never dropped; declare new ones under `:extra`:
 The same holds for providers: agentctl writes the fields it manages and leaves
 the rest of the entry (`compat`, `discovery`, `modelOverrides`, catalogues) as
 the tool wrote it.
+
+### Dialects and headers
+
+`:api` is one wire format, or a vector of them in preference order. A vector
+says the provider serves all of them and lets each tool take the one it can
+speak: pi and omp read the format off the entry, `llm` writes an
+OpenAI-completions file and nothing else. A provider that offers a tool no
+dialect it speaks is reported as a skipped provider, not silently dropped.
+
+A vector `:api` also means `:url` names the host and nothing more — agentctl
+appends the path root the chosen dialect is served under (`/v1` for
+`openai-completions` and `responses`, nothing for `anthropic-messages`, which
+clients suffix themselves). A scalar `:api` is passed through untouched, path
+and all, so existing entries keep the URL they were written with.
+
+`:headers` rides on every request to the provider, and a model may carry its
+own on top:
+
+```clojure
+:router {:url "https://router.example"
+         :api ["anthropic-messages" "openai-completions"]
+         :headers {"x-router-tenant" "acme"}
+         :models [{:id "big" :headers {"x-router-pool" "fast"}}]}
+```
+
+Values take the same `$VAR` / `!bw://` forms as `:key`. This is what lets one
+entry cover two upstream pools of the same router: the pool is a header, so it
+rides on the models that belong to it instead of forcing a second provider row
+whose only difference is one header value. `llm` has no provider-level header
+field, so the provider's headers are merged onto each of its models there.
 
 ### Secret references
 
