@@ -5,107 +5,146 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agentctl · Control Plane</title>
 <style>
+  /* Palette follows DESIGN.md (warm cream / coral / dark-navy editorial).
+     Cream is the floor, so it lives on bare :root and is what the page flashes
+     before the theme script runs; dark is the variant. The marketing spacing
+     scale is deliberately *not* adopted — this is a dense control plane, and
+     96px bands would bury the plan table. */
   :root {
-    --bg-base: #0c0e14;
-    --bg-surface: #141721;
-    --bg-surface-elevated: #1a1e2b;
-    --bg-surface-subtle: #202636;
-    --border-subtle: #252b3b;
-    --border-strong: #363e52;
-    --border-focus: #4f70e2;
+    --bg-base: #f0ebe1;
+    --bg-surface: #faf9f5;
+    --bg-surface-elevated: #f5f0e8;
+    --bg-surface-subtle: #e8e0d2;
+    --border-subtle: #e6dfd8;
+    --border-strong: #d5cbbc;
+    --border-focus: #cc785c;
 
-    --fg-default: #e2e8f0;
-    --fg-muted: #94a3b8;
-    --fg-subtle: #64748b;
-    --fg-accent: #818cf8;
+    --fg-default: #141413;
+    --fg-muted: #6c6a64;
+    --fg-subtle: #8e8b82;
+    --fg-accent: #a9583e;
 
-    --accent: #6366f1;
-    --accent-hover: #4f46e5;
-    --accent-subtle: rgba(99, 102, 241, 0.15);
+    --accent: #cc785c;
+    --accent-hover: #a9583e;
+    --accent-subtle: rgba(204, 120, 92, 0.13);
+    --on-accent: #ffffff;
 
-    --create: #10b981;
-    --create-bg: rgba(16, 185, 129, 0.12);
-    --create-border: rgba(16, 185, 129, 0.3);
+    /* Lane hues are darkened off the DESIGN.md semantics so they carry on
+       cream at 11-13px; the doc's values are tuned for fills, not for text. */
+    --create: #3f8f55;
+    --create-bg: rgba(93, 184, 114, 0.16);
+    --create-border: rgba(63, 143, 85, 0.32);
 
-    --update: #f59e0b;
-    --update-bg: rgba(245, 158, 11, 0.12);
-    --update-border: rgba(245, 158, 11, 0.3);
+    --update: #a8790f;
+    --update-bg: rgba(212, 160, 23, 0.16);
+    --update-border: rgba(168, 121, 15, 0.32);
 
-    --delete: #ef4444;
-    --delete-bg: rgba(239, 68, 68, 0.12);
-    --delete-border: rgba(239, 68, 68, 0.3);
+    --delete: #c64545;
+    --delete-bg: rgba(198, 69, 69, 0.12);
+    --delete-border: rgba(198, 69, 69, 0.3);
 
-    --cmd: #06b6d4;
-    --cmd-bg: rgba(6, 182, 212, 0.12);
-    --cmd-border: rgba(6, 182, 212, 0.3);
+    /* teal, not cyan — the doc bans saturated cyan as an accent */
+    --cmd: #3f8d7d;
+    --cmd-bg: rgba(93, 184, 166, 0.16);
+    --cmd-border: rgba(63, 141, 125, 0.32);
 
-    --secret: #a855f7;
-    --secret-bg: rgba(168, 85, 247, 0.12);
+    /* the palette has no purple; secrets read as neutral-with-hairline */
+    --secret: #6c6a64;
+    --secret-bg: rgba(108, 106, 100, 0.1);
 
-    /* Cohere coral — taxonomy only (lane chips). Never a surface fill. */
-    --taxo: #ff7759;
-    --taxo-border: rgba(255, 119, 89, 0.38);
-    --taxo-quiet: #93939f;
+    /* taxonomy chips go quiet: coral now means "primary action" and the doc
+       is explicit that it stays scarce on individual elements */
+    --taxo: #6c6a64;
+    --taxo-border: rgba(108, 106, 100, 0.3);
+    --taxo-quiet: #8e8b82;
 
-    --warn: #f59e0b;
-    --error: #ef4444;
+    --warn: #a8790f;
+    --error: #c64545;
 
     --mono: "JetBrains Mono", "Fira Code", SFMono-Regular, Menlo, Consolas, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    /* Copernicus/Tiempos are licensed; this is the closest system stack, and
+       the page is loopback-served — it must never fetch a webfont. */
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", Georgia, serif;
     --radius-sm: 4px;
-    --radius-md: 7px;
-    --radius-lg: 10px;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
-    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --shadow-sm: 0 1px 2px rgba(20, 20, 19, 0.06);
+    --shadow-md: 0 4px 12px rgba(20, 20, 19, 0.1);
+    --shadow-lg: 0 12px 32px rgba(20, 20, 19, 0.16);
   }
 
-  [data-theme="light"] {
-    --bg-base: #f8fafc;
-    --bg-surface: #ffffff;
-    --bg-surface-elevated: #f1f5f9;
-    --bg-surface-subtle: #e2e8f0;
-    --border-subtle: #e2e8f0;
-    --border-strong: #cbd5e1;
-    --border-focus: #4f46e5;
+  [data-theme="dark"] {
+    --bg-base: #131210;
+    --bg-surface: #181715;
+    --bg-surface-elevated: #1f1e1b;
+    --bg-surface-subtle: #252320;
+    --border-subtle: #2c2a26;
+    --border-strong: #423e38;
+    --border-focus: #cc785c;
 
-    --fg-default: #0f172a;
-    --fg-muted: #475569;
-    --fg-subtle: #94a3b8;
-    --fg-accent: #4f46e5;
+    --fg-default: #faf9f5;
+    --fg-muted: #a09d96;
+    --fg-subtle: #7b776f;
+    --fg-accent: #e09070;
 
-    --accent: #4f46e5;
-    --accent-hover: #4338ca;
-    --accent-subtle: rgba(79, 70, 229, 0.08);
+    --accent: #cc785c;
+    --accent-hover: #d98c70;
+    --accent-subtle: rgba(204, 120, 92, 0.18);
+    --on-accent: #ffffff;
 
-    --create: #059669;
-    --create-bg: rgba(5, 150, 105, 0.08);
-    --create-border: rgba(5, 150, 105, 0.25);
+    --create: #5db872;
+    --create-bg: rgba(93, 184, 114, 0.13);
+    --create-border: rgba(93, 184, 114, 0.3);
 
-    --update: #d97706;
-    --update-bg: rgba(217, 119, 6, 0.08);
-    --update-border: rgba(217, 119, 6, 0.25);
+    --update: #e8a55a;
+    --update-bg: rgba(232, 165, 90, 0.13);
+    --update-border: rgba(232, 165, 90, 0.3);
 
-    --delete: #dc2626;
-    --delete-bg: rgba(220, 38, 38, 0.08);
-    --delete-border: rgba(220, 38, 38, 0.25);
+    --delete: #e07171;
+    --delete-bg: rgba(224, 113, 113, 0.13);
+    --delete-border: rgba(224, 113, 113, 0.3);
 
-    --cmd: #0891b2;
-    --cmd-bg: rgba(8, 145, 178, 0.08);
-    --cmd-border: rgba(8, 145, 178, 0.25);
+    --cmd: #5db8a6;
+    --cmd-bg: rgba(93, 184, 166, 0.13);
+    --cmd-border: rgba(93, 184, 166, 0.3);
 
-    --secret: #9333ea;
-    --secret-bg: rgba(147, 51, 234, 0.08);
+    --secret: #a09d96;
+    --secret-bg: rgba(160, 157, 150, 0.12);
 
-    --taxo: #d94f2d;
-    --taxo-border: rgba(255, 119, 89, 0.55);
-    --taxo-quiet: #75758a;
+    --taxo: #a09d96;
+    --taxo-border: rgba(160, 157, 150, 0.3);
+    --taxo-quiet: #7b776f;
 
-    --warn: #d97706;
-    --error: #dc2626;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+    --warn: #e8a55a;
+    --error: #e07171;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  }
+
+  /* The system's pacing is cream-to-dark, and the two surfaces that show raw
+     product chrome — the EDN buffer and the rendered plan text — are where it
+     belongs. Redeclaring the tokens locally rather than hardcoding hexes keeps
+     every descendant (gutter, lane colors, section headers) correct; under
+     [data-theme="dark"] these are already the values in force. */
+  .editor, pre.plan {
+    --bg-surface: #181715;
+    --bg-surface-elevated: #1f1e1b;
+    --bg-surface-subtle: #252320;
+    --border-subtle: #2c2a26;
+    --border-strong: #423e38;
+    --fg-default: #faf9f5;
+    --fg-muted: #a09d96;
+    --fg-subtle: #7b776f;
+    --fg-accent: #e09070;
+    --create: #5db872;
+    --update: #e8a55a;
+    --delete: #e07171;
+    --cmd: #5db8a6;
+    background: var(--bg-surface);
+    color: var(--fg-default);
   }
 
   * { box-sizing: border-box; }
@@ -144,18 +183,19 @@
     justify-content: center;
     width: 24px;
     height: 24px;
-    background: linear-gradient(135deg, #6366f1, #3b82f6);
-    color: #fff;
+    background: var(--accent);
+    color: var(--on-accent);
     border-radius: var(--radius-sm);
     font-weight: 800;
     font-size: 13px;
-    box-shadow: 0 2px 6px rgba(99, 102, 241, 0.4);
+    box-shadow: none;
   }
 
   .brand {
-    font-weight: 700;
-    font-size: 14px;
-    letter-spacing: -0.02em;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 17px;
+    letter-spacing: -0.03em;
     color: var(--fg-default);
   }
 
@@ -481,6 +521,12 @@
 
   details.sec > summary .sec-title {
     flex: 1 1 auto;
+    /* section heads carry the serif display voice; the labels and controls
+       below them stay sans, which is the split the system is built on */
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 16px;
+    letter-spacing: -0.02em;
   }
 
   details.sec > summary .count {
@@ -583,7 +629,7 @@
     width: 100%;
     font: 12px var(--mono);
     padding: 5px 8px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-subtle);
     background: var(--bg-surface);
     color: var(--fg-default);
@@ -768,7 +814,7 @@
   }
   .tri button[aria-pressed="true"] {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font-weight: 600;
   }
 
@@ -1150,7 +1196,7 @@
 
   pre.plan {
     margin: 0;
-    padding: 12px 14px;
+    padding: 14px;
     font: 12.5px/1.6 var(--mono);
     white-space: pre;
     flex: 1 1 auto;
@@ -1201,24 +1247,27 @@
 
   button.primary {
     font: inherit;
-    font-weight: 600;
+    font-weight: 500;
     font-size: 13px;
-    padding: 7px 18px;
-    border-radius: var(--radius-sm);
+    padding: 8px 20px;
+    border-radius: var(--radius-md);
     cursor: pointer;
     border: 1px solid transparent;
-    background: var(--delete);
-    color: #fff;
-    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
+    /* the one irreversible action in the app keeps a danger tone; coral is
+       the brand's primary, but it must not be what "writes your files" looks
+       like. #c64545 is the palette's own error red, so it stays warm. */
+    background: var(--error);
+    color: var(--on-accent);
+    box-shadow: none;
     transition: all 0.15s ease;
     display: inline-flex;
     align-items: center;
     gap: 6px;
   }
   button.primary:hover:not(:disabled) {
-    background: #dc2626;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.45);
+    filter: brightness(0.92);
+    transform: none;
+    box-shadow: none;
   }
   button.primary:disabled {
     background: var(--bg-surface-elevated);
@@ -1277,7 +1326,7 @@
     box-shadow: var(--shadow-lg);
   }
   dialog::backdrop {
-    background: rgba(0, 0, 0, 0.65);
+    background: rgba(20, 20, 19, 0.55);
     backdrop-filter: blur(2px);
   }
   dialog .dialog-body {
@@ -1285,8 +1334,10 @@
   }
   dialog h2 {
     margin: 0 0 10px;
-    font-size: 16px;
-    font-weight: 700;
+    font-family: var(--serif);
+    font-size: 22px;
+    font-weight: 400;
+    letter-spacing: -0.03em;
     color: var(--fg-default);
   }
   dialog p {
@@ -1543,8 +1594,10 @@ const opts = () => ({
 
 /* ---- theme toggle ---------------------------------------------------- */
 function initTheme() {
+  // cream is the floor of the system, so it is the fallback: only an explicit
+  // OS dark preference (or a stored choice) opts into the dark variant
   const current = localStorage.getItem("agentctl_theme") ||
-    (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   document.documentElement.setAttribute("data-theme", current);
 }
 initTheme();
