@@ -1448,5 +1448,53 @@
     (is (true? (:stale res)))
     (is (not (u/exists? path)) "a refused apply writes nothing")))
 
+(deftest the-gui-table-says-the-same-thing-as-the-text
+  ;; the GUI renders a table from `:ops`, so the grouping and the masking both
+  ;; have to happen here — the browser must not re-derive either
+  (let [file "/tmp/agentctl-gui/settings.json"
+        ops [(plan/op {:action :update :tool :claude :kind :mcps :id :slack :target file
+                       :diffs [{:key :SLACK_TOKEN :before nil
+                                :after "xoxc-111111111111-222222222222"}]})
+             (plan/op {:action :create :tool :claude :kind :skills :id :demo
+                       :target "/tmp/agentctl-gui/skills/demo"
+                       :category :fs :entry "folder" :fs-op "symlink"
+                       :from "~/packs/demo"
+                       :cmds [["ln" "-s" "~/packs/demo" "/tmp/agentctl-gui/skills/demo"]]})
+             (plan/op {:action :noop :tool :claude :kind :projects :id :hooks
+                       :summary "hooks have no project scope" :warn true})]
+        [{:keys [tool groups]} :as data] (plan/plan-data ops {})
+        by-lane (into {} (map (juxt :category identity)) groups)]
+    (is (= 1 (count data)))
+    (is (= "claude" tool))
+    (is (= #{"struct" "fs" "report"} (set (keys by-lane))))
+    (testing "a credential is masked here exactly as it is in the text"
+      (is (not (str/includes? (pr-str data) "111111111111")))
+      (is (str/includes? (pr-str data) "xoxc…22")))
+    (testing "the fs lane carries what a file change is: which entry, from where"
+      (let [g (by-lane "fs")]
+        (is (= ["folder" "symlink" "~/packs/demo"] [(:entry g) (:fs-op g) (:from g)]))
+        (is (= ["ln -s ~/packs/demo /tmp/agentctl-gui/skills/demo"] (:cmds g)))))
+    (testing "a warning noop is kept: a setting that went nowhere is the report"
+      (is (= "noop" (:action (by-lane "report")))))
+    (testing "agentctl never renames or moves, so no lane claims it does"
+      (is (every? #{"create" "update" "delete" "noop"} (map :action groups))))))
+
+(deftest one-file-one-entry-in-the-table-too
+  (let [file "/tmp/agentctl-gui/.claude.json"
+        mk (fn [id v] (plan/op {:action :create :tool :claude :kind :mcps :id id :target file
+                                :diffs [{:key :command :before nil :after v}]}))
+        [{[g] :groups}] (plan/plan-data [(mk :a "/bin/a") (mk :b "/bin/b")] {})]
+    (is (= "mcps/{a b}" (:label g)) "two servers in one file read as one entry")
+    (is (= ["a" "b"] (:ids g)))
+    (testing "a field is qualified by its server exactly where the text qualifies it:
+              one field of an op's own naming reads clearly on its own, several do not"
+      (is (= ["command" "command"] (mapv :key (:rows g)))))
+    (let [mk2 (fn [id v] (plan/op {:action :create :tool :claude :kind :mcps :id id :target file
+                                   :diffs [{:key :command :before nil :after v}
+                                           {:key :type :before nil :after "stdio"}]}))
+          [{[g2] :groups}] (plan/plan-data [(mk2 :a "/bin/a") (mk2 :b "/bin/b")] {})]
+      (is (= ["a.command" "a.type" "b.command" "b.type"] (mapv :key (:rows g2)))))))
+
+
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

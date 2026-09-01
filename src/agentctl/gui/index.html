@@ -42,6 +42,11 @@
     --secret: #a855f7;
     --secret-bg: rgba(168, 85, 247, 0.12);
 
+    /* Cohere coral — taxonomy only (lane chips). Never a surface fill. */
+    --taxo: #ff7759;
+    --taxo-border: rgba(255, 119, 89, 0.38);
+    --taxo-quiet: #93939f;
+
     --warn: #f59e0b;
     --error: #ef4444;
 
@@ -91,6 +96,10 @@
 
     --secret: #9333ea;
     --secret-bg: rgba(147, 51, 234, 0.08);
+
+    --taxo: #d94f2d;
+    --taxo-border: rgba(255, 119, 89, 0.55);
+    --taxo-quiet: #75758a;
 
     --warn: #d97706;
     --error: #dc2626;
@@ -867,6 +876,8 @@
   .metric-pill.delete { background: var(--delete-bg); color: var(--delete); border: 1px solid var(--delete-border); }
   .metric-pill.cmd    { background: var(--cmd-bg); color: var(--cmd); border: 1px solid var(--cmd-border); }
   .metric-pill.secret { background: var(--secret-bg); color: var(--secret); }
+  /* `display` beats the hidden attribute — a zeroed pill has to say so */
+  .metric-pill[hidden], .lane-filters[hidden] { display: none; }
 
   .findings {
     padding: 10px 14px;
@@ -884,6 +895,258 @@
   .f-error { color: var(--error); }
   .f-warn { color: var(--warn); }
   .f-note { color: var(--fg-muted); }
+
+  /* ---- Plan table (Cohere `research-table`: ruled rows, no cards) ------ */
+
+  .plan-table {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: 0 0 24px;
+  }
+  .plan-table[hidden] { display: none; }
+
+  .plan-banner {
+    padding: 12px 14px;
+    font-size: 12px;
+    color: var(--create);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  /* tool heading — Cohere `mono-label`: uppercase, tracked, quiet, ruled */
+  .tool-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 14px 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.28px;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+  }
+  .tool-head .rule {
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border-subtle);
+  }
+  .tool-head .n { color: var(--fg-subtle); font-size: 10.5px; }
+
+  /* one op group = one rule-separated row, not a card */
+  .op {
+    border-top: 1px solid var(--border-subtle);
+    padding: 9px 14px 10px;
+  }
+  .op:hover { background: var(--bg-surface-elevated); }
+  .op[data-act="noop"] { opacity: 0.72; }
+
+  .op-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .op-head .sig {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 13px;
+    width: 9px;
+    flex: none;
+  }
+  .sig.c { color: var(--create); }
+  .sig.u { color: var(--update); }
+  .sig.d { color: var(--delete); }
+  .sig.n { color: var(--fg-subtle); }
+
+  .op-label {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--fg-default);
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+  }
+  /* a collapsed label — `settings/{a b c d}` — can outrun a narrow pane. It
+     travels with its sigil so a wrap never strands the sigil on a line of its
+     own, and being first in the row it shrinks in place instead of being
+     pushed down; the chips wrap under it when there is no room beside it. */
+  .op-name {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .op-label .scope {
+    color: var(--fg-subtle);
+    margin-right: 5px;
+  }
+
+  /* Cohere `button-pill-outline` — the lane taxonomy, one colour for all
+     four so the chip reads as a category and never as a status */
+  .lane-chip {
+    font-size: 10.5px;
+    line-height: 1.4;
+    padding: 1px 9px;
+    border-radius: 30px;
+    border: 1px solid var(--taxo-border);
+    color: var(--taxo);
+    white-space: nowrap;
+    cursor: help;
+  }
+  .lane-chip.report {
+    border-color: var(--border-strong);
+    color: var(--taxo-quiet);
+  }
+  .risk-chip {
+    font-size: 10.5px;
+    padding: 1px 8px;
+    border-radius: 30px;
+    background: var(--secret-bg);
+    color: var(--secret);
+    white-space: nowrap;
+  }
+
+  .op-target {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--fg-subtle);
+    max-width: 46%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+
+  /* the lane's own sentence: what kind of change this is, said once */
+  .op-lede {
+    margin: 5px 0 0 17px;
+    font-size: 11.5px;
+    color: var(--fg-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .op-lede .crumb {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--fg-default);
+  }
+  .op-lede .sep { color: var(--fg-subtle); }
+  .op-lede .crumb .sep { color: var(--fg-subtle); margin: 0 3px; }
+  .op-lede .fmt {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.28px;
+    text-transform: uppercase;
+    color: var(--fg-subtle);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xs, 4px);
+    padding: 0 4px;
+  }
+  .op-note {
+    margin: 5px 0 0 17px;
+    font-size: 11.5px;
+    color: var(--warn);
+  }
+  .op-cmd {
+    margin: 6px 0 0 17px;
+    padding: 4px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--cmd);
+    border-left: 2px solid var(--cmd-border);
+    background: var(--cmd-bg);
+    border-radius: 0 4px 4px 0;
+    /* a command is meant to be read and re-run by hand, so it wraps with a
+       hanging indent rather than scrolling out of sight in a narrow pane */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding-left: 20px;
+    text-indent: -12px;
+  }
+
+  /* field rows — hairline-free, indented by depth, values in mono */
+  .op-rows { margin: 6px 0 0 17px; }
+  .op-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.65;
+    padding-left: calc(var(--d, 0) * 12px);
+  }
+  .op-row .rk { color: var(--fg-muted); flex: none; }
+  .op-row .rv { color: var(--fg-default); word-break: break-all; }
+  .op-row .rv.was { color: var(--fg-subtle); text-decoration: line-through; text-decoration-color: var(--delete); }
+  .op-row .arw { color: var(--fg-subtle); flex: none; }
+  .op-row.c .rk { color: var(--create); }
+  .op-row.u .rk { color: var(--update); }
+  .op-row.d .rk { color: var(--delete); }
+  .op-row .rs { color: var(--fg-muted); }
+
+  .op-more {
+    margin: 2px 0 0 17px;
+    font-size: 11px;
+    color: var(--fg-subtle);
+  }
+  .op-more > summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 2px 0;
+  }
+  .op-more > summary::-webkit-details-marker { display: none; }
+  .op-more > summary:hover { color: var(--fg-accent); }
+
+  /* lane filter chips in the metrics bar */
+  .lane-filters {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    margin-left: 4px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border-subtle);
+  }
+  .lane-filters button {
+    font: inherit;
+    font-size: 10.5px;
+    padding: 1px 9px;
+    border-radius: 30px;
+    border: 1px solid var(--taxo-border);
+    background: transparent;
+    color: var(--taxo);
+    cursor: pointer;
+  }
+  .lane-filters button[aria-pressed="false"] {
+    border-color: var(--border-subtle);
+    color: var(--fg-subtle);
+  }
+  .plan-table[data-hide~="struct"] .op[data-lane="struct"],
+  .plan-table[data-hide~="fs"] .op[data-lane="fs"],
+  .plan-table[data-hide~="cmd"] .op[data-lane="cmd"],
+  .plan-table[data-hide~="report"] .op[data-lane="report"] { display: none; }
+  .tool-sec.allhidden { display: none; }
+
+  .view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .view-toggle button {
+    font: inherit;
+    font-size: 10.5px;
+    padding: 1px 8px;
+    background: transparent;
+    border: 0;
+    color: var(--fg-subtle);
+    cursor: pointer;
+  }
+  .view-toggle button[aria-pressed="true"] {
+    background: var(--accent-subtle);
+    color: var(--fg-accent);
+  }
 
   pre.plan {
     margin: 0;
@@ -1169,13 +1432,19 @@
       <span class="metric-pill delete" id="m-delete" hidden>-0 delete</span>
       <span class="metric-pill cmd" id="m-cmd" hidden>!0 run</span>
       <span class="metric-pill secret" id="m-secret" hidden>🔒 0 secrets</span>
+      <span class="lane-filters" id="lane-filters" hidden></span>
       <span class="spacer"></span>
+      <span class="view-toggle" id="view-toggle">
+        <button type="button" data-view="table" aria-pressed="true" title="Grouped table">table</button>
+        <button type="button" data-view="text" aria-pressed="false" title="Exactly what `agentctl apply` prints">text</button>
+      </span>
       <button class="icon-btn" id="btn-copy-plan" title="Copy plan text" style="width:22px;height:22px;font-size:11px;">📋</button>
     </div>
 
     <div class="out">
       <div class="findings" id="findings" hidden></div>
-      <pre class="plan" id="plan"></pre>
+      <div class="plan-table" id="plantable"></div>
+      <pre class="plan" id="plan" hidden></pre>
     </div>
   </section>
 </main>
@@ -1385,6 +1654,172 @@ function renderPlan(text) {
   }).join("\n");
 }
 
+/* ---- plan table -------------------------------------------------------
+
+   Four lanes, because four is what agentctl actually emits. There is no
+   rename and no move — a resource it stops wanting is removed and the new
+   one created — and no line-level edit either: a TOML file is edited by
+   segment surgery, which is a structural edit like any other.               */
+
+const LANES = {
+  fs:     {label: "file",  hint: "a file or folder created or removed"},
+  struct: {label: "value", hint: "a value set or removed at a path inside a config file"},
+  cmd:    {label: "run",   hint: "a command run against a tool's own CLI"},
+  report: {label: "check", hint: "nothing changes — a converged check, or a setting that went nowhere"},
+};
+const LANE_ORDER = ["fs", "struct", "cmd", "report"];
+const SIGIL = {create: "+", update: "~", delete: "-", noop: "="};
+const ACTC = {create: "c", update: "u", delete: "d", noop: "n"};
+const hiddenLanes = new Set();
+
+const tableEl = $("plantable");
+
+const crumb = (path) =>
+  path.map((k) => `<span>${esc(k)}</span>`).join('<span class="sep">›</span>');
+
+function ledeHtml(g) {
+  if (g.category === "fs") {
+    const verb = g["fs-op"] === "remove" ? "remove" : g["fs-op"];
+    return `<div class="op-lede">${esc(verb)} <span class="fmt">${esc(g.entry || "path")}</span>` +
+           (g.from ? ` <span class="crumb">${esc(g.from)}</span> <span class="sep">→</span>` : "") +
+           ` <span class="crumb">${esc(g.target || "")}</span></div>`;
+  }
+  if (g.category === "struct") {
+    const where = g.path && g.path.length ? `<span class="crumb">${crumb(g.path)}</span>` : "";
+    return `<div class="op-lede">${esc(g.verb || "edit")}${where ? " " + where : ""}` +
+           (g.container ? ` <span class="fmt">${esc(g.container)}</span>` : "") + `</div>`;
+  }
+  return g.summary ? `<div class="op-lede">${esc(g.summary)}</div>` : "";
+}
+
+function opRowHtml(r) {
+  const cls = ACTC[r.action] || "";
+  const style = r.depth ? ` style="--d:${r.depth}"` : "";
+  if (r.summary !== undefined && r.summary !== null && r.before === undefined) {
+    return `<div class="op-row ${cls}"${style}><span class="rk">${SIGIL[r.action] || "?"} ${esc(r.key)}</span>` +
+           `<span class="rs">${esc(r.summary)}</span></div>`;
+  }
+  const parts = [`<span class="rk">${esc(r.key)}</span>`];
+  if (r.before !== null && r.before !== undefined) {
+    parts.push(`<span class="rv${r.after === null || r.after === undefined ? " was" : ""}">${esc(r.before)}</span>`);
+    if (r.after !== null && r.after !== undefined) parts.push(`<span class="arw">→</span>`);
+  }
+  if (r.after !== null && r.after !== undefined) parts.push(`<span class="rv">${esc(r.after)}</span>`);
+  return `<div class="op-row ${cls}"${style}>${parts.join("")}</div>`;
+}
+
+/* an update is the case a reader came here to read, so its fields stay open;
+   a create or a delete is summarised by its header and folds after six —
+   unless `verbose` is on, which is the same request the text plan answers by
+   printing every diff instead of only an update's */
+function rowsHtml(g) {
+  /* the fs lane says its whole story in the lede and the command; its one
+     `target` row is the same fact a third time. So is a report's summary. */
+  const rows = (g.rows || []).filter((r) =>
+    !(g.category === "fs" && r.key === "target") &&
+    !(r.summary && r.summary === g.summary));
+  if (!rows.length) return "";
+  const wantAll = $("verbose").checked || g.action === "update";
+  const open = wantAll || rows.length <= 6 ? rows : rows.slice(0, 6);
+  const rest = rows.slice(open.length);
+  let html = `<div class="op-rows">${open.map(opRowHtml).join("")}</div>`;
+  if (rest.length) {
+    html += `<details class="op-more"><summary>+${rest.length} more field${rest.length === 1 ? "" : "s"}</summary>` +
+            `<div class="op-rows" style="margin-left:0">${rest.map(opRowHtml).join("")}</div></details>`;
+  }
+  return html;
+}
+
+function opGroupHtml(g) {
+  const lane = LANES[g.category] || LANES.struct;
+  const label = (g.scope ? `<span class="scope">${esc(g.scope)}</span>` : "") + esc(g.label || "");
+  return `<div class="op" data-lane="${esc(g.category)}" data-act="${esc(g.action)}">` +
+    `<div class="op-head">` +
+      `<span class="op-name">` +
+        `<span class="sig ${ACTC[g.action] || ""}">${SIGIL[g.action] || "?"}</span>` +
+        `<span class="op-label">${label}</span>` +
+      `</span>` +
+      `<span class="lane-chip ${esc(g.category)}" title="${attr(lane.hint)}">${esc(lane.label)}</span>` +
+      (g.risk === "secret" ? `<span class="risk-chip">🔒 secret</span>` : "") +
+      (g.target ? `<span class="op-target" title="${attr(g.target)}">${esc(g["target-short"] || g.target)}</span>` : "") +
+    `</div>` +
+    ledeHtml(g) +
+    (g.notes || []).map((n) =>
+      `<div class="op-note">⚠ ${esc(n.id)}: ${esc(String(n.note).replace(/^⚠\s*/, ""))}</div>`).join("") +
+    (g.cmds || []).map((c) => `<div class="op-cmd">$ ${esc(c)}</div>`).join("") +
+    rowsHtml(g) +
+  `</div>`;
+}
+
+function renderLaneFilters(sections) {
+  const counts = {};
+  for (const sec of sections) for (const g of sec.groups) counts[g.category] = (counts[g.category] || 0) + 1;
+  const lanes = LANE_ORDER.filter((k) => counts[k]);
+  const filterBox = $("lane-filters");
+  filterBox.hidden = lanes.length < 2;
+  // a filter has to stay undoable: a lane this plan no longer has can't be
+  // un-hidden from a chip that is gone, and neither can anything at all once
+  // the row itself is hidden for want of a second lane
+  for (const k of [...hiddenLanes]) if (!counts[k]) hiddenLanes.delete(k);
+  if (lanes.length < 2) hiddenLanes.clear();
+  filterBox.innerHTML = lanes.map((k) =>
+    `<button type="button" data-lane="${k}" aria-pressed="${!hiddenLanes.has(k)}" title="${attr(LANES[k].hint)}">` +
+    `${LANES[k].label} ${counts[k]}</button>`).join("");
+  applyLaneFilter();
+}
+
+function applyLaneFilter() {
+  tableEl.setAttribute("data-hide", [...hiddenLanes].join(" "));
+  for (const sec of tableEl.querySelectorAll(".tool-sec")) {
+    const shown = [...sec.querySelectorAll(".op")].filter((o) => !hiddenLanes.has(o.dataset.lane));
+    sec.classList.toggle("allhidden", shown.length === 0);
+  }
+}
+
+$("lane-filters").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-lane]");
+  if (!b) return;
+  const k = b.dataset.lane;
+  if (hiddenLanes.has(k)) hiddenLanes.delete(k); else hiddenLanes.add(k);
+  b.setAttribute("aria-pressed", String(!hiddenLanes.has(k)));
+  applyLaneFilter();
+});
+
+function renderOps(sections, changes) {
+  if (!sections || !sections.length) {
+    tableEl.innerHTML = `<div class="empty-plan-state"><div class="empty-plan-icon">✓</div>` +
+      `<div><strong>Everything is up to date</strong></div>` +
+      `<div style="font-size:12px; margin-top:4px;">No changes needed · Environment matches agents.edn</div></div>`;
+    $("lane-filters").hidden = true;
+    return;
+  }
+  // the text plan says only "no changes"; the table still has the checks and
+  // warnings to show, and a converged setting is worth as much as a changed
+  // one — so it says both rather than contradicting the other view
+  tableEl.innerHTML = (changes === 0
+    ? `<div class="plan-banner">✓ Everything is up to date — nothing to apply. What was looked at:</div>`
+    : "") + sections.map((sec) =>
+    `<div class="tool-sec"><div class="tool-head">${esc(sec.tool)}<span class="rule"></span>` +
+    `<span class="n">${sec.groups.length}</span></div>` +
+    sec.groups.map(opGroupHtml).join("") + `</div>`).join("");
+  renderLaneFilters(sections);
+}
+
+/* the text view is the plan `agentctl apply` prints, kept one click away */
+$("view-toggle").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-view]");
+  if (!b) return;
+  const table = b.dataset.view === "table";
+  tableEl.hidden = !table;
+  planEl.hidden = table;
+  for (const x of $("view-toggle").querySelectorAll("button"))
+    x.setAttribute("aria-pressed", String(x === b));
+  localStorage.setItem("agentctl_planview", b.dataset.view);
+});
+
+if (localStorage.getItem("agentctl_planview") === "text")
+  document.querySelector('#view-toggle button[data-view="text"]').click();
+
 function updateMetrics(planText, secretsCount) {
   if (!planText) { $("plan-metrics").hidden = true; return; }
   let creates = 0, updates = 0, deletes = 0, cmds = 0;
@@ -1430,10 +1865,12 @@ function show(p) {
   if (p.missing && p.missing.length) extra.push("Skipped (CLI not installed): " + p.missing.join(", "));
   renderFindings(p.findings, extra);
   planEl.classList.remove("stale");
+  tableEl.classList.remove("stale");
 
   if (p.ok) {
     last = p;
     renderPlan(p.plan);
+    renderOps(p.ops, p.changes);
     updateMetrics(p.plan, p.secrets);
     $("summary").textContent = p.summary || "";
     $("apply").disabled = p.changes === 0;
@@ -1448,6 +1885,7 @@ function show(p) {
     $("apply").disabled = true;
     $("plan-metrics").hidden = true;
     planEl.classList.add("stale");
+    tableEl.classList.add("stale");
   }
 }
 

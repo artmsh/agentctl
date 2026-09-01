@@ -74,6 +74,11 @@
                    (if (seq changes)
                      (str/triml (plan/render-plan ops opts))
                      "no changes — environment matches agents.edn"))
+           ;; the same plan as a table: grouped and masked in Clojure, because
+           ;; both the grouping and `render-val`'s masking are decisions the
+           ;; browser must not be left to re-derive. `:plan` stays for copy,
+           ;; and for parity with what the CLI prints
+           :ops (plan/plan-data ops opts)
            :summary (plan/summary-line ops)
            :changes (count changes)
            :secrets (count (filter #(= :secret (:risk %)) changes))})))

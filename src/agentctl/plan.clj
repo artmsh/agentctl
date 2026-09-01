@@ -275,6 +275,123 @@
                     (map #(render-group % opts) (chunk-ops tool-ops)))]
         s)))))
 
+;; ------------------------------------------------- structured plan (the GUI)
+
+;; The GUI renders the same plan as a table rather than a block of text, and
+;; needs the parts separately to do it. What it must *not* get is `:diffs`:
+;; `render-val` is where a credential read out of an existing config file is
+;; masked, so every value here goes through it, exactly as the text does.
+
+(def ^:private container-suffixes
+  {".json" "json" ".jsonc" "json" ".yaml" "yaml" ".yml" "yaml"
+   ".toml" "toml" ".edn" "edn" ".xml" "xml"})
+
+(defn- container-of
+  "The structured format of the file an op edits, when it has one. A path with
+   no known suffix is a file or a directory in its own right, not a container."
+  [target]
+  (when target
+    (some (fn [[suffix fmt]] (when (str/ends-with? target suffix) fmt))
+          container-suffixes)))
+
+(defn category
+  "Which lane an op belongs to. Four exist:
+
+     :struct — a value set or removed at a path inside json/yaml/toml/edn
+     :fs     — a file or directory created or removed (link, copy, unlink)
+     :cmd    — a command run against a tool's own CLI or against git
+     :report — nothing changes: a converged check, or a warning that a
+               declared setting went nowhere
+
+   Renaming and moving are not in the list because agentctl never does either:
+   a resource it no longer wants is removed and the new one created."
+  [o]
+  (cond
+    (:category o) (:category o)
+    (= :noop (:action o)) :report
+    (:warn o) :report
+    (container-of (:target o)) :struct
+    (seq (:cmds o)) :cmd
+    (:target o) :fs
+    :else :cmd))
+
+(defn- diff-rows
+  "`render-diff`, as data. Same recursion into nested maps, same masking; the
+   indent becomes a depth the table can indent by itself."
+  [depth k b a]
+  (let [act (diff-action b a)]
+    (if (and (or (plain-map? b) (nil? b))
+             (or (plain-map? a) (nil? a))
+             (or (plain-map? b) (plain-map? a)))
+      (cons {:action (name act) :depth depth :key (u/kw->str k)}
+            (mapcat (fn [{:keys [key before after]}]
+                      (diff-rows (inc depth) key before after))
+                    (field-diffs (u/norm (or b {})) (u/norm (or a {})))))
+      [{:action (name act) :depth depth :key (u/kw->str k)
+        :before (when-not (= :create act) (render-val k b))
+        :after (when-not (= :delete act) (render-val k a))}])))
+
+(defn- op-rows
+  "The rows one op contributes to its group. `label` qualifies a field with the
+   resource it came from where the group header does not already say it."
+  [o label-fn]
+  (let [[collapsed? ds] (op-diffs o)
+        label (or label-fn (diff-label o collapsed? ds))]
+    (cond
+      (quiet-noop? o) nil
+      ;; a prune carries only a summary — without this it would contribute a
+      ;; name to the header and then say nothing about what happens to it
+      (empty? ds) [{:action (name (:action o)) :depth 0
+                    :key (u/kw->str (:id o)) :summary (:summary o)}]
+      :else (mapcat (fn [{:keys [key before after]}]
+                      (diff-rows 0 (label key) before after))
+                    ds))))
+
+(defn- group-data [ops]
+  (let [o (first ops)
+        action (group-action ops)
+        ids (mapv #(id-str (:id %)) ops)
+        single? (= 1 (count ops))]
+    {:action (name action)
+     :category (name (category o))
+     ;; the group is as risky as its riskiest member: a secret write hidden
+     ;; behind a low-risk first op is exactly the thing this label exists for
+     :risk (name (or (first (filter (set (map #(:risk % :low) ops))
+                                    [:secret :high :medium :low]))
+                     :low))
+     :scope (scope-label o)
+     :kind (some-> (:kind o) name)
+     :label (body-label o ids)
+     :ids ids
+     :target (some-> (:target o) u/tilde)
+     :target-short (when (:target o) (target-label o))
+     :container (container-of (:target o))
+     :path (:path o)
+     :entry (:entry o)
+     :fs-op (:fs-op o)
+     :from (:from o)
+     :verb (when-not (= :noop action) (group-verb action))
+     :summary (when single? (:summary o))
+     :notes (vec (for [x ops :when (:note x)]
+                   {:id (u/kw->str (:id x)) :note (:note x)}))
+     :cmds (vec (for [x ops, c (op-cmds x)]
+                  (str/join " " (map (comp u/tilde str) (remove nil? (flatten c))))))
+     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (u/kw->str k)))) ops))}))
+
+(defn plan-data
+  "`render-plan` as data: the same visibility rule, the same tool sections and
+   the same grouping — one file, one project, one kind reads as one entry."
+  [ops {:keys [show-noop]}]
+  (let [visible (if show-noop
+                  ops
+                  (filter #(or (mutating? %) (:warn %) (quiet-noop? %)) ops))
+        by-tool (group-by :tool visible)]
+    (vec (for [tool (sort-by name (keys by-tool))
+               :let [tool-ops (sort-by (juxt (comp name :kind) (comp u/kw->str :id))
+                                       (get by-tool tool))]]
+           {:tool (name tool)
+            :groups (mapv group-data (chunk-ops tool-ops))}))))
+
 (defn summary-line [ops]
   (let [f (frequencies (map :action ops))]
     (format "%d to add, %d to change, %d to remove, %d unchanged"
@@ -299,6 +416,7 @@
     (when (some? before)
       (op {:project project :action :delete :tool tool :kind kind :id id
            :target file
+           :path (mapv u/kw->str path)
            :summary (or summary (str/join "." (map u/kw->str path)))
            :note note
            :diffs [{:key (last path) :before before :after nil}]
@@ -324,6 +442,7 @@
       (op {:project project :action (if (nil? before) :create :update)
            :tool tool :kind kind :id id
            :target file
+           :path (mapv u/kw->str path)
            :summary (or summary (str (str/join "." (map u/kw->str path))))
            :note note
            :diffs [{:key (last path) :before before :after value}]
@@ -342,6 +461,7 @@
       (op {:project project :action :delete
            :tool tool :kind kind :id id
            :target file
+           :path (mapv u/kw->str path)
            :summary (or summary (str "remove " (str/join "." (map u/kw->str path))))
            :diffs [{:key (last path) :before before :after nil}]
            :risk :medium
@@ -372,6 +492,7 @@
         (op {:project project :action (if stale? :update :create)
              :tool tool :kind kind :id id
              :target file
+             :path (mapv u/kw->str path)
              :summary summary
              :note note
              :diffs [{:key (last path) :before (when stale? old) :after value}]
@@ -398,6 +519,7 @@
     (when (some #(= (u/norm %) (u/norm old)) current)
       (op {:project project :action :delete :tool tool :kind kind :id id
            :target file
+           :path (mapv u/kw->str path)
            :summary (or summary "removed from agents.edn")
            :note note
            :diffs [{:key (last path) :before old :after nil}]
@@ -417,6 +539,7 @@
       (op {:project project :action (if (nil? before) :create :update)
            :tool tool :kind kind :id id
            :target file
+           :path (mapv u/kw->str path)
            :summary (or summary (str (str/join "." (map u/kw->str path))))
            :diffs [{:key (last path) :before before :after value}]
            :risk (or risk :low)
@@ -430,6 +553,7 @@
         before (get-in current path)]
     (when (some? before)
       (op {:project project :action :delete :tool tool :kind kind :id id :target file
+           :path (mapv u/kw->str path)
            :summary (or summary (str "remove " (str/join "." (map u/kw->str path))))
            :diffs [{:key (last path) :before before :after nil}]
            :risk :medium
@@ -447,6 +571,7 @@
     (when (seq diffs)
       (op {:project project :action (if (nil? before) :create :update)
            :tool tool :kind kind :id id :target file
+           :path (mapv u/kw->str table)
            :summary summary
            :note note
            :diffs diffs
@@ -461,6 +586,7 @@
         before (get-in current (vec (map u/kw->str table)))]
     (when (some? before)
       (op {:project project :action :delete :tool tool :kind kind :id id :target file
+           :path (mapv u/kw->str table)
            :summary (or summary (str "remove [" (toml/header-for table) "]"))
            :diffs [{:key (last table) :before before :after nil}]
            :risk :medium
@@ -485,6 +611,10 @@
       (op {:project project :action (if exists :update :create)
            :tool tool :kind kind :id id
            :target dest
+           :category :fs
+           :entry (if (babashka.fs/directory? want) "folder" "file")
+           :fs-op (name mode)
+           :from (u/tilde want)
            :summary (str (name mode) " " (u/tilde want) " -> " (u/tilde dest))
            ;; the command a person would type for this. `exec!` does it through
            ;; fs so it can back the old path up first, but the effect is this
@@ -506,6 +636,9 @@
   [{:keys [tool kind id dest project]}]
   (when (u/exists? dest)
     (op {:project project :action :delete :tool tool :kind kind :id id :target dest
+         :category :fs
+         :entry (if (babashka.fs/directory? dest) "folder" "file")
+         :fs-op "remove"
          :summary (str "remove " (u/tilde dest))
          :risk :medium
          :exec! (fn [] (u/backup! dest) (babashka.fs/delete-tree dest))})))
