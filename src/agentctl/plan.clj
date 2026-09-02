@@ -315,6 +315,29 @@
     (:target o) :fs
     :else :cmd))
 
+(defn run
+  "One command, as slots and as the argv that runs it.
+
+   A command rendered from a re-parsed argv is a guess; a command rendered
+   from slots that nothing checks against the argv is a lie waiting to happen.
+   So the caller passes both — built from the same locals — and this asserts
+   that every slot it claims actually appears in what will run.
+
+     {:program \"gh\" :action [\"repo\" \"clone\"] :subject \"obra/superpowers\"
+      :into root :flags [[\"--branch\" ref]] :argv [\"gh\" \"repo\" ...]}"
+  [{:keys [program action subject into flags argv]}]
+  (let [strs (mapv str (remove nil? argv))
+        present? (fn [v] (or (nil? v) (some #(= (str v) %) strs)))]
+    (assert (= program (first strs)) "run: :program is not the argv head")
+    (assert (every? present? (concat [subject into] (map second flags)))
+            "run: a slot names something the argv does not carry")
+    {:program program
+     :action (str/join " " (map str action))
+     :subject (some-> subject str u/tilde)
+     :into (some-> into str u/tilde)
+     :flags (vec (for [[k v] flags :when k] {:k (str k) :v (some-> v str u/tilde)}))
+     :shell (str/join " " (map u/tilde strs))}))
+
 (defn- diff-rows
   "`render-diff`, as data. Same recursion into nested maps, same masking; the
    indent becomes a depth the table can indent by itself."
@@ -374,6 +397,10 @@
      :summary (when single? (:summary o))
      :notes (vec (for [x ops :when (:note x)]
                    {:id (u/kw->str (:id x)) :note (:note x)}))
+     ;; `:runs` are commands agentctl actually executes, in slots. `:cmds` is
+     ;; the flat line — for the fs lane that is only the shell *equivalent* of
+     ;; what `exec!` does through `fs`, never a step that runs
+     :runs (vec (mapcat :runs ops))
      :cmds (vec (for [x ops, c (op-cmds x)]
                   (str/join " " (map (comp u/tilde str) (remove nil? (flatten c))))))
      :rows (vec (mapcat #(op-rows % (when single? (fn [k] (u/kw->str k)))) ops))}))
@@ -593,7 +620,11 @@
            :exec! (fn [] (u/backup! file) (toml/update-file! file #(toml/remove-table % (vec table))))}))))
 
 (defn link-op
-  "Ensure `dest` is a symlink to `src` (or a copy when mode = :copy)."
+  "Ensure `dest` is a symlink to `src` (or a copy when mode = :copy).
+
+   Those two are the whole taxonomy: how an entry gets to its destination.
+   `:hardlink` would be the third and nothing asks for it yet — the shape
+   here has room for it, and `:fs-op` is already the word the plan renders."
   [{:keys [tool kind id src dest mode project]}]
   (let [mode (or mode :symlink)
         exists (u/exists? dest)

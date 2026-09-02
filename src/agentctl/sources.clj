@@ -177,15 +177,23 @@
        (or host "git"))
      (or path s)]))
 
-(defn- clone-cmd
+(defn- clone-run
   "How a person would clone it by hand: `gh` for a github repo when it is on
    PATH, git otherwise. Whatever this returns is what runs and what the plan
-   prints — the line is a command, not a description of one."
+   prints — the line is a command, not a description of one. It is described
+   in slots as well, so the plan can show `clone` and `obra/superpowers` as
+   the two words that matter instead of one 78-column line."
   [uri ref root]
-  (let [[label repo] (uri-parts uri)]
-    (if (and (= "gh" label) (u/which "gh"))
-      (into ["gh" "repo" "clone" repo root] (when ref ["--" "--branch" ref]))
-      (into ["git" "clone" "--depth" "1"] (concat (when ref ["--branch" ref]) [uri root])))))
+  (let [[label repo] (uri-parts uri)
+        gh? (and (= "gh" label) (u/which "gh"))]
+    (if gh?
+      {:program "gh" :action ["repo" "clone"] :subject repo :into root
+       :flags (when ref [["--branch" ref]])
+       :argv (into ["gh" "repo" "clone" repo root] (when ref ["--" "--branch" ref]))}
+      {:program "git" :action ["clone"] :subject uri :into root
+       :flags (cond-> [["--depth" "1"]] ref (conj ["--branch" ref]))
+       :argv (into ["git" "clone" "--depth" "1"]
+                   (concat (when ref ["--branch" ref]) [uri root]))})))
 
 (defn pack-ops
   "Ops that fetch or update git-backed skill packs."
@@ -197,10 +205,17 @@
               local (when present (git-head root))
               remote (git-remote-head (:uri pack) (:ref pack))
               [label repo] (uri-parts (:uri pack))
-              cmds (if present
-                     [["git" "-C" root "fetch" "--all" "--tags" "--prune"]
-                      ["git" "-C" root "reset" "--hard" (or (:ref pack) "@{upstream}")]]
-                     [(clone-cmd (:uri pack) (:ref pack) root)])]
+              runs (if present
+                     [{:program "git" :action ["fetch"] :into root
+                       :flags [["--all"] ["--tags"] ["--prune"]]
+                       :argv ["git" "-C" root "fetch" "--all" "--tags" "--prune"]}
+                      {:program "git" :action ["reset"] :into root
+                       :subject (or (:ref pack) "@{upstream}")
+                       :flags [["--hard"]]
+                       :argv ["git" "-C" root "reset" "--hard"
+                              (or (:ref pack) "@{upstream}")]}]
+                     [(clone-run (:uri pack) (:ref pack) root)])
+              cmds (mapv :argv runs)]
         :when (or (not present) (and remote local (not= local remote)))]
     (plan/op {:action (if present :update :create)
               :tool :agentctl :kind :skill-packs :id id
@@ -210,6 +225,7 @@
                               " (" (some-> local (subs 0 7)) " -> " (some-> remote (subs 0 7)) ")")
                          (str label ": clone pack `" repo "` -> " (u/tilde root)))
               :cmds cmds
+              :runs (mapv plan/run runs)
               :diffs [{:key :revision :before local :after remote}]
               :exec! (fn []
                        (fs/create-dirs packs-root)

@@ -1095,6 +1095,70 @@
     font-size: 11.5px;
     color: var(--warn);
   }
+  /* a command agentctl really runs, in slots: the two words that matter —
+     the action and its subject — read at a glance, every flag on its own
+     line, and the literal argv one disclosure away for copying by hand */
+  .runcard {
+    margin: 7px 0 0 17px;
+    border: 1px solid var(--cmd-border);
+    border-left-width: 2px;
+    border-radius: 0 6px 6px 0;
+    background: var(--cmd-bg);
+    padding: 7px 10px;
+  }
+  .rc-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .rc-prog {
+    display: inline-flex;
+    padding: 0 7px;
+    border-radius: 4px;
+    background: var(--cmd-border);
+    color: var(--fg-default);
+    font-weight: 700;
+    font-size: 10.5px;
+    letter-spacing: 0.3px;
+    flex: none;
+  }
+  .rc-act { color: var(--fg-default); }
+  .rc-subj { color: var(--taxo); overflow-wrap: anywhere; }
+  .rc-args {
+    margin: 6px 0 0;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 1px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .rc-args dt { color: var(--fg-subtle); }
+  .rc-args dd { margin: 0; color: var(--fg-default); overflow-wrap: anywhere; }
+  details.shell { margin: 7px 0 0 17px; }
+  .runcard details.shell { margin-left: 0; }
+  details.shell > summary {
+    cursor: pointer;
+    color: var(--fg-subtle);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.2px;
+    list-style: none;
+  }
+  details.shell > summary::-webkit-details-marker { display: none; }
+  details.shell > summary::before { content: "› "; }
+  details.shell[open] > summary::before { content: "⌄ "; }
+  details.shell pre {
+    margin: 5px 0 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--cmd);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   .op-cmd {
     margin: 6px 0 0 17px;
     padding: 4px 8px;
@@ -1742,6 +1806,9 @@ function ledeHtml(g) {
     return `<div class="op-lede">${esc(g.verb || "edit")}${where ? " " + where : ""}` +
            (g.container ? ` <span class="fmt">${esc(g.container)}</span>` : "") + `</div>`;
   }
+  // a run card already says the program, the action and its subject; the
+  // summary that used to carry them would be the same sentence twice
+  if ((g.runs || []).length) return "";
   return g.summary ? `<div class="op-lede">${esc(g.summary)}</div>` : "";
 }
 
@@ -1783,6 +1850,40 @@ function rowsHtml(g) {
   return html;
 }
 
+/* `runs` are commands agentctl executes; `cmds` on the fs lane is only the
+   shell equivalent of what `exec!` does through fs — it backs the old path up
+   first — so it is labelled as an equivalent and folded, never printed as a
+   step. */
+function runHtml(r) {
+  const args = [];
+  if (r.into) args.push(["into", r.into]);
+  for (const f of r.flags || []) args.push([f.k.replace(/^-+/, ""), f.v || "yes"]);
+  return `<div class="runcard">` +
+    `<div class="rc-head">` +
+      `<span class="rc-prog">${esc(r.program)}</span>` +
+      `<span class="rc-act">${esc(r.action)}</span>` +
+      (r.subject ? `<span class="rc-subj">${esc(r.subject)}</span>` : "") +
+    `</div>` +
+    (args.length
+      ? `<dl class="rc-args">` +
+        args.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") +
+        `</dl>`
+      : "") +
+    `<details class="shell"><summary>shell</summary><pre>${esc(r.shell)}</pre></details>` +
+  `</div>`;
+}
+
+function cmdsHtml(g) {
+  if ((g.runs || []).length) return g.runs.map(runHtml).join("");
+  const cmds = g.cmds || [];
+  if (!cmds.length) return "";
+  if (g.category === "fs") {
+    return `<details class="shell"><summary>shell equivalent</summary>` +
+      `<pre>${cmds.map(esc).join("\n")}</pre></details>`;
+  }
+  return cmds.map((c) => `<div class="op-cmd">$ ${esc(c)}</div>`).join("");
+}
+
 function opGroupHtml(g) {
   const lane = LANES[g.category] || LANES.struct;
   const label = (g.scope ? `<span class="scope">${esc(g.scope)}</span>` : "") + esc(g.label || "");
@@ -1799,7 +1900,7 @@ function opGroupHtml(g) {
     ledeHtml(g) +
     (g.notes || []).map((n) =>
       `<div class="op-note">⚠ ${esc(n.id)}: ${esc(String(n.note).replace(/^⚠\s*/, ""))}</div>`).join("") +
-    (g.cmds || []).map((c) => `<div class="op-cmd">$ ${esc(c)}</div>`).join("") +
+    cmdsHtml(g) +
     rowsHtml(g) +
   `</div>`;
 }

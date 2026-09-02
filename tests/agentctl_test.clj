@@ -1496,5 +1496,43 @@
       (is (= ["a.command" "a.type" "b.command" "b.type"] (mapv :key (:rows g2)))))))
 
 
+(deftest a-command-is-slots-and-the-argv-agrees-with-them
+  ;; the run lane renders `clone` and `obra/superpowers` rather than one
+  ;; 78-column line, so the slots must describe the argv that actually runs
+  (let [r (plan/run {:program "gh" :action ["repo" "clone"]
+                     :subject "obra/superpowers"
+                     :into (str u/home "/.agents/skill-packs/superpowers")
+                     :flags [["--branch" "main"]]
+                     :argv ["gh" "repo" "clone" "obra/superpowers"
+                            (str u/home "/.agents/skill-packs/superpowers")
+                            "--" "--branch" "main"]})]
+    (is (= "gh" (:program r)))
+    (is (= "repo clone" (:action r)))
+    (is (= "obra/superpowers" (:subject r)))
+    (is (= "~/.agents/skill-packs/superpowers" (:into r)))
+    (is (= [{:k "--branch" :v "main"}] (:flags r)))
+    ;; the shell line is the argv, tilde'd — never a re-rendering of the slots
+    (is (= "gh repo clone obra/superpowers ~/.agents/skill-packs/superpowers -- --branch main"
+           (:shell r))))
+  ;; a slot the argv does not carry is a command described as something it is
+  ;; not, which is worse than printing no command at all
+  (is (thrown? AssertionError
+               (plan/run {:program "git" :action ["clone"] :subject "git@example:repo"
+                          :into "/tmp/elsewhere"
+                          :argv ["git" "clone" "git@example:repo" "/tmp/here"]}))))
+
+(deftest the-fs-lane-carries-a-shell-equivalent-not-a-step
+  ;; `link-op` runs through fs so it can back the old path up first; the ln
+  ;; line is what a person would type, and the table must not claim otherwise
+  (let [src (str u/home "/packs/demo/skills/wrap-up")
+        dest (str u/home "/.claude/skills/wrap-up")
+        _ (fs/create-dirs src)
+        op (plan/link-op {:tool :claude :kind :skills :id :wrap-up :src src :dest dest})
+        [{[g] :groups}] (plan/plan-data [op] {})]
+    (is (= "fs" (:category g)))
+    (is (empty? (:runs g)) "an fs op runs no command")
+    (is (= 1 (count (:cmds g))))
+    (is (str/starts-with? (first (:cmds g)) "ln -s "))))
+
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))
