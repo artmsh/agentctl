@@ -61,14 +61,40 @@
 
 ;; ---------------------------------------------------------------- settings
 
+(defn- keymap-ops [keymap]
+  ;; Keep native context/action spelling. Codex validates which actions and
+  ;; key names its installed version supports; only validate the value shape.
+  (when-not (and (map? keymap)
+                 (every? (fn [[context actions]]
+                           (and (or (keyword? context) (string? context))
+                                (map? actions)
+                                (every? (fn [[action binding]]
+                                          (and (or (keyword? action) (string? action))
+                                               (or (string? binding)
+                                                   (and (sequential? binding)
+                                                        (every? string? binding)))))
+                                        actions)))
+                         keymap))
+    (throw (ex-info "codex :keymap must map contexts to actions with string or string-vector bindings"
+                    {:path [:executors :codex :keymap]})))
+  (keep (fn [[context actions]]
+          (plan/toml-set-op {:tool tool :kind :settings
+                             :id (keyword "keymap" (u/kw->str context))
+                             :file config-file :table ["tui" "keymap" (u/kw->str context)]
+                             :kvs actions
+                             :summary (str "codex keymap " (u/kw->str context))}))
+        keymap))
+
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
-        [kvs unsupported] (common/map-settings settings setting-keys)]
+        [kvs unsupported] (common/map-settings (dissoc settings :keymap) setting-keys)
+        bindings (when (contains? settings :keymap) (keymap-ops (:keymap settings)))]
     (concat
      (keep identity
            [(plan/toml-set-op {:tool tool :kind :settings :id :global
                                :file config-file :table [] :kvs kvs
                                :summary "global codex settings"})])
+     bindings
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")

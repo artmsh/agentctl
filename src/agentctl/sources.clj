@@ -92,7 +92,8 @@
    id found in more than one pack is ambiguous — an explicit `:skills {id
    {:from pack}}` entry is how that gets broken."
   [cfg proj]
-  (reduce (fn [acc id]
+  (update
+   (reduce (fn [acc id]
             (cond
               (get-in cfg [:skills id])
               (let [s (get-in cfg [:skills id])]
@@ -119,7 +120,9 @@
                   (seq not-ready) (update acc :pending conj id)
                   :else (update acc :unknown conj id)))))
           {:skills {} :pending [] :unknown [] :ambiguous []}
-          (sort (:skills proj))))
+          (sort (:skills proj)))
+   :skills #(into {} (remove (fn [[id s]]
+                              (= :global (:scope (get-in cfg [:skills id] s))))) %)))
 
 (defn for-tool
   "Skills targeting `tool`, with per-tool overrides applied and :source
@@ -142,6 +145,31 @@
         (for [[id s] (:skills cfg)
               :let [src (skill-source cfg s)]]
           [id (assoc s :source src)])))
+
+(defn global-project-unlink-ops
+  "Remove redundant project symlinks for declared global skills, including
+   links predating the ownership manifest. Never remove a local directory.
+   Check the global install again at execution time before unlinking."
+  [cfg tool pid project-dir global-dir]
+  (for [[sid s] (for-tool cfg (all-skills cfg) tool)
+        :when (= :global (:scope s))
+        :let [dest (str project-dir "/" (name sid))
+              global (str global-dir "/" (name sid))]
+        :when (fs/sym-link? dest)
+        :let [o (plan/unlink-op {:tool tool :kind :skills :project pid
+                                 :id (keyword (name pid) (name sid)) :dest dest})]
+        :when o]
+    (assoc o :fs-op "unlink"
+             :entry "folder"
+             :summary (str "unlink " (u/tilde dest))
+             :cmds [["unlink" dest]]
+             :exec! (fn []
+                     (when-not (u/exists? (str global "/SKILL.md"))
+                       (throw (ex-info "global skill is not installed; keeping project link"
+                                       {:skill sid :global global})))
+                     (when-not (fs/sym-link? dest)
+                       (throw (ex-info "project skill is no longer a symlink" {:path dest})))
+                     ((:exec! o))))))
 
 ;; ---------------------------------------------------------------- pack ops
 

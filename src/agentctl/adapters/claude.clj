@@ -416,6 +416,7 @@
         dir (project-skills-dir proj)
         managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
     (concat
+     (sources/global-project-unlink-ops cfg tool id dir skills-dir)
      (for [[sid s] skills
            :when (:source s)
            :let [op (plan/link-op {:tool tool :kind :skills :project id
@@ -443,7 +444,8 @@
      ;; ours to remove: this project's own skills, dropped from agents.edn
      (for [mid managed
            :when (and (= (name id) (namespace mid))
-                      (not (contains? skills (keyword (name mid)))))
+                      (not (contains? skills (keyword (name mid))))
+                      (not= :global (get-in cfg [:skills (keyword (name mid)) :scope])))
            :let [op (plan/unlink-op {:tool tool :kind :skills :project id :id mid
                                      :dest (str dir "/" (name mid))})]
            :when op]

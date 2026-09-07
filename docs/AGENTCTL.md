@@ -190,6 +190,34 @@ Terse spelling of boolean settings. `:on #{:a :b}` is `:a true :b true`;
 Flags a tool does not know are reported as unsupported settings, not silently
 dropped.
 
+### Codex `:keymap`
+
+Declare shortcut overrides under `:executors :codex :keymap`:
+
+```edn
+{:executors
+ {:codex {:keymap {:global {:open_transcript "alt-t"}
+                   :composer {:submit ["enter" "ctrl-enter"]
+                              :queue []}}}}}
+```
+
+This writes `[tui.keymap.global]` and `[tui.keymap.composer]` in
+`~/.codex/config.toml`. Each action accepts a string or a vector of strings;
+`[]` unbinds it. Use Codex's native context and action names, including
+underscores; keyword and string keys both work. Codex validates the supported
+actions and shortcuts for the installed version. See the
+[official keymap reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+Codex CLI 0.153.4 has no bindable action for opening the model selector;
+`open_model` is rejected at startup. Use `/model` to open it. The keymap can
+only rebind actions Codex exposes, so `alt-t` cannot open that selector through
+this setting in that version.
+
+Only declared actions are updated. Undeclared bindings, other TUI settings,
+comments, and Codex-owned state are preserved. Omitting an action (or using an
+empty `:keymap`) leaves its existing binding alone. Import includes the current
+keymap, and the control panel offers it as an EDN field.
+
 ### `:permissions`
 
 A mini-DSL that compiles to the rule strings Claude Code stores:

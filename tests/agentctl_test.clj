@@ -382,6 +382,67 @@
   ;; the value is the whole credential while the key name says nothing about it
   (is (refs/credential? "Authorization" "Bearer sk-live-abcdefgh")))
 
+;; ---------------------------------------------------------------- codex keymap
+
+(deftest codex-keymap-preserves-unmanaged-settings-and-converges
+  (let [f (str (temp-dir) "/config.toml")
+        original (str "# keep this comment\nmodel = \"old\"\n"
+                      "[tui]\nanimations = false\n"
+                      "[tui.keymap.global]\nopen_transcript = \"ctrl-t\"\ncopy = \"alt-c\"\n"
+                      "[hooks.state]\nlast_run = 42\n")
+        cfg (config/normalize
+             {:executors {:codex {:model "new"
+                                   :keymap {:global {:open_transcript ["ctrl-t" "alt-t"]}
+                                            "composer" {"submit" "ctrl-enter" :queue []}}}}} nil)]
+    (u/write-text! f original)
+    (with-redefs [codex/config-file f]
+      (let [ops (vec (codex/settings-ops cfg))]
+        (is (= original (slurp f)) "planning does not write")
+        (is (= #{:global :keymap/global :keymap/composer} (set (map :id ops))))
+        (is (not-any? :warn ops))
+        (doseq [op ops] ((:exec! op))))
+      (let [t (toml/read-toml f)]
+        (is (= "new" (get t "model")))
+        (is (= {"open_transcript" ["ctrl-t" "alt-t"] "copy" "alt-c"}
+               (get-in t ["tui" "keymap" "global"])))
+        (is (= {"submit" "ctrl-enter" "queue" []}
+               (get-in t ["tui" "keymap" "composer"])))
+        (is (false? (get-in t ["tui" "animations"])))
+        (is (= 42 (get-in t ["hooks" "state" "last_run"])))
+        (is (str/includes? (slurp f) "# keep this comment"))
+        (is (empty? (codex/settings-ops cfg)) "second plan has no drift")
+        (is (= (get-in t ["tui" "keymap"])
+               (get-in (imports/scan-settings) [:codex :keymap])))
+        (is (empty? (codex/settings-ops
+                     (config/normalize {:executors (select-keys (imports/scan-settings) [:codex])} nil)))
+            "imported bindings round-trip without drift"))
+      (is (empty? (codex/settings-ops
+                   (config/normalize {:executors {:codex {:keymap {}}}} nil))))
+      (is (empty? (codex/settings-ops (config/normalize {} nil)))))))
+
+(deftest codex-keymap-creates-a-missing-config-and-rejects-malformed-bindings
+  (let [f (str (temp-dir) "/config.toml")]
+    (with-redefs [codex/config-file f]
+      (doseq [keymap [nil "ctrl-t" {:global "ctrl-t"}
+                      {:global {:copy false}} {:global {:copy ["ctrl-c" 42]}}]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"codex :keymap"
+                             (doall (codex/settings-ops
+                                     (config/normalize {:executors {:codex {:keymap keymap}}} nil))))))
+      (is (not (u/exists? f)))
+      (let [cfg (config/normalize {:executors {:codex {:keymap {:global {:copy []}}}}} nil)]
+        (doseq [op (codex/settings-ops cfg)] ((:exec! op)))
+        (is (= [] (get-in (toml/read-toml f) ["tui" "keymap" "global" "copy"])))
+        (is (empty? (codex/settings-ops cfg)))))))
+
+(deftest codex-keymap-is-editable-as-edn
+  (let [keymap {:global {:open_transcript "alt-t"}}
+        m (form/model (pr-str {:executors {:codex {:keymap keymap}}}))
+        section (first (filter #(= ":executors" (:key %)) (:sections m)))
+        entry (first (filter #(= ":codex" (:id %)) (:entries section)))
+        field (first (filter #(= "keymap" (:key %)) (:fields entry)))]
+    (is (= "edn" (:type field)))
+    (is (= keymap (form/coerce :edn (:value field))))))
+
 ;; ---------------------------------------------------------------- settings schema
 
 (def validate-value
@@ -1533,6 +1594,63 @@
     (is (empty? (:runs g)) "an fs op runs no command")
     (is (= 1 (count (:cmds g))))
     (is (str/starts-with? (first (:cmds g)) "ln -s "))))
+
+(deftest global-wrap-up-removes-project-links
+  (doseq [[tool planner subdir global-var]
+          [[:claude claude/plan "/.claude/skills" #'claude/skills-dir]
+           [:antigravity antigravity/plan "/.agents/skills" #'antigravity/skills-dir]]]
+    (let [dir (temp-dir)
+          src (str dir "/pack/skills/wrap-up")
+          global-dir (str dir "/global")
+          raw {:skill-packs {:kit {:uri (str "file://" dir "/pack")}}
+               :skills {:wrap-up {:from :kit :tools [tool]}}
+               :projects (into {} (for [id [:a :b :legacy :directory]]
+                                    [id {:path (str dir "/" (name id))
+                                         :executors #{tool} :skills [:wrap-up]}]))}
+          _ (fs/create-dirs src)
+          _ (spit (str src "/SKILL.md") "---\nname: wrap-up\n---\nWrap up the session.\n")]
+      (with-redefs-fn {global-var global-dir}
+        (fn []
+          (let [local (config/normalize raw "test")
+                local-ops (filter #(and (= :skills (:kind %))
+                                       (#{:a :b} (:project %)))
+                                  (planner local state/empty-state))
+                _ (is (empty? (:failed (core/execute! local-ops))))
+                st (core/sync-state! state/empty-state local)
+                legacy (str dir "/legacy" subdir "/wrap-up")
+                directory (str dir "/directory" subdir "/wrap-up")
+                _ (fs/create-dirs (fs/parent legacy))
+                _ (fs/create-sym-link legacy (str dir "/missing-source"))
+                _ (fs/create-dirs directory)
+                _ (spit (str directory "/SKILL.md") "local content")
+                ;; Keep a direct reference, expand a pack, and drop a reference:
+                ;; all three must shed the redundant project link.
+                global (config/normalize (-> raw
+                                             (assoc-in [:skills :wrap-up :scope] :global)
+                                             (assoc-in [:projects :b :skills] [:kit])
+                                             (assoc-in [:projects :legacy :skills] [])) "test")
+                ops (vec (filter #(= :skills (:kind %)) (planner global st)))
+                deletes (filter #(= :delete (:action %)) ops)
+                out (plan/render-plan ops {})]
+            (is (= #{:a/wrap-up :b/wrap-up :legacy/wrap-up} (set (map :id deletes))))
+            (is (= 1 (count (filter #(= :create (:action %)) ops))))
+            (doseq [id [:a :b :legacy]]
+              (is (str/includes? out (str "- projects/" (name id) " skills/")))
+              (is (fs/sym-link? (str dir "/" (name id) subdir "/wrap-up"))))
+            (is (not (u/exists? (str global-dir "/wrap-up"))) "dry plan writes nothing")
+            ;; A project-filtered run cannot remove the only working install.
+            (is (= 3 (count (:failed (core/execute! deletes)))))
+            (is (empty? (:failed (core/execute! ops))))
+            (doseq [o deletes] (is (not (u/exists? (:target o)))))
+            (is (= "local content" (slurp (str directory "/SKILL.md"))))
+            (is (fs/sym-link? (str global-dir "/wrap-up")))
+            (is (u/exists? (str src "/SKILL.md")) "unlink preserves the source")
+            (let [next-state (core/sync-state! st global)
+                  inv (set (core/inventory global))]
+              (is (contains? inv [tool :skills :wrap-up]))
+              (is (not-any? #(and (= :skills (second %)) (namespace (nth % 2))) inv))
+              (is (empty? (filter #(and (= :skills (:kind %)) (plan/mutating? %))
+                                  (planner global next-state)))))))))))
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

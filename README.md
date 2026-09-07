@@ -13,7 +13,8 @@ owns.
 
 - `apply` is read-only and exits with status 2 when drift exists.
 - `apply!` backs up every file before its first write in a run.
-- Resources not created by `agentctl` are never deleted.
+- Resources not created by `agentctl` are preserved, except redundant project
+  skill symlinks explicitly superseded by a global skill declaration.
 - Secrets are references such as `$ENV_VAR` or `!bw://folder/item/field`, not
   plaintext values.
 - Imports redact credential-shaped values instead of printing them.
@@ -259,6 +260,20 @@ pointing elsewhere (a hand-made one, or a dangling relative one) is repointed
 at the pack cache under `~/.agents/skill-packs`. `:scope :global` on an
 explicit `:skills` declaration keeps a skill user-wide even when a project
 names it.
+
+To promote a skill already linked in several projects, set its scope explicitly:
+
+```clojure
+:skills {:wrap-up {:from :shared :scope :global :tools [:claude]}}
+```
+
+The global declaration takes precedence over both direct project references and
+whole-pack references. `apply` previews a `- projects/<id> skills/wrap-up` unlink
+for each redundant symlink in the configured projects; `apply!` installs the
+global skill first, then removes those links. This also covers legacy symlinks
+that predate agentctl's state file and projects that no longer name the skill.
+Local directories are preserved. Project links are kept if the global skill
+is unavailable (including a project-only apply before global installation).
 
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links

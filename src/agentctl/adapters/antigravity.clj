@@ -163,6 +163,7 @@
         dir (project-skills-dir proj)
         managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
     (concat
+     (sources/global-project-unlink-ops cfg tool id dir skills-dir)
      (keep (fn [[sid s]]
              (when (:source s)
                (plan/link-op {:tool tool :kind :skills :project id
@@ -188,7 +189,8 @@
                                ") — declare :skills {" (name sid) " {:from <pack>}} to disambiguate")}))
      (keep (fn [mid]
              (when (and (= (name id) (namespace mid))
-                        (not (contains? skills (keyword (name mid)))))
+                        (not (contains? skills (keyword (name mid))))
+                        (not= :global (get-in cfg [:skills (keyword (name mid)) :scope])))
                (plan/unlink-op {:tool tool :kind :skills :project id :id mid
                                 :dest (str dir "/" (name mid))})))
            managed))))

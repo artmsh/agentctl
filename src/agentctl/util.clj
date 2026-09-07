@@ -123,9 +123,10 @@
       (if (fs/exists? dest {:nofollow-links true})
         (str dest)
         (do (fs/create-dirs (fs/parent dest))
-            (if (fs/directory? src)
-              (fs/copy-tree src dest)
-              (fs/copy src dest))
+            (cond
+              (fs/sym-link? src) (fs/create-sym-link dest (fs/read-link src))
+              (fs/directory? src) (fs/copy-tree src dest)
+              :else (fs/copy src dest))
             (str dest))))))
 
 ;; ---------------------------------------------------------------- process

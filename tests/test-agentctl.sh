@@ -250,7 +250,8 @@ assert [p for p, v in d.get("projects", {}).items()
 PY
 
 echo "15. antigravity converges, and trust is unioned rather than overwritten"
-mkdir -p "$SB/.gemini/antigravity-cli" "$SB/aproj"
+mkdir -p "$SB/.gemini/antigravity-cli" "$SB/aproj" "$SB/packs/demo/skills/local-skill"
+cp "$SB/packs/demo/skills/demo-skill/SKILL.md" "$SB/packs/demo/skills/local-skill/SKILL.md"
 printf '{"trustedWorkspaces": ["%s/handtrusted"], "model": "old"}\n' "$SB" \
   > "$SB/.gemini/antigravity-cli/settings.json"
 cat > "$SB/agy.edn" <<EDN
@@ -267,7 +268,8 @@ EDN
 run apply! -f "$SB/agy.edn" -t antigravity -y > "$SB/apply15.txt"
 [ -L "$SB/.gemini/config/skills/demo-skill" ] || { cat "$SB/apply15.txt"; fail "antigravity skill not linked"; }
 [ -L "$SB/.gemini/config/rules/AGENTS.md" ] || { cat "$SB/apply15.txt"; fail "antigravity memory not linked"; }
-[ -L "$SB/aproj/.agents/skills/demo-skill" ] || { cat "$SB/apply15.txt"; fail "project skill not linked into .agents"; }
+[ ! -L "$SB/aproj/.agents/skills/demo-skill" ] || fail "global skill duplicated in project"
+[ -L "$SB/aproj/.agents/skills/local-skill" ] || { cat "$SB/apply15.txt"; fail "project skill not linked into .agents"; }
 python3 - "$SB/.gemini/config/mcp_config.json" <<'PY' || fail "antigravity mcp_config.json wrong"
 import json, sys
 d = json.load(open(sys.argv[1]))["mcpServers"]
@@ -573,5 +575,33 @@ sed -i.bak 's/v1\.sh/v2.sh/' "$SB/hooks.edn" && rm -f "$SB/hooks.edn.bak"
 run apply! -f "$SB/hooks.edn" -y > "$SB/hooks-apply.txt"
 grep -q 'no changes' "$SB/hooks-apply.txt" || { cat "$SB/hooks-apply.txt"; fail "expected the hand-edit to already match — no op to plan"; }
 grep -q 'v2.sh' "$SB/.config/agentctl/state.edn" || { cat "$SB/.config/agentctl/state.edn"; fail "unfiltered apply! did not refresh the hook's stored value"; }
+
+echo "19. promoting wrap-up to global previews and unlinks every project copy"
+mkdir -p "$SB/wrap-pack/skills/wrap-up"
+printf -- '---\nname: wrap-up\ndescription: Wrap up the session.\n---\n' > "$SB/wrap-pack/skills/wrap-up/SKILL.md"
+cat > "$SB/wrap.edn" <<EDN
+{:skills {:wrap-up {:path "$SB/wrap-pack/skills/wrap-up" :tools [:claude]}}
+ :projects {:wrap-a {:path "$SB/wrap-a" :executors #{:claude} :skills [:wrap-up]}
+            :wrap-b {:path "$SB/wrap-b" :executors #{:claude} :skills [:wrap-up]}}}
+EDN
+run apply! -f "$SB/wrap.edn" -t claude -k skills -y > /dev/null
+[ -L "$SB/wrap-a/.claude/skills/wrap-up" ] || fail "project wrap-up was not installed"
+sed 's/:tools \[:claude\]/:scope :global :tools [:claude]/' "$SB/wrap.edn" > "$SB/wrap-global.edn"
+set +e
+run apply -f "$SB/wrap-global.edn" -t claude -k skills > "$SB/wrap-plan.txt"; code=$?
+set -e
+[ "$code" = 2 ] || fail "global promotion should report drift"
+for id in wrap-a wrap-b; do
+  grep -q -- "- projects/$id skills/wrap-up" "$SB/wrap-plan.txt" || { cat "$SB/wrap-plan.txt"; fail "missing project deletion section"; }
+  grep -q "unlink.*$id/.claude/skills/wrap-up" "$SB/wrap-plan.txt" || fail "missing unlink preview"
+  [ -L "$SB/$id/.claude/skills/wrap-up" ] || fail "dry run removed a project link"
+done
+run apply! -f "$SB/wrap-global.edn" -t claude -k skills -y > /dev/null
+[ -L "$SB/.claude/skills/wrap-up" ] || fail "global wrap-up was not installed"
+for id in wrap-a wrap-b; do
+  [ ! -L "$SB/$id/.claude/skills/wrap-up" ] || fail "project wrap-up remains"
+done
+[ -f "$SB/wrap-pack/skills/wrap-up/SKILL.md" ] || fail "unlink removed the source"
+run apply -f "$SB/wrap-global.edn" -t claude -k skills > /dev/null
 
 echo "all agentctl e2e checks passed"

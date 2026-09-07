@@ -45,9 +45,12 @@
                                s)))
     :codex (let [t (try (toml/read-toml codex/config-file) (catch Exception _ nil))
                  inv (invert codex/setting-keys)]
-             (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
-                                                     (when (string? v) [dk v]))))
-                              t)))
+             (not-empty
+              (cond-> (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
+                                                  (when (string? v) [dk v]))))
+                            t)
+                (seq (get-in t ["tui" "keymap"]))
+                (assoc :keymap (get-in t ["tui" "keymap"])))))
     :pi (let [s (u/read-json pi/settings-file)
               inv (invert pi/setting-keys)]
           (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
