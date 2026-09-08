@@ -963,6 +963,73 @@
   (is (true? (core/scoped? {:kinds [:hooks]})))
   (is (true? (core/scoped? {:projects #{"p"}}))))
 
+(defn- scope-cfg
+  "A workspace with two projects and one nested inside the first, so a cwd can
+   sit in a project, in the workspace, or nowhere near either."
+  [ws]
+  (doseq [d ["agentctl" "agent" "agentctl/vendor/inner" "elsewhere"]]
+    (fs/create-dirs (str ws "/" d)))
+  (config/parse-config
+   (str "{:projects {:agentctl {:path \"" ws "/agentctl\" :executors {:claude {}}}\n"
+        "            :agent    {:path \"" ws "/agent\" :executors {:claude {}}}\n"
+        "            :inner    {:path \"" ws "/agentctl/vendor/inner\" :executors {:claude {}}}}}")
+   (str ws "/agents.edn")))
+
+(deftest cwd-scope-reads-the-working-directory-as-a-scope
+  (let [ws (str (temp-dir) "/ws")
+        cfg (scope-cfg ws)
+        at (fn [d] (core/cwd-scope cfg d))]
+    (testing "standing in a project — or anywhere under it — is that project"
+      (is (= {:projects #{:agentctl} :where :project} (dissoc (at (str ws "/agentctl")) :path)))
+      (is (= #{:agentctl} (:projects (at (str ws "/agentctl/src/deep"))))))
+    (testing "a project nested inside another wins: it is the closer answer"
+      (is (= #{:inner} (:projects (at (str ws "/agentctl/vendor/inner/src"))))))
+    (testing "a shared name prefix is not containment"
+      (is (= #{:agent} (:projects (at (str ws "/agent"))))
+          "~/ws/agent must not be swallowed by ~/ws/agentctl"))
+    (testing "the workspace the projects are filed under is all of them"
+      (is (= {:projects #{:agentctl :agent :inner} :where :root} (dissoc (at ws) :path))))
+    (testing "containment outranks holding projects: vendor is inside agentctl"
+      (is (= #{:agentctl} (:projects (at (str ws "/agentctl/vendor"))))))
+    (testing "a directory in the workspace with no project under it narrows nothing"
+      (is (nil? (at (str ws "/elsewhere")))))
+    (testing "everything else plans the whole config, as it always did"
+      (is (nil? (at "/tmp"))))))
+
+(deftest home-is-never-the-workspace-however-the-projects-are-spread
+  ;; projects under ~/projects and ~/dotfiles make home their common parent by
+  ;; arithmetic alone. Reading that as a workspace would make a bare `apply`
+  ;; from home skip every global setting, server and provider unasked.
+  (let [ws (str u/home "/spread")]
+    (doseq [d ["spread/one" "dots"] ] (fs/create-dirs (str u/home "/" d)))
+    (let [cfg (config/parse-config
+               (str "{:projects {:one  {:path \"" u/home "/spread/one\" :executors {:claude {}}}\n"
+                    "            :dots {:path \"" u/home "/dots\" :executors {:claude {}}}}}")
+               (str u/home "/agents.edn"))]
+      (is (nil? (core/cwd-scope cfg u/home)))
+      (is (nil? (core/cwd-scope cfg "/")))
+      (is (= #{:one} (:projects (core/cwd-scope cfg ws)))
+          "a real workspace below home still scopes"))))
+
+(deftest a-project-scoped-run-still-fetches-the-packs-that-project-needs
+  ;; a pack is cloned once for the machine, so its op carries no :project.
+  ;; Filtered out, `apply!` inside a project could never install a skill the
+  ;; project asks for out of a pack that is not on disk yet — and converge!'s
+  ;; second pass would never fire either.
+  (let [cfg (config/parse-config
+             (str "{:skill-packs {:mine {:uri \"https://example.invalid/mine\"}\n"
+                  "               :theirs {:uri \"https://example.invalid/theirs\"}}\n"
+                  " :skills {:named {:from :theirs :tools [:claude]}}\n"
+                  " :projects {:p {:path \"/tmp/agentctl-scope-p\" :executors {:claude {}}\n"
+                  "                :skills [:mine]}\n"
+                  "            :q {:path \"/tmp/agentctl-scope-q\" :executors {:claude {}}\n"
+                  "                :skills [:named]}}}")
+             "/tmp/agentctl-scope/agents.edn")]
+    (is (= #{:mine} (sources/packs-for cfg #{:p})) "a whole pack named by the project")
+    (is (= #{:theirs} (sources/packs-for cfg #{:q})) "the pack behind a declared skill")
+    (is (= #{:mine :theirs} (sources/packs-for cfg #{:p :q})))
+    (is (= #{} (sources/packs-for cfg #{})))))
+
 (deftest project-scoped-hooks-warn-instead-of-vanishing-silently
   ;; the DSL has no project scope for hooks (Claude Code's hooks live in one
   ;; settings.json per project, but agentctl only manages the global one

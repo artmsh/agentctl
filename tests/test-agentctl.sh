@@ -604,4 +604,70 @@ done
 [ -f "$SB/wrap-pack/skills/wrap-up/SKILL.md" ] || fail "unlink removed the source"
 run apply -f "$SB/wrap-global.edn" -t claude -k skills > /dev/null
 
+echo "20. the working directory scopes apply, and --all opts back out"
+# two git packs: one the projects draw their skills from, one only a user-wide
+# skill uses. A project-scoped run must clone the first and leave the second.
+for pack in ours theirs; do
+  mkdir -p "$SB/$pack/skills"
+  git -C "$SB/$pack" init -q
+done
+for sk in only-a only-b; do
+  mkdir -p "$SB/ours/skills/$sk"
+  printf -- '---\nname: %s\ndescription: Demo.\n---\n' "$sk" > "$SB/ours/skills/$sk/SKILL.md"
+done
+mkdir -p "$SB/theirs/skills/user-wide"
+printf -- '---\nname: user-wide\ndescription: Demo.\n---\n' > "$SB/theirs/skills/user-wide/SKILL.md"
+for pack in ours theirs; do
+  git -C "$SB/$pack" -c user.email=t@e -c user.name=t add -A
+  git -C "$SB/$pack" -c user.email=t@e -c user.name=t commit -qm init
+done
+
+mkdir -p "$SB/ws/a/src" "$SB/ws/b"
+cat > "$SB/cwd.edn" <<EDN
+{:skill-packs {:ours   {:uri "file://$SB/ours" :type :git :dir "skills"}
+               :theirs {:uri "file://$SB/theirs" :type :git :dir "skills"}}
+ :skills {:only-a {:from :ours :tools [:claude]}
+          :only-b {:from :ours :tools [:claude]}
+          :user-wide {:from :theirs :scope :global :tools [:claude]}}
+ :projects {:a {:path "$SB/ws/a" :executors #{:claude} :skills [:only-a]}
+            :b {:path "$SB/ws/b" :executors #{:claude} :skills [:only-b]}}}
+EDN
+
+# a dry apply exits 2 on drift, which set -e would take as the script failing
+plan_in() { (cd "$1" && run apply -f "$SB/cwd.edn" "${@:2}" || true); }
+
+# the whole point of letting pack ops through a project scope: clone, re-plan,
+# link — in one run, without touching anything the project did not ask for
+(cd "$SB/ws/a/src" && run apply! -f "$SB/cwd.edn" -y) > "$SB/cwd-apply.txt"
+grep -q 'scope: project a' "$SB/cwd-apply.txt" || { cat "$SB/cwd-apply.txt"; fail "a subdirectory of a project did not scope to it"; }
+[ -d "$SB/.agents/skill-packs/ours/.git" ] || { cat "$SB/cwd-apply.txt"; fail "project-scoped apply! did not clone the pack its skill needs"; }
+[ -L "$SB/ws/a/.claude/skills/only-a" ] || { cat "$SB/cwd-apply.txt"; fail "project-scoped apply! did not link its skill"; }
+[ ! -e "$SB/.agents/skill-packs/theirs" ] || fail "project-scoped apply! cloned a pack nothing in scope needed"
+[ ! -e "$SB/ws/b/.claude/skills/only-b" ] || fail "project-scoped apply! touched the other project"
+[ ! -e "$SB/.claude/skills/user-wide" ] || fail "project-scoped apply! installed a user-wide skill"
+
+set +e
+plan_in "$SB/ws/a" > "$SB/cwd-again.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/cwd-again.txt"; fail "a project-scoped apply! left drift in its own scope"; }
+
+plan_in "$SB/ws/b" > "$SB/cwd-b.txt"
+grep -q 'scope: project b' "$SB/cwd-b.txt" || { cat "$SB/cwd-b.txt"; fail "standing in a project did not scope to it"; }
+grep -q 'projects/b skills/only-b' "$SB/cwd-b.txt" || { cat "$SB/cwd-b.txt"; fail "the project's own skill was not planned"; }
+grep -q 'only-a' "$SB/cwd-b.txt" && fail "the other project leaked into a project-scoped run"
+grep -q 'user-wide' "$SB/cwd-b.txt" && fail "a user-wide skill leaked into a project-scoped run"
+grep -q 'skill-packs/theirs' "$SB/cwd-b.txt" && fail "a pack no selected project needs was planned"
+
+plan_in "$SB/ws" > "$SB/cwd-ws.txt"
+grep -q 'scope: a, b' "$SB/cwd-ws.txt" || { cat "$SB/cwd-ws.txt"; fail "the workspace root did not scope to its projects"; }
+grep -q 'projects/b skills/only-b' "$SB/cwd-ws.txt" || fail "workspace run missed project b"
+grep -q 'user-wide' "$SB/cwd-ws.txt" && fail "a user-wide skill leaked into a workspace run"
+
+plan_in "$SB/ws/a" --all > "$SB/cwd-all.txt"
+grep -q '^scope:' "$SB/cwd-all.txt" && fail "--all must not narrow anything"
+grep -q 'skill-packs/theirs' "$SB/cwd-all.txt" || { cat "$SB/cwd-all.txt"; fail "--all did not plan the pack behind the user-wide skill"; }
+
+plan_in "$SB" > "$SB/cwd-out.txt"
+grep -q '^scope:' "$SB/cwd-out.txt" && fail "a directory above the workspace is not a scope"
+
 echo "all agentctl e2e checks passed"

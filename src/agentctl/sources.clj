@@ -171,6 +171,27 @@
                        (throw (ex-info "project skill is no longer a symlink" {:path dest})))
                      ((:exec! o))))))
 
+(defn packs-for
+  "Pack ids the given projects could need. A project names a skill by one of
+   three routes — a declared skill (whose `:from` is a pack), a whole pack, or
+   a bare id only a pack can supply — and a pack not on disk yet cannot be
+   ruled out as that id's home. Fetching those is part of provisioning the
+   project, so a project-scoped run keeps their ops; the config's other packs
+   are nobody's business on that run."
+  [cfg project-ids]
+  (let [wanted (set project-ids)]
+    (set
+     (for [[pid proj] (:projects cfg)
+           :when (contains? wanted pid)
+           id (:skills proj)
+           pack (cond
+                  (get-in cfg [:skills id]) [(:from (get-in cfg [:skills id]))]
+                  (get-in cfg [:skill-packs id]) [id]
+                  :else (let [{:keys [found not-ready]} (locate-skill (:skill-packs cfg) id)]
+                          (concat (map first found) not-ready)))
+           :when pack]
+       pack))))
+
 ;; ---------------------------------------------------------------- pack ops
 
 (defn- git-head [dir]

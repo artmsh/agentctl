@@ -11,7 +11,9 @@
             [agentctl.plan :as plan]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
-            [agentctl.util :as u]))
+            [agentctl.util :as u]
+            [babashka.fs :as fs]
+            [clojure.string :as str]))
 
 (def registry
   {:claude {:plan claude/plan :present? claude/present?}
@@ -33,9 +35,89 @@
 
 (defn- keep-projects
   "`--project` selects everything that belongs to a project, across kinds: a
-   project's MCP servers are `:mcps` ops, so filtering by kind would miss them."
-  [ops {:keys [projects]}]
-  (if (seq projects) (filter #(contains? projects (:project %)) ops) ops))
+   project's MCP servers are `:mcps` ops, so filtering by kind would miss them.
+
+   Skill-pack ops are the exception that has to be let through by hand. A pack
+   is fetched once for the whole machine, so its op carries no `:project` at
+   all — dropping it would leave a project asking for skills out of a pack
+   nothing on this run is allowed to clone, and `converge!` would never get
+   the second pass that links what a clone brought."
+  [ops cfg {:keys [projects]}]
+  (if (empty? projects)
+    ops
+    (let [packs (sources/packs-for cfg projects)]
+      (filter #(or (contains? projects (:project %))
+                   (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
+              ops))))
+
+(defn- under?
+  "Is `child` `parent` itself or somewhere beneath it? Compared on whole path
+   segments — ~/projects/agent is not a parent of ~/projects/agentctl."
+  [parent child]
+  (or (= parent child) (str/starts-with? child (str parent "/"))))
+
+(defn- canonical
+  "`real-path` can only resolve a path that exists, and a project is often
+   declared before its directory is. Resolve the deepest ancestor that does
+   exist and keep the rest as written — otherwise on macOS a cwd of /tmp comes
+   back as /private/tmp while a not-yet-created project under it does not, and
+   the two never compare equal."
+  [p]
+  (let [p (u/abs-path p)]
+    (loop [cur p tail ()]
+      (cond
+        (u/exists? cur) (str/join "/" (cons (u/real-path cur) tail))
+        (nil? (fs/parent cur)) p
+        :else (recur (str (fs/parent cur)) (conj tail (str (fs/file-name cur))))))))
+
+(defn- segments [p] (vec (remove str/blank? (str/split (str p) #"/"))))
+
+(defn- common-ancestor
+  "Deepest directory every one of `paths` lies under."
+  [paths]
+  (when (seq paths)
+    (str "/" (str/join "/" (->> (apply map vector (map segments paths))
+                                (take-while (partial apply =))
+                                (map first))))))
+
+(defn- workspace-root
+  "The directory the declared projects are filed under — the deepest one their
+   parents share. The root has to be where the projects themselves are kept, or
+   `apply` from anywhere above would quietly stop planning the whole config."
+  [paths]
+  (common-ancestor (map #(str (fs/parent %)) paths)))
+
+(def ^:private not-a-workspace
+  "Home and the filesystem root are where everything lives, so they say nothing
+   about projects. Projects spread across `~/projects` and `~/dotfiles` make
+   home their common parent by arithmetic; treating that as a workspace would
+   turn every bare `apply` from home into a run that skips the whole global
+   half of the config without being asked to."
+  #{(u/real-path u/home) "/"})
+
+(defn cwd-scope
+  "Which projects a bare `apply` run from `cwd` should narrow itself to, or
+   nil for no narrowing at all.
+
+   Standing inside a declared project means that project — the deepest one, so
+   a project nested under another still wins. Standing on the workspace the
+   projects are filed under, or on a directory inside it, means every project
+   below where you stand. Anywhere else is not a question about a project, so
+   the whole config applies, exactly as it did before."
+  [cfg cwd]
+  (let [cwd (canonical cwd)
+        paths (for [[id proj] (:projects cfg)] [id (canonical (:path proj))])
+        inside (->> paths
+                    (filter (fn [[_ p]] (under? p cwd)))
+                    (sort-by (comp count second))
+                    last)]
+    (if inside
+      {:projects #{(first inside)} :where :project :path (second inside)}
+      (let [root (workspace-root (map second paths))
+            children (when (and root (under? root cwd) (not (not-a-workspace cwd)))
+                       (->> paths (filter (fn [[_ p]] (under? cwd p))) (map first) set))]
+        (when (seq children)
+          {:projects children :where :root :path cwd})))))
 
 (defn scoped?
   "Did `-t`/`-k`/`-p` narrow this run to less than the whole config? Callers
@@ -49,7 +131,7 @@
   (let [tool-ops (mapcat (fn [t] ((get-in registry [t :plan]) cfg st)) (selected-tools cfg opts))]
     (-> (concat (sources/pack-ops cfg) tool-ops)
         (keep-kinds opts)
-        (keep-projects opts)
+        (keep-projects cfg opts)
         vec)))
 
 (defn missing-tools [cfg opts]

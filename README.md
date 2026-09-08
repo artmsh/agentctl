@@ -13,6 +13,8 @@ owns.
 
 - `apply` is read-only and exits with status 2 when drift exists.
 - `apply!` backs up every file before its first write in a run.
+- `apply`/`apply!` narrow themselves to the project you are standing in, and say
+  so on their first line — see [Where you run it is a scope](#where-you-run-it-is-a-scope).
 - Resources not created by `agentctl` are preserved, except redundant project
   skill symlinks explicitly superseded by a global skill declaration.
 - Secrets are references such as `$ENV_VAR` or `!bw://folder/item/field`, not
@@ -94,6 +96,39 @@ agentctl gui         Edit the config in a browser beside its live dry run
 
 Use `--tool`, `--kind`, or `--project` to narrow an operation. Set
 `AGENTCTL_HOME` to point all managed paths at a scratch home for testing.
+
+### Where you run it is a scope
+
+`apply` and `apply!` read the working directory, because standing in a project
+is asking about that project:
+
+| cwd | what is planned |
+| --- | --- |
+| inside a declared project | that project — the innermost one, so a project nested in another wins |
+| the workspace the declared projects are filed under, or a directory inside it | every declared project below where you stand |
+| anywhere else | the whole config, unchanged |
+
+The workspace is the deepest directory the declared projects' parents share, so
+`~` is not one just because the projects live somewhere below it. A narrowed run
+says so on its first line:
+
+```text
+$ agentctl apply
+scope: project sample — this directory is inside it (--all for the whole config)
+```
+
+`--all` plans the whole config from anywhere; `--project` is the same narrowing
+asked for by hand. Either one outranks the directory.
+
+A project-scoped run also fetches the skill packs that project's skills come
+out of — a pack is cloned once for the machine and carries no project of its
+own, but a project asking for skills from a pack that is not on disk yet would
+otherwise get nothing. The config's other packs are left alone.
+
+Two things follow from this that are worth saying out loud: inside a project,
+`apply` exits 0 when only the rest of the machine has drifted, and from the
+workspace root the global settings, MCP servers and providers are not planned
+at all. `--all` is how you ask about the machine.
 
 ## GUI
 

@@ -36,6 +36,8 @@
     "                       settings mcps skills providers memory projects skill-packs"
     "  -p, --project ID     Restrict to one declared project (repeatable); selects"
     "                       everything that project owns, whatever its kind"
+    "  -A, --all            apply/apply!: ignore the working directory and plan the"
+    "                       whole config (see SCOPE)"
     "      --json           Machine-readable output"
     "  -v, --verbose        Show per-field diffs and target paths"
     "      --show-noop      Include unchanged / informational entries"
@@ -44,7 +46,13 @@
     "  -y, --yes            apply!: do not prompt before mutating"
     "      --port N         gui: listen on this port (default: any free one)"
     "      --no-open        gui: do not open a browser"
-    "  -h, --help           This message"]))
+    "  -h, --help           This message"
+    ""
+    "SCOPE"
+    "  apply and apply! read the working directory. Inside a declared project they"
+    "  plan only that project; on the directory the declared projects sit under,"
+    "  only those projects. Anywhere else — and with -p or --all — nothing is"
+    "  narrowed and the whole config is planned."]))
 
 (defn parse-args [args]
   (loop [args args opts {:tools #{} :kinds #{} :projects #{}}]
@@ -60,6 +68,7 @@
         "--deep" (recur (rest args) (assoc opts :deep true))
         "--replace" (recur (rest args) (assoc opts :replace true))
         ("-y" "--yes") (recur (rest args) (assoc opts :yes true))
+        ("-A" "--all") (recur (rest args) (assoc opts :all true))
         "--port" (recur (drop 2 args) (assoc opts :port (str (second args))))
         "--no-open" (recur (rest args) (assoc opts :no-open true))
         ("-h" "--help") (recur (rest args) (assoc opts :help true))
@@ -76,6 +85,18 @@
 
 ;; ---------------------------------------------------------------- commands
 
+(defn- scope-note
+  "One line saying the working directory narrowed this run, and how to opt out.
+   Silence here would be the worst of it: `apply` exiting 0 looks like a clean
+   machine, not like a run that never looked at most of the config."
+  [{:keys [where projects path]}]
+  (str "scope: "
+       (case where
+         :project (str "project " (u/kw->str (first projects)) " — this directory is inside it")
+         :root (str (str/join ", " (sort (map u/kw->str projects)))
+                    " — the projects under " (u/tilde path)))
+       " (--all for the whole config)"))
+
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
         st (state/load-state)
@@ -87,12 +108,25 @@
       (System/exit 1))
     (doseq [f findings :when (= :warn (:level f))]
       (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))
-    (let [ops (core/build-plan cfg st opts)
+    (let [;; where the run happens is itself a scope: `apply` in a project asks
+          ;; about that project, not about the machine. An explicit -p is the
+          ;; same question asked by hand, and --all is the way to say the whole
+          ;; config on purpose — either one outranks the directory.
+          scope (when-not (or (:all opts) (seq (:projects opts)))
+                  (core/cwd-scope cfg (System/getProperty "user.dir")))
+          opts (cond-> opts scope (assoc :projects (:projects scope)))
+          ops (core/build-plan cfg st opts)
           changes (filter plan/mutating? ops)]
       (if (:json opts)
-        (println (json/generate-string {:ops (map op->data ops)
-                                        :summary (plan/summary-line ops)} {:pretty true}))
+        (println (json/generate-string
+                  (cond-> {:ops (map op->data ops)
+                           :summary (plan/summary-line ops)}
+                    scope (assoc :scope {:where (u/kw->str (:where scope))
+                                         :path (:path scope)
+                                         :projects (mapv u/kw->str (sort (:projects scope)))}))
+                  {:pretty true}))
         (do
+          (when scope (println (scope-note scope)))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
           (if (seq changes)
