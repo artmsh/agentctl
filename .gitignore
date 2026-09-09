@@ -4,6 +4,7 @@
 .idea/
 .codebase-memory/
 .code-review-graph/
+.lavish/
 target/
 *.log
 
