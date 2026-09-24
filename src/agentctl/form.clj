@@ -18,6 +18,7 @@
             [agentctl.config :as config]
             [agentctl.edit :as edit]
             [agentctl.sources :as sources]
+            [agentctl.scope :as scope]
             [agentctl.util :as u]
             [babashka.fs :as fs]
             [clojure.edn :as edn]
@@ -428,8 +429,19 @@
   [text]
   (try
     (let [raw (edit/parse text)]
-      (if-not (map? raw)
+      (cond
+        (scope/dsl? raw)
+        (let [cfg (config/parse-config text config/default-path)]
+          {:ok true :unknown []
+           :sections (vec (for [k (cons :#def scope/kinds)]
+                            {:key (path-str k) :title (name k) :layout "entities" :entries []
+                             :fields [{:key (name k) :path [(path-str k)] :type "edn"
+                                       :present (contains? raw k) :value (edn-str (get raw k (if (or (= k :#def) (scope/keyed-kinds k)) {} [])))}]}))
+           :targets (mapv (fn [e] {:kind (name (:kind e)) :id (name (:id e))
+                                   :selector (pr-str (:in e)) :paths (:targets e)}) (:entities cfg))})
+        (not (map? raw))
         {:ok false :error "agents.edn must contain a map"}
+        :else
         {:ok true
          :sections (vec (for [s (schema raw)
                               :when (or (not (:only-if-present s))

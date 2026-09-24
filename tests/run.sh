@@ -19,5 +19,9 @@ for cli in claude codex pi omp llm agy; do
 done
 export PATH="$TEST_HOME/bin:$PATH"
 
+# project skills are installed by `npx -y skills`; the stub does the same on
+# disk for local sources, without the network
+export AGENTCTL_SKILLS_CMD="$ROOT/tests/skills-stub"
+
 bb -cp "$ROOT/src" "$ROOT/tests/agentctl_test.clj"
 "$ROOT/tests/test-agentctl.sh"

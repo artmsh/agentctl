@@ -47,7 +47,7 @@ set +e
 run apply -f "$SB/agents.edn" -t pi -t omp > "$SB/plan1.txt"; code=$?
 set -e
 [ "$code" = 2 ] || fail "expected exit 2 from dry apply, got $code"
-grep -q '+ skills/demo-skill' "$SB/plan1.txt" || fail "skill op missing from plan"
+grep -qE '^.{0,12}\+ skill \[agents: omp, pi\] .*demo-skill' "$SB/plan1.txt" || fail "skill op missing from plan"
 [ -e "$SB/.pi/agent/settings.json" ] && fail "dry apply must not write anything"
 
 echo "2. apply! converges"
@@ -74,7 +74,7 @@ PY
 set +e
 run apply -f "$SB/agents.edn" -t pi -t omp > "$SB/plan3.txt"; code=$?
 set -e
-grep -q -- '- skills/demo-skill' "$SB/plan3.txt" || { cat "$SB/plan3.txt"; fail "prune not planned"; }
+grep -qE -- '^.{0,12}- skill .*demo-skill' "$SB/plan3.txt" || { cat "$SB/plan3.txt"; fail "prune not planned"; }
 run apply! -f "$SB/agents.edn" -t pi -t omp -y > /dev/null
 [ -e "$SB/.pi/agent/skills/demo-skill" ] && fail "pruned skill still present"
 
@@ -157,14 +157,14 @@ EDN
 set +e
 run apply -f "$SB/pskills.edn" > "$SB/plan11.txt"; code=$?
 set -e
-grep -q 'pack not fetched yet' "$SB/plan11.txt" || { cat "$SB/plan11.txt"; fail "unfetched pack not reported"; }
+# the pack's clone line stands in for "not fetched yet", under the project it lands in
+grep -A1 'PROJECT(.*pproj)' "$SB/plan11.txt" | grep -q '+ skill-pack \[agents: claude-code\]' || { cat "$SB/plan11.txt"; fail "unfetched pack not reported"; }
 run apply! -f "$SB/pskills.edn" -y > "$SB/apply11.txt"
 [ -d "$SB/.agents/skill-packs/fresh2/.git" ] || { cat "$SB/apply11.txt"; fail "project pack not cloned"; }
-link=$(readlink "$SB/pproj/.claude/skills/fresh-skill")
-case "$link" in
-  */.agents/skill-packs/fresh2/*) ;;
-  *) cat "$SB/apply11.txt"; fail "stale project skill link not repointed at the pack cache (-> $link)";;
-esac
+# for claude alone the skills CLI copies from the clone straight into .claude/skills
+[ -d "$SB/pproj/.claude/skills/fresh-skill" ] && [ ! -L "$SB/pproj/.claude/skills/fresh-skill" ] || { cat "$SB/apply11.txt"; fail "stale project skill link not replaced by the skills CLI install"; }
+[ ! -e "$SB/pproj/.agents/skills/fresh-skill" ] || fail "claude-only install wrote the shared .agents/skills copy"
+grep -q '"fresh-skill"' "$SB/pproj/skills-lock.json" || fail "install not recorded in skills-lock.json"
 [ -f "$SB/pproj/.claude/skills/fresh-skill/SKILL.md" ] || fail "repointed link does not resolve"
 set +e
 run apply -f "$SB/pskills.edn" > "$SB/plan11b.txt"; code=$?
@@ -251,7 +251,8 @@ PY
 
 echo "15. antigravity converges, and trust is unioned rather than overwritten"
 mkdir -p "$SB/.gemini/antigravity-cli" "$SB/aproj" "$SB/packs/demo/skills/local-skill"
-cp "$SB/packs/demo/skills/demo-skill/SKILL.md" "$SB/packs/demo/skills/local-skill/SKILL.md"
+# the skills CLI installs under SKILL.md's name, so this one needs its own
+printf -- '---\nname: local-skill\ndescription: Local.\n---\n' > "$SB/packs/demo/skills/local-skill/SKILL.md"
 printf '{"trustedWorkspaces": ["%s/handtrusted"], "model": "old"}\n' "$SB" \
   > "$SB/.gemini/antigravity-cli/settings.json"
 cat > "$SB/agy.edn" <<EDN
@@ -268,8 +269,8 @@ EDN
 run apply! -f "$SB/agy.edn" -t antigravity -y > "$SB/apply15.txt"
 [ -L "$SB/.gemini/config/skills/demo-skill" ] || { cat "$SB/apply15.txt"; fail "antigravity skill not linked"; }
 [ -L "$SB/.gemini/config/rules/AGENTS.md" ] || { cat "$SB/apply15.txt"; fail "antigravity memory not linked"; }
-[ ! -L "$SB/aproj/.agents/skills/demo-skill" ] || fail "global skill duplicated in project"
-[ -L "$SB/aproj/.agents/skills/local-skill" ] || { cat "$SB/apply15.txt"; fail "project skill not linked into .agents"; }
+[ ! -e "$SB/aproj/.agents/skills/demo-skill" ] || fail "global skill duplicated in project"
+[ -f "$SB/aproj/.agents/skills/local-skill/SKILL.md" ] || { cat "$SB/apply15.txt"; fail "project skill not installed into .agents"; }
 python3 - "$SB/.gemini/config/mcp_config.json" <<'PY' || fail "antigravity mcp_config.json wrong"
 import json, sys
 d = json.load(open(sys.argv[1]))["mcpServers"]
@@ -576,7 +577,7 @@ run apply! -f "$SB/hooks.edn" -y > "$SB/hooks-apply.txt"
 grep -q 'no changes' "$SB/hooks-apply.txt" || { cat "$SB/hooks-apply.txt"; fail "expected the hand-edit to already match — no op to plan"; }
 grep -q 'v2.sh' "$SB/.config/agentctl/state.edn" || { cat "$SB/.config/agentctl/state.edn"; fail "unfiltered apply! did not refresh the hook's stored value"; }
 
-echo "19. promoting wrap-up to global previews and unlinks every project copy"
+echo "19. promoting wrap-up to global previews and removes every project copy"
 mkdir -p "$SB/wrap-pack/skills/wrap-up"
 printf -- '---\nname: wrap-up\ndescription: Wrap up the session.\n---\n' > "$SB/wrap-pack/skills/wrap-up/SKILL.md"
 cat > "$SB/wrap.edn" <<EDN
@@ -585,23 +586,25 @@ cat > "$SB/wrap.edn" <<EDN
             :wrap-b {:path "$SB/wrap-b" :executors #{:claude} :skills [:wrap-up]}}}
 EDN
 run apply! -f "$SB/wrap.edn" -t claude -k skills -y > /dev/null
-[ -L "$SB/wrap-a/.claude/skills/wrap-up" ] || fail "project wrap-up was not installed"
+[ -d "$SB/wrap-a/.claude/skills/wrap-up" ] || fail "project wrap-up was not installed"
 sed 's/:tools \[:claude\]/:scope :global :tools [:claude]/' "$SB/wrap.edn" > "$SB/wrap-global.edn"
 set +e
 run apply -f "$SB/wrap-global.edn" -t claude -k skills > "$SB/wrap-plan.txt"; code=$?
 set -e
 [ "$code" = 2 ] || fail "global promotion should report drift"
 for id in wrap-a wrap-b; do
-  grep -q -- "- projects/$id skills/wrap-up" "$SB/wrap-plan.txt" || { cat "$SB/wrap-plan.txt"; fail "missing project deletion section"; }
-  grep -q "unlink.*$id/.claude/skills/wrap-up" "$SB/wrap-plan.txt" || fail "missing unlink preview"
-  [ -L "$SB/$id/.claude/skills/wrap-up" ] || fail "dry run removed a project link"
+  grep -q "PROJECT(.*$id)" "$SB/wrap-plan.txt" || { cat "$SB/wrap-plan.txt"; fail "missing project deletion section"; }
+  grep -A2 "PROJECT(.*$id)" "$SB/wrap-plan.txt" | grep -q "^exec: '.* remove wrap-up -y'" || { cat "$SB/wrap-plan.txt"; fail "missing skills remove preview"; }
+  [ -d "$SB/$id/.claude/skills/wrap-up" ] || fail "dry run removed a project copy"
 done
 run apply! -f "$SB/wrap-global.edn" -t claude -k skills -y > /dev/null
 [ -L "$SB/.claude/skills/wrap-up" ] || fail "global wrap-up was not installed"
 for id in wrap-a wrap-b; do
-  [ ! -L "$SB/$id/.claude/skills/wrap-up" ] || fail "project wrap-up remains"
+  [ ! -e "$SB/$id/.claude/skills/wrap-up" ] || fail "project wrap-up remains"
+  [ ! -e "$SB/$id/.agents/skills/wrap-up" ] || fail "project wrap-up copy remains"
+  grep -q '"wrap-up"' "$SB/$id/skills-lock.json" && fail "wrap-up still in the project's skills-lock.json"
 done
-[ -f "$SB/wrap-pack/skills/wrap-up/SKILL.md" ] || fail "unlink removed the source"
+[ -f "$SB/wrap-pack/skills/wrap-up/SKILL.md" ] || fail "removal took the source"
 run apply -f "$SB/wrap-global.edn" -t claude -k skills > /dev/null
 
 echo "20. the working directory scopes apply, and --all opts back out"
@@ -641,7 +644,7 @@ plan_in() { (cd "$1" && run apply -f "$SB/cwd.edn" "${@:2}" || true); }
 (cd "$SB/ws/a/src" && run apply! -f "$SB/cwd.edn" -y) > "$SB/cwd-apply.txt"
 grep -q 'scope: project a' "$SB/cwd-apply.txt" || { cat "$SB/cwd-apply.txt"; fail "a subdirectory of a project did not scope to it"; }
 [ -d "$SB/.agents/skill-packs/ours/.git" ] || { cat "$SB/cwd-apply.txt"; fail "project-scoped apply! did not clone the pack its skill needs"; }
-[ -L "$SB/ws/a/.claude/skills/only-a" ] || { cat "$SB/cwd-apply.txt"; fail "project-scoped apply! did not link its skill"; }
+[ -d "$SB/ws/a/.claude/skills/only-a" ] || { cat "$SB/cwd-apply.txt"; fail "project-scoped apply! did not install its skill"; }
 [ ! -e "$SB/.agents/skill-packs/theirs" ] || fail "project-scoped apply! cloned a pack nothing in scope needed"
 [ ! -e "$SB/ws/b/.claude/skills/only-b" ] || fail "project-scoped apply! touched the other project"
 [ ! -e "$SB/.claude/skills/user-wide" ] || fail "project-scoped apply! installed a user-wide skill"
@@ -653,19 +656,19 @@ set -e
 
 plan_in "$SB/ws/b" > "$SB/cwd-b.txt"
 grep -q 'scope: project b' "$SB/cwd-b.txt" || { cat "$SB/cwd-b.txt"; fail "standing in a project did not scope to it"; }
-grep -q 'projects/b skills/only-b' "$SB/cwd-b.txt" || { cat "$SB/cwd-b.txt"; fail "the project's own skill was not planned"; }
+grep -q 'PROJECT(.*ws/b)' "$SB/cwd-b.txt" && grep -q 'skill .*only-b' "$SB/cwd-b.txt" || { cat "$SB/cwd-b.txt"; fail "the project's own skill was not planned"; }
 grep -q 'only-a' "$SB/cwd-b.txt" && fail "the other project leaked into a project-scoped run"
 grep -q 'user-wide' "$SB/cwd-b.txt" && fail "a user-wide skill leaked into a project-scoped run"
-grep -q 'skill-packs/theirs' "$SB/cwd-b.txt" && fail "a pack no selected project needs was planned"
+grep -q 'skill-pack .*/theirs' "$SB/cwd-b.txt" && fail "a pack no selected project needs was planned"
 
 plan_in "$SB/ws" > "$SB/cwd-ws.txt"
 grep -q 'scope: a, b' "$SB/cwd-ws.txt" || { cat "$SB/cwd-ws.txt"; fail "the workspace root did not scope to its projects"; }
-grep -q 'projects/b skills/only-b' "$SB/cwd-ws.txt" || fail "workspace run missed project b"
+grep -q 'PROJECT(.*ws/b)' "$SB/cwd-ws.txt" || fail "workspace run missed project b"
 grep -q 'user-wide' "$SB/cwd-ws.txt" && fail "a user-wide skill leaked into a workspace run"
 
 plan_in "$SB/ws/a" --all > "$SB/cwd-all.txt"
 grep -q '^scope:' "$SB/cwd-all.txt" && fail "--all must not narrow anything"
-grep -q 'skill-packs/theirs' "$SB/cwd-all.txt" || { cat "$SB/cwd-all.txt"; fail "--all did not plan the pack behind the user-wide skill"; }
+grep -q '+ skill-pack .*/theirs' "$SB/cwd-all.txt" || { cat "$SB/cwd-all.txt"; fail "--all did not plan the pack behind the user-wide skill"; }
 
 plan_in "$SB" > "$SB/cwd-out.txt"
 grep -q '^scope:' "$SB/cwd-out.txt" && fail "a directory above the workspace is not a scope"

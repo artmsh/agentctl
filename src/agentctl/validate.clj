@@ -65,6 +65,8 @@
    (fn [[id s]]
      (let [src (sources/skill-source cfg s)]
        (cond
+         (and (nil? src) (some-> (get-in cfg [:skill-packs (:from s)]) ((juxt :type sources/materialized?)) (= [:git false])))
+         nil ; the pack check already reports it as not cloned yet
          (nil? src) [(f :error [:skills id] "cannot resolve source (pack not fetched, or wrong :from)")]
          (not (u/exists? src)) [(f :error [:skills id] (str "source missing: " (u/tilde src)))]
          (not (u/exists? (str src "/SKILL.md"))) [(f :error [:skills id] (str "no SKILL.md in " (u/tilde src)))]

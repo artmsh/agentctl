@@ -42,7 +42,7 @@
   (or (:path skill)
       (when-let [pack (get-in cfg [:skill-packs (:from skill)])]
         (let [dir (pack-skills-dir pack)
-              direct (str dir "/" (name (:id skill)))]
+              direct (str dir "/" (or (:subdir skill) (name (:id skill))))]
           (when dir
             (if (u/exists? direct)
               direct
@@ -58,6 +58,15 @@
    :path dir
    :source dir
    :mode :symlink})
+
+(defn source-label
+  "A pack's source as a person would name it: `owner/repo` for GitHub, a
+   `~`-relative path for a directory."
+  [pack]
+  (let [uri (str (:uri pack))]
+    (or (second (re-find #"^(?:https://|git@)github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$" uri))
+        (when (= :file (:type pack)) (u/tilde (:root pack)))
+        uri)))
 
 (defn materialized? [pack]
   (boolean (some-> (pack-skills-dir pack) u/exists?)))
@@ -96,8 +105,12 @@
    (reduce (fn [acc id]
             (cond
               (get-in cfg [:skills id])
-              (let [s (get-in cfg [:skills id])]
-                (assoc-in acc [:skills id] (assoc s :source (skill-source cfg s))))
+              (let [s (get-in cfg [:skills id])
+                    src (skill-source cfg s)
+                    pack (get-in cfg [:skill-packs (:from s)])]
+                (if (and (nil? src) pack (not (materialized? pack)))
+                  (update acc :pending conj (:from s))
+                  (assoc-in acc [:skills id] (assoc s :source src))))
 
               (get-in cfg [:skill-packs id])
               (let [pack (get-in cfg [:skill-packs id])]
@@ -147,29 +160,42 @@
           [id (assoc s :source src)])))
 
 (defn global-project-unlink-ops
-  "Remove redundant project symlinks for declared global skills, including
-   links predating the ownership manifest. Never remove a local directory.
-   Check the global install again at execution time before unlinking."
+  "Remove redundant project copies of declared global skills — a symlink or a
+   local directory, including ones predating the ownership manifest — only
+   when it is byte-identical to the skill's source (a directory is backed up
+   first). One that differs is another skill of the same name: reported, kept. Check the global
+   install again at execution time before removing."
   [cfg tool pid project-dir global-dir]
   (for [[sid s] (for-tool cfg (all-skills cfg) tool)
         :when (= :global (:scope s))
         :let [dest (str project-dir "/" (name sid))
-              global (str global-dir "/" (name sid))]
-        :when (fs/sym-link? dest)
-        :let [o (plan/unlink-op {:tool tool :kind :skills :project pid
-                                 :id (keyword (name pid) (name sid)) :dest dest})]
+              global (str global-dir "/" (name sid))
+              link? (fs/sym-link? dest)
+              same? #(and (:source s) (= (u/path-sha256 (u/real-path dest)) (u/path-sha256 (:source s))))]
+        :when (or link? (fs/directory? dest))
+        :let [id (keyword (name pid) (name sid))
+              ;; a dangling link points nowhere; nothing is lost removing it
+              o (if (or (and link? (not (fs/exists? dest))) (same?))
+                  (plan/unlink-op {:tool tool :kind :skills :project pid :id id :dest dest})
+                  (plan/op {:action :noop :warn true :tool tool :kind :skills :project pid :id id :target dest
+                            :summary (str "local copy differs from the user-wide " (name sid) " — kept")}))]
         :when o]
-    (assoc o :fs-op "unlink"
-             :entry "folder"
-             :summary (str "unlink " (u/tilde dest))
-             :cmds [["unlink" dest]]
-             :exec! (fn []
-                     (when-not (u/exists? (str global "/SKILL.md"))
-                       (throw (ex-info "global skill is not installed; keeping project link"
-                                       {:skill sid :global global})))
-                     (when-not (fs/sym-link? dest)
-                       (throw (ex-info "project skill is no longer a symlink" {:path dest})))
-                     ((:exec! o))))))
+    (if (= :noop (:action o))
+      o
+      (assoc o :fs-op (if link? "unlink" "remove")
+               :requires [global]
+               :entry "folder"
+               :summary (if link?
+                          (str "unlink " (u/tilde dest))
+                          (str "remove " (u/tilde dest) " — identical to the user-wide skill"))
+               :cmds [(if link? ["unlink" dest] ["rm" "-r" dest])]
+               :exec! (fn []
+                        (when-not (u/exists? (str global "/SKILL.md"))
+                          (throw (ex-info "global skill is not installed; keeping project copy"
+                                          {:skill sid :global global})))
+                        (when-not (or (and link? (not (fs/exists? dest))) (same?))
+                          (throw (ex-info "project skill changed since planning" {:path dest})))
+                        ((:exec! o)))))))
 
 (defn packs-for
   "Pack ids the given projects could need. A project names a skill by one of
@@ -244,11 +270,21 @@
        :argv (into ["git" "clone" "--depth" "1"]
                    (concat (when ref ["--branch" ref]) [uri root]))})))
 
+(defn cloned-for-user?
+  "A pack agentctl itself links from: placed user-wide, or the source of a
+   user-wide skill. A pack only projects use is fetched by the `skills` CLI.
+   An old-format config keeps every pack — a project's bare skill name is
+   resolved by scanning them."
+  [cfg id]
+  (or (not (:entity-dsl? cfg))
+      (some #(and (= :skill-packs (:kind %)) (= id (:id %)) (= :all (:in %))) (:entities cfg))
+      (some #(and (= id (:from %)) (= :global (:scope %))) (vals (:skills cfg)))))
+
 (defn pack-ops
   "Ops that fetch or update git-backed skill packs."
   [cfg]
   (for [[id pack] (:skill-packs cfg)
-        :when (= :git (:type pack))
+        :when (and (= :git (:type pack)) (cloned-for-user? cfg id))
         :let [root (:root pack)
               present (u/exists? (str root "/.git"))
               local (when present (git-head root))
@@ -264,15 +300,18 @@
                        :argv ["git" "-C" root "reset" "--hard"
                               (or (:ref pack) "@{upstream}")]}]
                      [(clone-run (:uri pack) (:ref pack) root)])
-              cmds (mapv :argv runs)]
+              cmds (mapv :argv runs)
+              what (if (:implicit pack) "skill" "pack")]
         :when (or (not present) (and remote local (not= local remote)))]
     (plan/op {:action (if present :update :create)
               :tool :agentctl :kind :skill-packs :id id
+              ;; a repository that is one skill reads as that skill, not a pack
+              :shown-kind (when (:implicit pack) :skills)
               :target root
               :summary (if present
-                         (str label ": update pack `" repo "`"
+                         (str label ": update " what " `" repo "`"
                               " (" (some-> local (subs 0 7)) " -> " (some-> remote (subs 0 7)) ")")
-                         (str label ": clone pack `" repo "` -> " (u/tilde root)))
+                         (str label ": clone " what " `" repo "` -> " (u/tilde root)))
               :cmds cmds
               :runs (mapv plan/run runs)
               :diffs [{:key :revision :before local :after remote}]

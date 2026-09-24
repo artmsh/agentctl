@@ -189,22 +189,38 @@
 
 ;; ---------------------------------------------------------------- projects
 
-(defn project-ops [cfg]
-  (for [[id proj] (:projects cfg)
-        :when (and (some? (:trusted proj))
-                   (contains? (:for-tools proj) tool))
-        :let [op (plan/toml-set-op {:tool tool :kind :projects :project id :id id
-                                    :file config-file
-                                    :table ["projects" (:path proj)]
-                                    :kvs {"trust_level" (if (:trusted proj) "trusted" "untrusted")}
-                                    :summary (u/tilde (:path proj))})]
-        :when op]
-    op))
+(defn project-skills-dir
+  "Codex scans `.agents/skills` from the working directory up to the repo root."
+  [proj] (str (:path proj) "/.agents/skills"))
+
+(defn project-ops [cfg st]
+  (concat
+   (for [[id proj] (:projects cfg)
+         :when (and (some? (:trusted proj))
+                    (contains? (:for-tools proj) tool))
+         :let [op (plan/toml-set-op {:tool tool :kind :projects :project id :id id
+                                     :file config-file
+                                     :table ["projects" (:path proj)]
+                                     :kvs {"trust_level" (if (:trusted proj) "trusted" "untrusted")}
+                                     :summary (u/tilde (:path proj))})]
+         :when op]
+     op)
+   (mapcat (fn [[id proj]]
+             (when (contains? (:for-tools proj) tool)
+               ;; installs are the `skills` CLI's (`skills-cli`); this drops
+               ;; project copies of user-wide skills
+               (sources/global-project-unlink-ops cfg tool id (project-skills-dir proj) skills-dir)))
+           (:projects cfg))))
 
 ;; ---------------------------------------------------------------- skills
 
-(defn skill-ops [cfg state]
-  (let [desired (sources/for-tool cfg (sources/all-skills cfg) tool)
+(defn skill-ops
+  "User-wide skills. A project's skills go to its `.agents/skills`."
+  [cfg state]
+  (let [desired (sources/for-tool cfg
+                                  (into {} (filter (fn [[_ s]] (= :global (:scope s))))
+                                        (sources/all-skills cfg))
+                                  tool)
         managed (into #{} (map keyword) (state/managed-ids state tool :skills))]
     (concat
      (for [[id s] desired
@@ -215,8 +231,9 @@
                                    :mode (:mode s)})]
            :when op]
        op)
+     ;; a namespaced id is a project's skill and is not ours to remove from here
      (for [id managed
-           :when (not (contains? desired id))
+           :when (and (nil? (namespace id)) (not (contains? desired id)))
            :let [op (plan/unlink-op {:tool tool :kind :skills :id id
                                      :dest (str skills-dir "/" (name id))})]
            :when op]
@@ -239,7 +256,7 @@
           (mcp-ops cfg state)
           (common/project-scope-skip-ops cfg tool)
           (provider-ops cfg)
-          (project-ops cfg)
+          (project-ops cfg state)
           (skill-ops cfg state)
           (memory-ops cfg)))
 

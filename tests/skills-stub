@@ -1,0 +1,59 @@
+#!/usr/bin/env bb
+;; Offline stand-in for `npx -y skills`: what agentctl relies on, for local
+;; sources only. `add` copies each selected skill into .agents/skills/<name>,
+;; links .claude/skills/<name> for claude-code — or, for claude-code alone,
+;; copies straight into .claude/skills/<name> — and records the lock;
+;; `remove` drops a name (or, with -a claude-code only, claude's link).
+(require '[babashka.fs :as fs] '[cheshire.core :as json] '[clojure.string :as str])
+
+(defn opts [args]
+  (loop [[a & more] args acc {:pos [] :s [] :a []}]
+    (cond (nil? a) acc
+          (= a "-s") (recur (rest more) (update acc :s conj (first more)))
+          (= a "-a") (recur (rest more) (update acc :a conj (first more)))
+          (= a "-y") (recur more acc)
+          :else (recur more (update acc :pos conj a)))))
+
+(defn skill-name [dir]
+  (or (some->> (slurp (str dir "/SKILL.md")) (re-find #"(?m)^name:\s*(\S+)") second)
+      (str (fs/file-name dir))))
+
+(defn skills-in [src]
+  (if (fs/exists? (str src "/SKILL.md"))
+    [src]
+    (->> (concat (fs/list-dir src) (when (fs/directory? (str src "/skills")) (fs/list-dir (str src "/skills"))))
+         (filter #(fs/exists? (str % "/SKILL.md"))) (map str) sort)))
+
+(def lock-file "skills-lock.json")
+(defn lock [] (if (fs/exists? lock-file) (json/parse-string (slurp lock-file)) {"version" 1 "skills" {}}))
+(defn save! [l] (spit lock-file (json/generate-string l {:pretty true})))
+
+(let [[cmd & args] *command-line-args*
+      {:keys [pos s a]} (opts args)]
+  (case cmd
+    "add"
+    (let [src (str (fs/canonicalize (first pos)))
+          picked (filter #(or (empty? s) (some #{"*"} s) (some #{(skill-name %)} s)) (skills-in src))]
+      (when (empty? picked) (binding [*out* *err*] (println "no skills matched")) (System/exit 1))
+      (save! (reduce (fn [l dir]
+                       (let [n (skill-name dir) dest (str ".agents/skills/" n)
+                             link (str ".claude/skills/" n)]
+                         (fs/delete-tree link {:nofollow-links true})
+                         (if (= a ["claude-code"])
+                           (do (fs/create-dirs ".claude/skills") (fs/copy-tree dir link))
+                           (do (fs/delete-tree dest) (fs/create-dirs ".agents/skills")
+                               (fs/copy-tree dir dest)
+                               (when (some #{"claude-code"} a)
+                                 (fs/create-dirs ".claude/skills")
+                                 (fs/create-sym-link link (str "../../.agents/skills/" n)))))
+                         (assoc-in l ["skills" n] {"source" (str (fs/relativize (fs/canonicalize ".") src))
+                                                   "sourceType" "local"})))
+                     (lock) picked)))
+    "remove"
+    (save! (reduce (fn [l n]
+                     (fs/delete-tree (str ".claude/skills/" n) {:nofollow-links true})
+                     (if (= a ["claude-code"])
+                       l
+                       (do (fs/delete-tree (str ".agents/skills/" n))
+                           (update l "skills" dissoc n))))
+                   (lock) pos))))

@@ -11,6 +11,7 @@
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.refs :as refs]
+            [agentctl.scope :as scope]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
             [babashka.fs :as fs]
@@ -315,6 +316,8 @@
 
 ;; ---------------------------------------------------------------- assembly
 
+(declare entity-config)
+
 (defn scan [{:keys [existing]}]
   (reset! notes [])
   (let [{:keys [skills packs]} (scan-skills)
@@ -326,7 +329,13 @@
                      :extra-providers (not-empty (scan-providers))
                      :memory (not-empty (scan-memory))
                      :projects (not-empty (scan-projects))})]
-    {:config (if existing (u/deep-merge discovered existing) discovered)
+    {:config (if (scope/dsl? existing)
+               (merge-with (fn [a b]
+                             (if (and (vector? a) (vector? b))
+                               (let [ids (set (keep :id b))]
+                                 (vec (concat (remove #(ids (:id %)) a) b))) b))
+                           (entity-config discovered) existing)
+               (if existing (u/deep-merge discovered existing) discovered))
      :notes @notes}))
 
 ;; ---------------------------------------------------------------- render
@@ -345,7 +354,78 @@
     (binding [clojure.pprint/*print-right-margin* 100]
       (clojure.pprint/pprint v))))
 
+(defn- source-key
+  "The keyed-section selector for a URI: `[:gh \"owner/repo\"]` for GitHub."
+  [uri]
+  (if-let [[_ repo] (re-find #"^(?:https://|git@)github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$" (str uri))]
+    [:gh repo]
+    [:uri uri]))
+
+(defn- key-id [[_ arg]]
+  (keyword (fs/file-name (str/replace (str arg) #"/+$" ""))))
+
+(defn- keyed-entry
+  "Entity value for a keyed section: `:tools` as `:acli`, an `:alias` only when
+   the key alone would derive a different id."
+  [k id decl]
+  (cond-> (dissoc decl :scope :tools :for :uri :path :from :id)
+    (not= id (key-id k)) (assoc :alias (symbol (name id)))
+    (or (:tools decl) (:for decl)) (assoc :acli (let [t (or (:tools decl) (:for decl))]
+                                                  (if (keyword? t) [t] (vec t))))))
+
+(defn- keyed-skills
+  "Legacy `:skill-packs` / `:skills` maps as the selector-keyed DSL maps."
+  [config placements]
+  (let [packs (:skill-packs config)
+        skills (:skills config)]
+    (cond-> {}
+      (seq packs)
+      (assoc :skill-packs
+             (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+                   (for [[id decl] packs :let [k (source-key (:uri decl))]]
+                     [k (keyed-entry k id decl)])))
+      (seq skills)
+      (assoc :skills
+             (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+                   (for [[id decl] skills
+                         :let [k (if (:from decl)
+                                   [(symbol (name (:from decl))) (or (:subdir decl) (name id))]
+                                   [:uri (:path decl)])]]
+                     [k (-> (keyed-entry k id (dissoc decl :subdir))
+                            (assoc :in (placements :skills id decl)))]))))))
+
+(defn entity-config
+  "Import emits literal selectors; it cannot infer a user's intended tree."
+  [config]
+  (if (scope/dsl? config) config
+      (let [projects (:projects config)
+            placements (fn [kind id decl]
+                         (let [ps (for [[_ p] projects :when (some #{id} (get p kind))] (:path p))]
+                           (if (or (= :global (:scope decl)) (empty? ps)) :all (vec ps))))]
+        (merge
+         (apply dissoc config [:executors :cli-code :projects :mcps :skills :skill-packs :providers :extra-providers :memory])
+         {:settings (vec (concat
+                          (for [[t s] (or (:executors config) (:cli-code config))]
+                            (assoc s :id (keyword (str "user-" (name t))) :tools [t] :in :all))
+                          (for [[pid p] projects [t s] (:executors p)]
+                            (assoc s :id (keyword (str (name pid) "-" (name t))) :tools [t] :in (:path p)))))
+          :trust (vec (for [[id p] projects :when (some? (:trusted p))]
+                        {:id id :in (:path p) :trusted (:trusted p) :tools (:tools p)}))}
+         (keyed-skills config placements)
+         (into {} (for [kind [:mcps :providers :memory]
+                        :let [rows (if (= kind :providers) (merge (:extra-providers config) (:providers config)) (get config kind))]
+                        :when (seq rows)]
+                    [kind (vec (for [[id decl] rows
+                                     :let [decl (if (string? decl) {:cmd decl} decl)]]
+                                 (cond-> (assoc (dissoc decl :scope) :id id
+                                                :in (placements (case kind :mcps :mcp nil) id decl))
+                                   (:scope decl) (assoc :at (if (= :project (:scope decl)) :repo :machine)))))]))
+         (when-let [ps (seq (for [[id p] projects :when (:permissions p)]
+                             (assoc (:permissions p) :id id :in (:path p))))]
+           {:permissions (vec ps)})))))
+
 (defn render [config]
+  (let [config (entity-config config)]
   (str
    ";; agents.edn — declarative coding-agent configuration.\n"
    ";; Managed by `agentctl` (apply / apply! / validate / import).\n"
@@ -363,4 +443,4 @@
              (for [[k v] config
                    :when (not (some #{k} (map first section-order)))]
                (str " " k "\n " (str/trim (pp v)) "\n")))
-   "}\n"))
+   "}\n")))

@@ -5,6 +5,7 @@
    consumes the normalized shape produced here, so adapters never re-interpret
    surface syntax."
   (:require [agentctl.refs :as refs]
+            [agentctl.scope :as scope]
             [agentctl.sources :as sources]
             [agentctl.util :as u]
             [clojure.edn :as edn]
@@ -15,7 +16,7 @@
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
-  {:claude      #{:settings :mcps :skills :memory :projects :permissions}
+  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks}
    :codex       #{:settings :mcps :skills :memory :projects :providers}
    :pi          #{:settings :mcps :skills :memory :providers :projects}
    :omp         #{:settings :mcps :skills :memory :providers}
@@ -27,6 +28,12 @@
   {:antigravity "agy"})
 
 (defn cli-name [tool] (get cli-names tool (name tool)))
+
+(def agent-names
+  "How the plan names each tool: the `skills` CLI's agent ids where it has one."
+  {:claude "claude-code" :codex "codex" :pi "pi" :omp "omp" :llm "llm" :antigravity "antigravity"})
+
+(defn agent-name [tool] (get agent-names tool (name tool)))
 
 (defn supports? [tool kind] (contains? (get capabilities tool #{}) kind))
 
@@ -222,7 +229,8 @@
       :bearer-token-env (:bearer-token-env decl)
       :cwd (some-> (:cwd decl) u/abs-path)
       :enabled (get decl :enabled true)
-      :scope (some-> (:scope decl) u/kw->str keyword)
+      :scope (or (case (:at decl) :repo :project :machine :local nil)
+                 (some-> (:scope decl) u/kw->str keyword))
       :extra (:extra decl)
       :per-tool (norm-per-tool id decl norm-mcp)
       :tools (tool-selection decl :mcps)})))
@@ -256,6 +264,9 @@
       :uri uri
       :type type
       :ref (:ref decl)
+      ;; fetched only because a `[:gh …]` skill key names the repository
+      :implicit (:implicit decl)
+      :alias (some-> (:alias decl) name)
       :dir (or (:dir decl) "skills")
       :root (case type
               :file (u/abs-path (str/replace uri #"^file://" ""))
@@ -347,7 +358,7 @@
     (into flags
           (map (fn [[k v]]
                  (let [k' (keyword (str/replace (u/kw->str k) "_" "-"))]
-                   [k' (if (= k' :hooks) (norm-hooks v) v)])))
+                   [k' (case k' :hooks (norm-hooks v) :permissions (norm-permissions v) v)])))
           (dissoc decl :on :off))))
 
 (defn- project-executors
@@ -370,6 +381,7 @@
       :kind :projects
       :path (project-path id decl)
       :trusted (:trusted decl)
+      :trust-by-tool (:trust-by-tool decl)
       :for-tools (if (or (:tools decl) (:for decl))
                    (tool-selection decl :projects)
                    ;; naming executors is also how a project says who it is for
@@ -416,7 +428,7 @@
    once a project does name its executors, the tools left unnamed are ones
    nothing asked for, and agentctl has no business writing their files."
   [cfg]
-  (or (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
+  (or (not-empty (:active-tools cfg)) (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
                          #{} (:projects cfg)))
       (set all-tools)))
 
@@ -473,7 +485,7 @@
                          (assoc :tools (set (filter #(supports? % :skills) ex))))])))
           skills)))
 
-(defn normalize [raw path & [load-findings]]
+(defn- normalize-legacy [raw path & [load-findings]]
   (let [projects (into {} (map (fn [[k v]] [k (norm-project k v)])) (:projects raw))
         skill-packs (into {} (map (fn [[k v]] [k (norm-pack k v)])) (:skill-packs raw))
         declared-skills (into {} (map (fn [[k v]] [k (norm-skill k v)])) (:skills raw))
@@ -494,16 +506,48 @@
      :memory (into {} (map (fn [[k v]] [k (norm-memory k v)])) (:memory raw))
      :projects projects}))
 
+(defn normalize [raw path & [load-findings]]
+  (if-not (scope/dsl? raw)
+    (normalize-legacy raw path load-findings)
+    (let [{lowered :raw :keys [entities active-tools]} (scope/compile-config raw tools-for)
+          cfg (normalize-legacy lowered path load-findings)
+          cfg (assoc cfg :entity-dsl? true :entities entities :entity-raw raw :active-tools active-tools)
+          ;; A globally placed pack installs its current contents. Re-normalizing
+          ;; after fetch lets newly materialized skills join the same apply.
+          pack-skills (into {} (for [e entities :when (and (= :skill-packs (:kind e)) (= :all (:in e)))
+                                     dir (sources/skill-dirs (get-in cfg [:skill-packs (:id e)]))
+                                     :let [s (sources/pack-skill (:id e) dir)]]
+                                 [(:id s) (assoc s :scope :global :via-pack true
+                                                 :tools (tool-selection (:decl e) :skills))]))]
+      (-> cfg
+          (update :skills #(merge pack-skills %))
+          (update :skill-packs
+                  #(reduce (fn [packs e]
+                             (if (= :skill-packs (:kind e))
+                               (assoc-in packs [(:id e) :tools] (tool-selection (:decl e) :skills)) packs)) % entities))))))
+
 ;; ---------------------------------------------------------------- structural check
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :#def})
+    :settings :permissions :trust :hooks :#def})
 
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]
     (concat
      (:load-findings cfg)
+     (for [{:keys [kind id decl]} (:entities cfg) :when (contains? decl :scope)]
+       (finding :warn [kind id :scope] ":scope is deprecated; use :at :machine or :repo"))
+     (for [{:keys [kind id in]} (:entities cfg) :when (and (= kind :trust) (= in :all))]
+       (finding :warn [kind id :in] "trust requires a repository path; tools have no user-wide trust location"))
+     (for [{:keys [kind id decl targets]} (:entities cfg)
+           :when (and (= kind :memory) (seq targets)
+                      (not (u/exists? (some-> (or (:from decl) (:path decl)) u/expand (str/replace #"^file://" "")))))]
+       (finding :error [kind id] "memory source not found"))
+     (for [{:keys [kind id decl]} (:entities cfg)
+           t (let [ts (:tools decl)] (cond (nil? ts) [] (= ts :all) [] (keyword? ts) [ts] :else ts))
+           :when (not (some #{t} all-tools))]
+       (finding :error [kind id :tools] (str "unknown tool " t)))
      ;; :cli-code was the original spelling; still read, so an old file keeps
      ;; working, but it is not what import writes any more
      (when (contains? raw :cli-code)
@@ -559,6 +603,9 @@
        (finding :error [:executors :claude :hooks id] "hook needs :event"))
      (for [[id h] (get-in cfg [:tools :claude :hooks]) :when (nil? (:command h))]
        (finding :error [:executors :claude :hooks id] "hook needs :command"))
+     (for [[pid p] (:projects cfg) [id h] (get-in p [:tools :claude :hooks])
+           :when (or (nil? (:event h)) (nil? (:command h)) (:hook-id-missing h))]
+       (finding :error [:hooks pid id] "project hook needs an id, event, and command"))
      (for [[_ h] (get-in cfg [:tools :claude :hooks]) :when (:hook-id-missing h)]
        (finding :error [:executors :claude :hooks (:event h)] "hook grouped under :hooks needs :id")))))
 

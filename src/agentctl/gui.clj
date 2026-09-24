@@ -120,6 +120,7 @@
               cfg (config/parse-config text path)
               st (state/load-state)
               ops (core/build-plan cfg st opts)
+              cfg (assoc cfg :planned-ops ops)
               changes (filter plan/mutating? ops)
               config-backup (when (u/exists? path) (u/backup! path))]
           (u/write-text! path text)
@@ -136,9 +137,9 @@
               ;; gets its value overwritten if this run actually wrote it —
               ;; see `core/sync-state!`
               (state/save! (core/sync-state! st cfg
-                                              (set (map (juxt :tool :kind :id) failed))
+                                              (set (mapcat core/op-keys failed))
                                               (when (core/scoped? opts)
-                                                (set (map (juxt :tool :kind :id) done)))))
+                                                (set (mapcat core/op-keys done)))))
               (merge pre
                      {:status (if (seq failed) 500 200)
                       :applied (count done)

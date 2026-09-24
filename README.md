@@ -9,6 +9,33 @@ providers, and project-specific configuration. `agentctl` compares that desired
 state with the files on disk, prints a plan, and applies only the changes it
 owns.
 
+The [entity-first scope DSL](docs/SCOPE-DSL.md) places resources directly with
+`:in`: `:all` installs once at user scope, while `"projects"` discovers repositories
+under `$HOME/projects` on each apply. Most sections are vectors; for example:
+
+```clojure
+{:settings [{:model "sonnet" :tools [:claude] :in :all}]
+ :mcps [{:id :tracker :cmd "tracker-mcp -t stdio" :in "projects"}]
+ :trust [{:in ["Brain" "projects" "!projects/vendor"]}]
+ :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/clz"}}
+ :skills {[superpowers "brainstorming"] {:in :all}
+          [:gh "cyxzdev/Uncodixfy"] {:in "projects/core-vector" :acli [:codex]}}}
+```
+
+`:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
+`[:uri "…"]`, or `[pack "skill"]` where `pack` is a pack's `:alias`. `:acli`
+selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`).
+
+A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
+run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
+`.agents/skills` (read by codex and antigravity), claude gets a link in
+`.claude/skills`, and the install is recorded in `skills-lock.json`. A dropped
+skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
+into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
+
+Imports emit this format. The older map-and-project format documented below
+remains supported; use one format per file.
+
 ## Safety model
 
 - `apply` is read-only and exits with status 2 when drift exists.

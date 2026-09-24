@@ -9,13 +9,13 @@
 
 (def path (str u/home "/.config/agentctl/state.edn"))
 
-(def empty-state {:version 1 :managed {}})
+(def empty-state {:version 2 :managed {}})
 
 (defn load-state []
   (or (u/read-edn path) empty-state))
 
 (defn save! [state]
-  (u/write-text! path (with-out-str (pp/pprint (assoc state :version 1)))))
+  (u/write-text! path (with-out-str (pp/pprint (assoc state :version 2)))))
 
 (defn key-for [tool kind id] [tool kind (u/id->str id)])
 
@@ -33,7 +33,7 @@
 
 (defn record [state tool kind id data]
   (assoc-in state [:managed (key-for tool kind id)]
-            (merge {:at (u/timestamp)} data)))
+            (merge {:at (u/timestamp) :entity-id id :resolved-path (or (:project-path data) u/home)} data)))
 
 (defn forget [state tool kind id]
   (update state :managed dissoc (key-for tool kind id)))

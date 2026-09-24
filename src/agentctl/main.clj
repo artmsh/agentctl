@@ -33,8 +33,8 @@
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"
-    "                       settings mcps skills providers memory projects skill-packs"
-    "  -p, --project ID     Restrict to one declared project (repeatable); selects"
+    "                       settings permissions hooks mcps skills providers memory trust skill-packs"
+    "  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
     "  -A, --all            apply/apply!: ignore the working directory and plan the"
     "                       whole config (see SCOPE)"
@@ -49,10 +49,10 @@
     "  -h, --help           This message"
     ""
     "SCOPE"
-    "  apply and apply! read the working directory. Inside a declared project they"
-    "  plan only that project; on the directory the declared projects sit under,"
-    "  only those projects. Anywhere else — and with -p or --all — nothing is"
-    "  narrowed and the whole config is planned."]))
+    "  apply and apply! read the working directory. Inside a resolved project they"
+    "  plan only that project; on its workspace directory, only projects beneath it."
+    "  Explicit -p selects a path or tree. --all disables working-directory narrowing."
+    "  Elsewhere the whole config is planned."]))
 
 (defn parse-args [args]
   (loop [args args opts {:tools #{} :kinds #{} :projects #{}}]
@@ -89,13 +89,16 @@
   "One line saying the working directory narrowed this run, and how to opt out.
    Silence here would be the worst of it: `apply` exiting 0 looks like a clean
    machine, not like a run that never looked at most of the config."
-  [{:keys [where projects path]}]
+  [cfg {:keys [where projects path]}]
+  ;; a DSL target id is a path digest; its path is the name a person knows
+  (let [label #(or (when (:entity-dsl? cfg) (some-> (get-in cfg [:projects % :path]) u/tilde))
+                   (u/kw->str %))]
   (str "scope: "
        (case where
-         :project (str "project " (u/kw->str (first projects)) " — this directory is inside it")
-         :root (str (str/join ", " (sort (map u/kw->str projects)))
+         :project (str "project " (label (first projects)) " — this directory is inside it")
+         :root (str (str/join ", " (sort (map label projects)))
                     " — the projects under " (u/tilde path)))
-       " (--all for the whole config)"))
+       " (--all for the whole config)")))
 
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
@@ -116,6 +119,7 @@
                   (core/cwd-scope cfg (System/getProperty "user.dir")))
           opts (cond-> opts scope (assoc :projects (:projects scope)))
           ops (core/build-plan cfg st opts)
+          cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)]
       (if (:json opts)
         (println (json/generate-string
@@ -126,7 +130,7 @@
                                          :projects (mapv u/kw->str (sort (:projects scope)))}))
                   {:pretty true}))
         (do
-          (when scope (println (scope-note scope)))
+          (when scope (println (scope-note cfg scope)))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
           (if (seq changes)
@@ -160,9 +164,9 @@
             ;; value overwritten if this run actually wrote it — see
             ;; `core/sync-state!`
             (state/save! (core/sync-state! st cfg
-                                            (set (map (juxt :tool :kind :id) failed))
+                                            (set (mapcat core/op-keys failed))
                                             (when (core/scoped? opts)
-                                              (set (map (juxt :tool :kind :id) done)))))
+                                              (set (mapcat core/op-keys done)))))
             (println (format "\napplied %d change(s)%s"
                              (count done)
                              (if (seq failed) (str ", " (count failed) " failed") "")))

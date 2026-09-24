@@ -14,6 +14,8 @@
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
+            [agentctl.scope :as scope]
+            [agentctl.skills-cli :as skills-cli]
             [agentctl.state :as state]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
@@ -605,7 +607,7 @@
   (let [cfg {:executors {:claude {:model "sonnet"}}
              :mcps {:demo {:command "/bin/echo" :tools [:pi]}}}
         back (clojure.edn/read-string (imports/render cfg))]
-    (is (= cfg back))))
+    (is (= (imports/entity-config cfg) back))))
 
 
 (deftest project-scoped-mcps-are-owned-under-the-project
@@ -613,7 +615,7 @@
                                       :searxng {:cmd "/bin/searxng-mcp" :scope :global}}
                                :projects {:example {:path "/tmp/on" :mcp [:slack]}}}
                               "x")
-        inv (set (core/inventory cfg))]
+        inv (set (map #(vec (take 3 %)) (core/inventory cfg)))]
     (testing "a project's server is owned per project, never as the user-wide one"
       (is (contains? inv [:claude :mcps :example/slack]))
       (is (not (contains? inv [:claude :mcps :slack]))))
@@ -752,7 +754,7 @@
         cfg (config/normalize {:skill-packs {:a {:uri (str "file://" pack-a)}
                                              :b {:uri (str "file://" pack-b)}}
                                :projects {:example {:path (str dir "/example")
-                                                      :executors #{:claude :codex}
+                                                      :executors #{:claude :pi}
                                                       :skills [:wrap-up :shared]}}}
                               "x")
         proj (get-in cfg [:projects :example])
@@ -771,15 +773,15 @@
         (is (some #(and (= :error (:level %)) (str/includes? (:message %) "shared")
                        (str/includes? (:message %) "more than one pack"))
                   findings))))
-    (testing "codex has no project skills directory, so a bare-resolved skill still reaches it user-wide"
-      ;; regression: dropping the :skills entry must not silently stop codex
-      ;; (and pi/omp, same shape) from installing a skill it only ever
+    (testing "pi has no project skills directory, so a bare-resolved skill still reaches it user-wide"
+      ;; regression: dropping the :skills entry must not silently stop pi
+      ;; (and omp, same shape) from installing a skill it only ever
       ;; discovered by naming a project's executors — see bare-project-skills
       (is (contains? (:skills cfg) :wrap-up))
-      (is (contains? (:tools (:wrap-up (:skills cfg))) :codex))
-      (is (contains? (set (core/inventory cfg)) [:codex :skills :wrap-up]))
+      (is (contains? (:tools (:wrap-up (:skills cfg))) :pi))
+      (is (contains? (set (core/inventory cfg)) [:pi :skills :wrap-up]))
       (is (some #(and (= :create (:action %)) (= :wrap-up (:id %)))
-                (codex/skill-ops cfg state/empty-state))))))
+                (pi/skill-ops cfg state/empty-state))))))
 
 (deftest a-project-skill-is-owned-where-it-was-installed
   (let [dir (temp-dir)
@@ -787,15 +789,16 @@
         _ (do (fs/create-dirs src) (spit (str src "/SKILL.md") "---\nname: wrap-up\n---\n"))
         cfg (config/normalize {:skills {:wrap-up {:path src}}
                                :projects {:proj {:path (str dir "/proj")
-                                                 :executors #{:claude :codex}
+                                                 :executors #{:claude :codex :pi}
                                                  :skills [:wrap-up]}}}
                               "x")
-        inv (set (core/inventory cfg))]
-    (testing "claude owns it under the project it belongs to"
-      (is (contains? inv [:claude :skills :proj/wrap-up]))
-      (is (not (contains? inv [:claude :skills :wrap-up]))))
-    (testing "codex has no project skills directory, so its copy is user-wide"
-      (is (contains? inv [:codex :skills :wrap-up])))))
+        inv (set (map #(vec (take 3 %)) (core/inventory cfg)))]
+    (testing "claude and codex own it under the project it belongs to"
+      (doseq [t [:claude :codex]]
+        (is (contains? inv [t :skills :proj/wrap-up]))
+        (is (not (contains? inv [t :skills :wrap-up])))))
+    (testing "pi has no project skills directory, so its copy is user-wide"
+      (is (contains? inv [:pi :skills :wrap-up])))))
 
 (deftest a-server-left-behind-in-mcp-json-is-reported-not-deleted
   ;; local scope owning a server does not remove the copy the repo still ships
@@ -1662,10 +1665,9 @@
     (is (= 1 (count (:cmds g))))
     (is (str/starts-with? (first (:cmds g)) "ln -s "))))
 
-(deftest global-wrap-up-removes-project-links
-  (doseq [[tool planner subdir global-var]
-          [[:claude claude/plan "/.claude/skills" #'claude/skills-dir]
-           [:antigravity antigravity/plan "/.agents/skills" #'antigravity/skills-dir]]]
+(deftest global-wrap-up-removes-project-copies
+  (doseq [[tool subdir global-var] [[:claude "/.claude/skills" #'claude/skills-dir]
+                                    [:antigravity "/.agents/skills" #'antigravity/skills-dir]]]
     (let [dir (temp-dir)
           src (str dir "/pack/skills/wrap-up")
           global-dir (str dir "/global")
@@ -1674,15 +1676,16 @@
                :projects (into {} (for [id [:a :b :legacy :directory]]
                                     [id {:path (str dir "/" (name id))
                                          :executors #{tool} :skills [:wrap-up]}]))}
+          planner #(core/build-plan %1 %2 {:tools #{tool}})
           _ (fs/create-dirs src)
           _ (spit (str src "/SKILL.md") "---\nname: wrap-up\n---\nWrap up the session.\n")]
       (with-redefs-fn {global-var global-dir}
         (fn []
           (let [local (config/normalize raw "test")
-                local-ops (filter #(and (= :skills (:kind %))
-                                       (#{:a :b} (:project %)))
+                local-ops (filter #(and (= :skills (:kind %)) (#{:a :b} (:project %)))
                                   (planner local state/empty-state))
                 _ (is (empty? (:failed (core/execute! local-ops))))
+                _ (is (fs/directory? (str dir "/a" subdir "/wrap-up")) "installed by the skills CLI")
                 st (core/sync-state! state/empty-state local)
                 legacy (str dir "/legacy" subdir "/wrap-up")
                 directory (str dir "/directory" subdir "/wrap-up")
@@ -1691,7 +1694,7 @@
                 _ (fs/create-dirs directory)
                 _ (spit (str directory "/SKILL.md") "local content")
                 ;; Keep a direct reference, expand a pack, and drop a reference:
-                ;; all three must shed the redundant project link.
+                ;; all three must shed the redundant project copy.
                 global (config/normalize (-> raw
                                              (assoc-in [:skills :wrap-up :scope] :global)
                                              (assoc-in [:projects :b :skills] [:kit])
@@ -1701,23 +1704,316 @@
                 out (plan/render-plan ops {})]
             (is (= #{:a/wrap-up :b/wrap-up :legacy/wrap-up} (set (map :id deletes))))
             (is (= 1 (count (filter #(= :create (:action %)) ops))))
-            (doseq [id [:a :b :legacy]]
-              (is (str/includes? out (str "- projects/" (name id) " skills/")))
-              (is (fs/sym-link? (str dir "/" (name id) subdir "/wrap-up"))))
+            (doseq [id [:a :b]]
+              (is (str/includes? out (str "PROJECT(" (str/replace (u/tilde (str dir "/" (name id))) #"^~/" "") ")")))
+              (is (u/exists? (str dir "/" (name id) subdir "/wrap-up"))))
+            (is (str/includes? out "remove wrap-up -y"))
             (is (not (u/exists? (str global-dir "/wrap-up"))) "dry plan writes nothing")
-            ;; A project-filtered run cannot remove the only working install.
+            (testing "a project-scoped run leaves the user-wide install out, so it keeps the copy"
+              (let [scoped (filter #(= :skills (:kind %))
+                                   (core/build-plan global st {:tools #{tool} :projects #{:a}}))
+                    [o] (filter #(= :a/wrap-up (:id %)) scoped)]
+                (is (= :noop (:action o)))
+                (is (str/includes? (:summary o) "kept until the user-wide wrap-up is installed"))
+                (is (not-any? plan/mutating? scoped))))
+            ;; A removal before the user-wide install exists is refused.
             (is (= 3 (count (:failed (core/execute! deletes)))))
             (is (empty? (:failed (core/execute! ops))))
-            (doseq [o deletes] (is (not (u/exists? (:target o)))))
+            (doseq [id [:a :b :legacy]]
+              (is (not (fs/exists? (str dir "/" (name id) subdir "/wrap-up") {:nofollow-links true}))))
             (is (= "local content" (slurp (str directory "/SKILL.md"))))
             (is (fs/sym-link? (str global-dir "/wrap-up")))
-            (is (u/exists? (str src "/SKILL.md")) "unlink preserves the source")
+            (is (u/exists? (str src "/SKILL.md")) "removal preserves the source")
             (let [next-state (core/sync-state! st global)
                   inv (set (core/inventory global))]
               (is (contains? inv [tool :skills :wrap-up]))
               (is (not-any? #(and (= :skills (second %)) (namespace (nth % 2))) inv))
               (is (empty? (filter #(and (= :skills (:kind %)) (plan/mutating? %))
                                   (planner global next-state)))))))))))
+
+(deftest entity-selectors
+  (let [root (temp-dir)
+        a (str root "/a") b (str root "/group/b")]
+    (fs/create-dirs (str a "/.git"))
+    (fs/create-dirs (str a "/nested/.git"))
+    (fs/create-dirs (str b "/.jj"))
+    (fs/create-dirs (str root "/node_modules/ignored/.hg"))
+    (is (= [a b] (scope/targets (scope/selector root))))
+    (is (= [a] (scope/targets (scope/selector [(str "!" root "/group") root]))))
+    (is (= (str u/home "/projects/x") (scope/path "projects/x")))
+    (doseq [bad [["!x"] [:all "!x"] [] {:under "x"} "projects/*" "!"]]
+      (is (thrown? Exception (scope/selector bad))))
+    (let [cfg (config/normalize
+               {:settings [{:id :broad :model "sonnet" :in root :tools [:claude]}
+                           {:id :narrow :model "opus" :in a :tools [:claude]}
+                           {:id :later-broad :model "haiku" :in root :tools [:claude]}]
+                :mcps [{:id :user :cmd "echo" :in :all}
+                       {:id :local :cmd "echo" :in root :at :repo}
+                       {:id :unused :cmd "echo" :in :none}]}
+               "test")]
+      (is (= "opus" (get-in cfg [:projects (scope/target-id a) :tools :claude :model])))
+      (is (= "haiku" (get-in cfg [:projects (scope/target-id b) :tools :claude :model])))
+      (is (= :global (get-in cfg [:mcps :user :scope])))
+      (is (= :project (get-in cfg [:mcps :local :scope])))
+      (is (nil? (get-in cfg [:mcps :unused])))
+      (is (not (fs/exists? (str a "/.mcp.json")))))
+    (is (thrown? Exception (config/normalize {:settings [{:in :all} {:in :all}]} "test")))))
+
+(deftest entity-prune-retains-resolved-path
+  (let [root (temp-dir) repo (str root "/repo") runtime (str root "/runtime.json")]
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [claude/runtime-file runtime]
+      (let [cfg (config/normalize {:mcps [{:id :demo :cmd "echo" :in repo :tools [:claude]}]} "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:claude}})
+            _ (core/execute! ops)
+            st (core/sync-state! state/empty-state cfg)
+            pid (scope/target-id repo)
+            oid (keyword (name pid) "demo")
+            gone (config/normalize {:mcps []} "test")
+            prunes (core/build-plan gone st {:tools #{:claude}})]
+        (is (= repo (:project-path (state/entry st :claude :mcps oid))))
+        (is (some #(and (= :delete (:action %)) (= oid (:id %))) prunes))
+        (core/execute! prunes)
+        (is (nil? (get-in (u/read-json runtime) [:projects (keyword repo) :mcpServers :demo])))))))
+
+(deftest entity-settings-memory-and-hooks-prune
+  (let [root (temp-dir) repo (str root "/repo") source (str root "/notes.md")
+        settings (str root "/settings.json") runtime (str root "/runtime.json")]
+    (fs/create-dirs (str repo "/.git"))
+    (spit source "memory")
+    (with-redefs [claude/settings-file settings claude/runtime-file runtime]
+      (let [raw {:settings [{:id :model :model "opus" :in repo :tools [:claude]}]
+                 :memory [{:id :notes :from source :in repo :tools [:claude]}]
+                 :hooks [{:id :start :event :SessionStart :command "echo ready" :in repo}]}
+            cfg (config/normalize raw "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:claude}})
+            result (core/execute! ops)
+            st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            gone (config/normalize {:settings []} "test")
+            prunes (core/build-plan gone st {:tools #{:claude}})]
+        (is (empty? (:failed result)))
+        (is (= "opus" (:model (u/read-json (str repo "/.claude/settings.json")))))
+        (is (fs/sym-link? (str repo "/CLAUDE.md")))
+        (is (= 1 (count (get-in (u/read-json (str repo "/.claude/settings.json")) [:hooks :SessionStart]))))
+        (is (seq (:placements st)))
+        (is (empty? (:failed (core/execute! prunes))))
+        (is (nil? (:model (u/read-json (str repo "/.claude/settings.json")))))
+        (is (not (u/exists? (str repo "/CLAUDE.md"))))
+        (is (empty? (get-in (u/read-json (str repo "/.claude/settings.json")) [:hooks :SessionStart])))
+        (is (= "memory" (slurp source)))))))
+
+(deftest entity-discovery-refresh-and-tool-isolation
+  (let [root (temp-dir) repo (str root "/repo") skill (str root "/skill")]
+    (fs/create-dirs skill)
+    (spit (str skill "/SKILL.md") "skill")
+    (let [raw {:skills {[:uri skill] {:alias 'review :in repo :acli [:pi]}}}
+          before (config/normalize raw "test")]
+      (is (empty? (:projects before)))
+      (fs/create-dirs (str repo "/.hg"))
+      (let [cfg (config/normalize raw "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:pi}})]
+        (is (= 1 (count (:projects cfg))))
+        (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) ops))
+        (is (some #(and (= :skills (:kind %)) (:warn %)) ops)))))
+  (let [raw {:settings [{:id :unified :model "a" :on #{:auto-compact} :in :all}
+                        {:id :claude :model "b" :off #{:auto-compact} :tools [:claude] :in :all}
+                        {:id :later-unified :model "c" :in :all}]}
+        cfg (config/normalize raw "test")]
+    (is (= "b" (get-in cfg [:tools :claude :model])))
+    (is (false? (get-in cfg [:tools :claude :auto-compact])))
+    (is (= "c" (get-in cfg [:tools :codex :model])))))
+
+(deftest entity-gui-preserves-the-vector-file-shape
+  (let [text "{:#def {effort \"high\"} :settings [{:thinking $effort :in :all}]}"
+        m (form/model text)]
+    (is (:ok m))
+    (is (= "entities" (:layout (second (:sections m)))))
+    (is (= ":all" (:selector (first (:targets m)))))
+    (is (str/includes? (:value (first (:fields (second (:sections m))))) "$effort"))))
+
+(deftest entity-partial-settings-prune
+  (let [root (temp-dir) file (str root "/config.toml")]
+    (with-redefs [codex/config-file file]
+      (let [cfg (config/normalize {:settings [{:id :model :model "old" :tools [:codex] :in :all}
+                                             {:id :personality :personality "pragmatic" :tools [:codex] :in :all}]} "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:codex}})
+            _ (core/execute! ops)
+            st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            next-cfg (config/normalize {:settings [{:id :personality :personality "pragmatic" :tools [:codex] :in :all}]} "test")
+            prune (core/build-plan next-cfg st {:tools #{:codex}})
+            _ (core/execute! prune)
+            next-state (core/sync-state! st (assoc next-cfg :planned-ops prune))]
+        (is (nil? (get (toml/read-toml file) "model")))
+        (is (= "pragmatic" (get (toml/read-toml file) "personality")))
+        (is (seq (:writes next-state)))
+        (is (empty? (filter plan/mutating? (core/build-plan next-cfg next-state {:tools #{:codex}}))))))))
+
+(deftest entity-trust-prune-preserves-unmanaged-paths
+  (let [root (temp-dir) repo (str root "/repo") file (str root "/settings.json")]
+    (fs/create-dirs (str repo "/.git"))
+    (u/write-json! file {:trustedWorkspaces ["/unmanaged"]})
+    (with-redefs [antigravity/settings-file file]
+      (let [cfg (config/normalize {:trust [{:in repo :tools [:antigravity]}]} "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:antigravity}})
+            _ (core/execute! ops)
+            st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            gone (config/normalize {:trust []} "test")
+            prunes (core/build-plan gone st {:tools #{:antigravity}})]
+        (is (= #{"/unmanaged" repo} (set (:trustedWorkspaces (u/read-json file)))))
+        (core/execute! prunes)
+        (is (= ["/unmanaged"] (:trustedWorkspaces (u/read-json file))))))))
+
+(deftest a-repository-skill-plans-as-a-skill
+  (let [cfg (config/normalize {:skills {[:gh "o/r"] {}}} "test")
+        [o] (filter #(= :skill-packs (:kind %)) (sources/pack-ops cfg))]
+    (is (= :skills (:shown-kind o)))
+    (is (str/includes? (:summary o) "clone skill `o/r`")))
+  (let [cfg (config/normalize {:skill-packs {[:gh "o/p"] {}} :skills {['p "x"] {}}} "test")
+        [o] (sources/pack-ops cfg)]
+    (is (nil? (:shown-kind o)) "a declared pack stays a pack")))
+
+(deftest a-project-copy-of-a-global-skill-is-removed-only-when-identical
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                         [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (fs/create-dirs (str repo "/.git"))
+    (doseq [d [src (str root "/local")]]
+      (fs/create-dirs d) (spit (str d "/SKILL.md") "---\nname: x\ndescription: y\n---\n"))
+    (fs/copy-tree src copy)
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})
+            rm (filter #(= copy (:target %)) ops)]
+        (is (= [:delete] (map :action rm)))
+        (is (empty? (:failed (core/execute! rm))))
+        (is (not (u/exists? copy)))
+        (is (u/exists? (str (u/backup-dir) "/" (str/replace (u/tilde copy) #"[/~]" "_")))))
+      (fs/copy-tree src copy)
+      (spit (str copy "/SKILL.md") "edited")
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= copy (:target %)) (plan/mutating? %)) ops))
+        (is (some #(and (:warn %) (str/includes? (str (:summary %)) "differs")) ops))))))
+
+(deftest skill-ops-render-as-user-and-project-blocks
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        disp {:kind "skill" :entity :wrap-up :source (u/tilde src)}
+        link (fn [tool agent dest & [pid]]
+               (assoc (plan/link-op {:tool tool :kind :skills :id :wrap-up :src src :dest dest :project pid})
+                      :display (assoc disp :agent agent) :project-path (when pid repo)))
+        _ (fs/create-dirs src)
+        out (plan/render-plan [(link :claude "claude-code" (str root "/c/wrap-up"))
+                               (link :codex "codex" (str root "/x/wrap-up"))
+                               (link :codex "codex" (str repo "/.agents/skills/wrap-up") :p)
+                               (plan/op {:action :create :tool :agentctl :kind :skill-packs :id :kit
+                                         :cmds [["gh" "repo" "clone" "o/kit"]]
+                                         :display {:kind "skill-pack" :entity :kit :source "o/kit"
+                                                   :skills ["a" "b"] :alias "kit" :agents ["codex"]}})]
+                              {})]
+    (is (str/includes? out (str "USER(" (System/getProperty "user.name") ")")))
+    (is (str/includes? out (str "+ skill [agents: claude-code, codex] " (u/tilde src))) "one line across tools")
+    (is (str/includes? out "+ skill-pack [agents: codex] o/kit [skill: a, b] [kit]"))
+    (is (str/includes? out (str "PROJECT(" (str/replace (u/tilde repo) #"^~/" "") ")")))
+    (is (str/includes? out (str "exec: 'ln -s " (u/tilde src) " " (u/tilde repo) "/.agents/skills/wrap-up'")))
+    (is (not (str/includes? out "CLAUDE")) "skills leave the tool sections")))
+
+(deftest codex-and-antigravity-share-project-agents-skills
+  (let [root (temp-dir) repo (str root "/repo") skill (str root "/review")
+        dest (str repo "/.agents/skills/review")
+        raw (fn [acli] {:skills {[:uri skill] {:in repo :acli acli}}})
+        plan-for (fn [cfg st] (core/build-plan cfg st {:tools #{:codex :antigravity}}))]
+    (fs/create-dirs (str repo "/.git"))
+    (fs/create-dirs skill)
+    (spit (str skill "/SKILL.md") "---\nname: review\ndescription: r\n---\n")
+    (let [cfg (config/normalize (raw [:codex :agy]) "test")
+          ops (plan-for cfg state/empty-state)
+          adds (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops)]
+      (is (= 1 (count adds)) "one skills add for the directory both tools read")
+      (is (= ["add" (u/real-path skill) "-a" "antigravity" "-a" "codex" "-y"]
+             (drop (count (skills-cli/command)) (first (:cmds (first adds))))))
+      (is (empty? (:failed (core/execute! ops))))
+      (is (fs/directory? dest))
+      (is (= (u/real-path skill) (get (skills-cli/read-lock repo) "review")))
+      (is (empty? (filter plan/mutating? (plan-for cfg state/empty-state))) "converged")
+      (let [st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            _ (is (state/managed? st :codex :skills (keyword (name (scope/target-id repo)) "review")))
+            only-agy (config/normalize (raw [:agy]) "test")
+            prune (plan-for only-agy st)]
+        (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) prune)
+            "dropping codex keeps the copy antigravity still reads")
+        (let [gone (plan-for (config/normalize {:skills {}} "test") st)
+              rm (filter #(= :delete (:action %)) gone)]
+          (is (= [["remove" "review" "-y"]] (map #(drop (count (skills-cli/command)) (first (:cmds %))) rm)))
+          (is (empty? (:failed (core/execute! rm))))
+          (is (not (fs/exists? dest)))
+          (is (empty? (skills-cli/read-lock repo))))))))
+
+(deftest keyed-skills-and-packs
+  (let [root (temp-dir) local (str root "/agents-setup") core (str root "/core-vector")
+        clz (str root "/clz")]
+    (fs/create-dirs (str local "/skills/wrap-up"))
+    (spit (str local "/skills/wrap-up/SKILL.md") "wrap")
+    (doseq [r [core clz]] (fs/create-dirs (str r "/.git")))
+    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias agents-setup}\n"
+                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" clz "\"]}}\n"
+                    " :skills {[agents-setup \"wrap-up\"] {:in :all}\n"
+                    "          [:gh \"cyxzdev/Uncodixfy\"] {:in [\"" core "\"] :acli [:codex :cc]}}}")
+          cfg (config/parse-config text "test")
+          pid (scope/target-id core)]
+      (is (:entity-dsl? cfg))
+      (is (= :file (get-in cfg [:skill-packs :agents-setup :type])))
+      (is (= local (get-in cfg [:skill-packs :agents-setup :root])))
+      (is (= "https://github.com/obra/superpowers" (get-in cfg [:skill-packs :superpowers :uri])))
+      (is (= :git (get-in cfg [:skill-packs :Uncodixfy :type])) "a repo-skill fetches as an implicit pack")
+      (is (= {:from :agents-setup :scope :global}
+             (select-keys (get-in cfg [:skills :wrap-up]) [:from :scope])))
+      (is (= (str local "/skills/wrap-up") (sources/skill-source cfg (get-in cfg [:skills :wrap-up]))))
+      (is (= #{:codex :claude} (get-in cfg [:skills :Uncodixfy :tools])) ":acli maps :cc onto :claude")
+      (is (some #{:Uncodixfy} (get-in cfg [:projects pid :skills])))
+      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id clz) :skills])))
+      (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
+      (is (= "agents-setup" (get-in cfg [:skill-packs :agents-setup :alias])) "kept for the plan's [alias]")))
+  (testing "the key names the skill directory, so an :alias renames without moving it"
+    (let [root (temp-dir) local (str root "/pack")]
+      (fs/create-dirs (str local "/skills/wrap-up"))
+      (spit (str local "/skills/wrap-up/SKILL.md") "wrap")
+      (let [cfg (config/normalize {:skill-packs {[:uri local] {:alias 'kit}}
+                                   :skills {['kit "wrap-up"] {:alias 'done}}} "test")]
+        (is (= (str local "/skills/wrap-up") (sources/skill-source cfg (get-in cfg [:skills :done])))))))
+  (testing "a repository that is itself a skill resolves to its root SKILL.md"
+    (let [d (temp-dir)]
+      (spit (str d "/SKILL.md") "x")
+      (let [cfg (config/normalize {:skill-packs {[:uri d] {:alias 'r}} :skills {['r "r"] {}}} "test")]
+        (is (= d (sources/skill-source cfg (get-in cfg [:skills :r])))))))
+  (testing "a declared pack of the same URI is reused rather than cloned twice"
+    (let [cfg (config/normalize {:skill-packs {[:gh "o/r"] {:alias 'mine}}
+                                 :skills {[:gh "o/r"] {}}} "test")]
+      (is (= [:mine] (keys (:skill-packs cfg))))
+      (is (= :mine (get-in cfg [:skills :r :from])))))
+  (testing "shape errors"
+    (is (thrown-with-msg? Exception #"undefined pack nope"
+                          (config/normalize {:skills {['nope "x"] {}}} "test")))
+    (is (thrown-with-msg? Exception #"must be a map keyed by source"
+                          (config/normalize {:skills [{:id :x :path "/tmp"}] :mcps []} "test")))
+    (is (thrown-with-msg? Exception #"invalid :skill-packs key"
+                          (config/normalize {:skill-packs {[:svn "x"] {}}} "test")))
+    (is (thrown-with-msg? Exception #"explicit :alias"
+                          (config/normalize {:skill-packs {[:gh "a/kit"] {} [:gh "b/kit"] {}}} "test")))))
+
+(deftest import-emits-keyed-skill-sections
+  (let [out (imports/entity-config {:skill-packs {:kit {:uri "https://github.com/obra/superpowers"}
+                                                  :mine {:uri "file://~/x"}}
+                                    :skills {:wrap-up {:from :mine :tools [:codex]}
+                                             :adhoc {:path "~/s/adhoc"}}})]
+    (is (= {[:gh "obra/superpowers"] {:alias 'kit} [:uri "file://~/x"] {:alias 'mine}}
+           (:skill-packs out)))
+    (is (= {['mine "wrap-up"] {:acli [:codex] :in :all} [:uri "~/s/adhoc"] {:in :all}}
+           (:skills out)))
+    (let [back (config/normalize out "test")]
+      (is (:entity-dsl? back) "the emitted shape reads back as the DSL")
+      (is (= :mine (get-in back [:skills :wrap-up :from])))
+      (is (= #{:codex} (get-in back [:skills :wrap-up :tools]))))))
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

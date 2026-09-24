@@ -88,7 +88,8 @@
   "Where the resource belongs. Only a project is a scope; everything else is
    the user's own machine and needs no saying."
   [o]
-  (when-let [p (:project o)] (str "projects/" (u/kw->str p))))
+  (or (some-> (:project-path o) u/tilde)
+      (when-let [p (:project o)] (str "projects/" (u/kw->str p)))))
 
 (defn- dot-prefix
   "The `permissions.` in `permissions.allow` / `permissions.ask` — ids that are
@@ -116,7 +117,7 @@
   (let [label (ids-label ids)]
     (if (= :projects (:kind o))
       (when-not (= label (some-> (:project o) u/kw->str)) label)
-      (str (name (:kind o)) "/" label))))
+      (str (name (or (:shown-kind o) (:kind o))) "/" label))))
 
 (defn- head-line
   "`~ projects/example mcps/{clj-repl dbx}`. The tool is the section heading
@@ -256,6 +257,67 @@
                               ds))))
                 ops))))))
 
+;; ---------------------------------------------------------------- skill blocks
+
+(defn- shell-word [s] (if (re-find #"[\s*?$'\"]" s) (str "\"" s "\"") s))
+
+(defn- scope-heading
+  "`USER(login)` for the machine, `PROJECT(projects/x)` for a repository —
+   skills are grouped by where they land, not by which tool reads them."
+  [path]
+  (if path
+    (str "PROJECT(" (str/replace (u/tilde path) #"^~/" "") ")")
+    (str "USER(" (System/getProperty "user.name") ")")))
+
+(defn- skill-line
+  "`+ skill [agents: claude-code, codex] source` /
+   `+ skill-pack [agents: …] source [skill: a, b] [alias]`."
+  [action {:keys [kind source skills alias]} agents]
+  (str/join " " (remove nil? [(sigil action) kind
+                              (when (seq agents) (str "[agents: " (str/join ", " agents) "]"))
+                              source
+                              (when (and (= kind "skill-pack") (seq skills))
+                                (str "[skill: " (str/join ", " skills) "]"))
+                              (when alias (str "[" alias "]"))])))
+
+(defn- render-skill-blocks
+  "One line per entity and action in each scope, however many tools it
+   reaches; a project line ends with the commands it runs."
+  [ops]
+  (let [placed (mapcat (fn [o]
+                         (let [ps (get-in o [:display :in-projects])]
+                           (if (and (seq ps) (not (:project-path o)))
+                             (map #(assoc o :project-path %) ps)
+                             [o])))
+                       ops)
+        ;; a pending report is redundant beside a change to the same entity
+        changing (set (for [o placed :when (mutating? o)]
+                        [(:project-path o) (get-in o [:display :entity])]))
+        placed (remove #(and (:pending %)
+                             (changing [(:project-path %) (get-in % [:display :entity])]))
+                       placed)
+        by-scope (group-by :project-path placed)]
+    (for [path (cons nil (sort (remove nil? (keys by-scope))))
+          :let [scope-ops (get by-scope path)]
+          :when (seq scope-ops)
+          s (cons (str "\n" (scope-heading path))
+                  (for [[[_ _ action warn] g] (sort-by (fn [[[k e a] _]] [(str e) k (str a)])
+                                                       (group-by (fn [o] [(get-in o [:display :kind])
+                                                                          (get-in o [:display :entity])
+                                                                          (:action o)
+                                                                          (when (:warn o) (:summary o))])
+                                                                 scope-ops))
+                        :let [d (:display (first g))
+                              agents (sort (distinct (concat (:agents d) (keep #(get-in % [:display :agent]) g))))
+                              skills (sort (distinct (mapcat #(get-in % [:display :skills]) g)))
+                              cmds (distinct (mapcat op-cmds g))]]
+                    (str/join "\n" (concat [(colorize action (skill-line action (assoc d :skills skills) agents))]
+                                            (when warn [(str "    " warn)])
+                                            (when path
+                                              (map #(str "exec: '" (str/join " " (map (comp shell-word u/tilde str) (remove nil? (flatten %)))) "'")
+                                                   cmds))))))]
+      s)))
+
 (defn render-plan
   [ops {:keys [show-noop] :as opts}]
   ;; a warning noop is the report that a declared setting went nowhere — hiding
@@ -265,10 +327,12 @@
   (let [visible (if show-noop
                   ops
                   (filter #(or (mutating? %) (:warn %) (quiet-noop? %)) ops))
+        {skill-ops true visible false} (group-by #(boolean (:display %)) visible)
         by-tool (group-by :tool visible)]
     (str/join
      "\n"
      (concat
+      (render-skill-blocks skill-ops)
       (for [tool (sort-by name (keys by-tool))
             :let [tool-ops (sort-by (juxt (comp name :kind) (comp u/kw->str :id)) (get by-tool tool))]
             s (cons (str "\n" (str/upper-case (name tool)))

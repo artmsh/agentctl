@@ -56,8 +56,12 @@
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
         kvs (declared-settings settings)
-        unsupported (remove (conj (set (keys setting-keys)) :hooks) (keys settings))]
+        unsupported (remove (conj (set (keys setting-keys)) :hooks :permissions) (keys settings))]
     (concat
+     (keep identity
+           (for [[bucket rules] (:permissions settings)]
+             (plan/json-set-op {:tool tool :kind :permissions :id (keyword (str "permissions." (name bucket)))
+                                :file settings-file :path [:permissions bucket] :value rules})))
      (keep identity
            [(plan/json-set-op {:tool tool :kind :settings :id :$schema
                                :file settings-file :path [:$schema] :value settings-schema-url
@@ -134,7 +138,7 @@
      (for [id managed
            :when (not (contains? declared id))
            :let [entry (state/entry st tool :hooks id)
-                 op (when entry
+                 op (when (and entry (not (:project-path entry)))
                       (plan/json-array-unset-op
                        {:tool tool :kind :hooks :id id
                         :file settings-file :path (:path entry) :old (:value entry)
@@ -329,14 +333,18 @@
                             (keyword (name pid) (u/kw->str mid))))
         managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
     (for [id managed
-          :when (and (namespace id) (not (contains? desired id)))
-          :let [proj (get-in cfg [:projects (keyword (namespace id))])]
+          :let [old (state/entry st tool :mcps id)
+                wanted-scope (get-in cfg [:mcps (keyword (name id)) :scope])]
+          :when (and (namespace id) (or (not (contains? desired id))
+                                       (and (:scope old) (not= (:scope old) wanted-scope))))
+          :let [proj (or (get-in cfg [:projects (keyword (namespace id))])
+                         (when (:project-path old) {:path (:project-path old)}))]
           ;; a project gone from agents.edn takes its path with it, and the
           ;; manifest never recorded one — nothing left to point a delete at
           :when proj
-          [file path] [[runtime-file [:projects (keyword (:path proj))
-                                      :mcpServers (keyword (name id))]]
-                       [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
+          [file path] (let [local [runtime-file [:projects (keyword (:path proj)) :mcpServers (keyword (name id))]]
+                            repo [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
+                        (case (:scope old) :local [local] :project [repo] [local repo]))
           :let [op (plan/json-unset-op {:tool tool :kind :mcps :id id
                                         :project (keyword (namespace id))
                                         :file file :path path
@@ -352,7 +360,7 @@
      ;; hooks have no project scope in the DSL today — `:hooks` under a
      ;; project's `:executors :claude` would otherwise vanish with no trace;
      ;; say so instead of silently dropping it
-     (for [k unsupported]
+     (for [k unsupported :when (not (and (:entity-dsl? cfg) (= :hooks k)))]
        (plan/op {:action :noop :warn true :tool tool :kind :projects :project id
                  :id (keyword (name id) (name k))
                  :summary (str (if (= :hooks k)
@@ -382,12 +390,12 @@
                                  :summary (str (u/tilde pfile) " permissions." (u/kw->str bucket))}))))
      ;; trust and MCP enablement live in the runtime blob
      (keep identity
-           [(when (:trusted proj)
+           [(when (some? (:trusted proj))
               (plan/json-set-op {:tool tool :kind :projects :project id
                                  :id (keyword (str (name id) "/trust"))
                                  :file runtime-file
                                  :path [:projects (keyword (:path proj)) :hasTrustDialogAccepted]
-                                 :value true
+                                 :value (boolean (:trusted proj))
                                  :risk :medium
                                  :summary "trust project in ~/.claude.json"}))
             ;; only servers that live in .mcp.json need enabling: a local-scope
@@ -405,51 +413,10 @@
 (defn project-skills-dir [proj] (str (:path proj) "/.claude/skills"))
 
 (defn- project-skill-ops
-  "Skills a project named, linked into the project's own `.claude/skills`.
-
-   A link that already exists but points somewhere else — a hand-made link into
-   `$TOOLS`, or a dangling relative one — is a change, not a conflict: the pack
-   cache is the single copy agentctl keeps current, and the project should read
-   from it."
-  [cfg id proj st]
-  (let [{:keys [skills pending unknown ambiguous]} (sources/project-skills cfg proj)
-        dir (project-skills-dir proj)
-        managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
-    (concat
-     (sources/global-project-unlink-ops cfg tool id dir skills-dir)
-     (for [[sid s] skills
-           :when (:source s)
-           :let [op (plan/link-op {:tool tool :kind :skills :project id
-                                   :id (keyword (name id) (name sid))
-                                   :src (:source s)
-                                   :dest (str dir "/" (name sid))
-                                   :mode (or (:mode s) :symlink)})]
-           :when op]
-       op)
-     (for [pid pending]
-       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
-                 :id (keyword (name id) (name pid))
-                 :summary (str "pack not fetched yet — its skills are linked once "
-                               (name pid) " is cloned")}))
-     (for [uid unknown]
-       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
-                 :id (keyword (name id) (name uid))
-                 :summary (str "no skill or skill-pack named " uid " — nothing to link")}))
-     (for [{sid :id packs :packs} ambiguous]
-       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
-                 :id (keyword (name id) (name sid))
-                 :summary (str "skill " (name sid) " exists in more than one pack ("
-                               (str/join ", " (map name packs))
-                               ") — declare :skills {" (name sid) " {:from <pack>}} to disambiguate")}))
-     ;; ours to remove: this project's own skills, dropped from agents.edn
-     (for [mid managed
-           :when (and (= (name id) (namespace mid))
-                      (not (contains? skills (keyword (name mid))))
-                      (not= :global (get-in cfg [:skills (keyword (name mid)) :scope])))
-           :let [op (plan/unlink-op {:tool tool :kind :skills :project id :id mid
-                                     :dest (str dir "/" (name mid))})]
-           :when op]
-       op))))
+  "Installing a project's skills is the `skills` CLI's job (`skills-cli`);
+   what is left here is dropping a project copy of a user-wide skill."
+  [cfg id proj _st]
+  (sources/global-project-unlink-ops cfg tool id (project-skills-dir proj) skills-dir))
 
 (defn project-ops [cfg st]
   (concat

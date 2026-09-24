@@ -140,6 +140,13 @@
    `:trusted false` is therefore a no-op rather than a revocation — dropping a
    path here is the user's call, not a side effect of flipping a flag."
   [cfg]
+  (if (:entity-dsl? cfg)
+    (keep (fn [[id proj]]
+            (when (and (some? (:trusted proj)) (contains? (:for-tools proj) tool))
+              (let [args {:tool tool :kind :projects :id id :project id :file settings-file
+                          :path [:trustedWorkspaces] :old (:path proj) :value (:path proj)}
+                    o (if (:trusted proj) (plan/json-array-merge-op args) (plan/json-array-unset-op args))]
+                (when o (assoc o :array-element true))))) (:projects cfg))
   (let [current (vec (or (get (u/read-json settings-file) :trustedWorkspaces) []))
         wanted (for [[_ proj] (:projects cfg)
                      :when (and (:trusted proj) (contains? (:for-tools proj) tool))]
@@ -153,47 +160,13 @@
                                 :compare-as :set
                                 :risk :medium
                                 :summary (str "trust " (count missing) " workspace(s): "
-                                              (str/join ", " (map u/tilde missing)))})]))))
+                                              (str/join ", " (map u/tilde missing)))})])))))
 
 (defn- project-skill-ops
-  "Skills a project named, linked into the project's own `.agents/skills` —
-   the workspace customization root agy walks up to from the working directory."
-  [cfg id proj st]
-  (let [{:keys [skills pending unknown ambiguous]} (sources/project-skills cfg proj)
-        dir (project-skills-dir proj)
-        managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
-    (concat
-     (sources/global-project-unlink-ops cfg tool id dir skills-dir)
-     (keep (fn [[sid s]]
-             (when (:source s)
-               (plan/link-op {:tool tool :kind :skills :project id
-                              :id (keyword (name id) (name sid))
-                              :src (:source s)
-                              :dest (str dir "/" (name sid))
-                              :mode (or (:mode s) :symlink)})))
-           skills)
-     (for [pid pending]
-       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
-                 :id (keyword (name id) (name pid))
-                 :summary (str "pack not fetched yet — its skills are linked once "
-                               (name pid) " is cloned")}))
-     (for [uid unknown]
-       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
-                 :id (keyword (name id) (name uid))
-                 :summary (str "no skill or skill-pack named " uid " — nothing to link")}))
-     (for [{sid :id packs :packs} ambiguous]
-       (plan/op {:action :noop :warn true :tool tool :kind :skills :project id
-                 :id (keyword (name id) (name sid))
-                 :summary (str "skill " (name sid) " exists in more than one pack ("
-                               (str/join ", " (map name packs))
-                               ") — declare :skills {" (name sid) " {:from <pack>}} to disambiguate")}))
-     (keep (fn [mid]
-             (when (and (= (name id) (namespace mid))
-                        (not (contains? skills (keyword (name mid))))
-                        (not= :global (get-in cfg [:skills (keyword (name mid)) :scope])))
-               (plan/unlink-op {:tool tool :kind :skills :project id :id mid
-                                :dest (str dir "/" (name mid))})))
-           managed))))
+  "The `skills` CLI installs into `.agents/skills` (`skills-cli`); this only
+   drops project copies of user-wide skills."
+  [cfg id proj _st]
+  (sources/global-project-unlink-ops cfg tool id (project-skills-dir proj) skills-dir))
 
 (defn project-ops [cfg st]
   (concat

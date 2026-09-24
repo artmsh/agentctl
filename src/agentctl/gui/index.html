@@ -2163,6 +2163,10 @@ function groupHtml(g) {
 }
 
 function sectionHtml(sec) {
+  if (sec.layout === "entities") {
+    return `<details class="sec" data-key="${attr(sec.key)}" open><summary><span class="sec-title">${esc(sec.title)}</span></summary>` +
+      `<div class="sec-body"><div class="rows">${sec.fields.map(rowHtml).join("")}</div></div></details>`;
+  }
   const declared = sec.entries.filter((e) => e.declared);
   const isOpen = closed.has(sec.key) ? false : (opened.has(sec.key) || declared.length > 0);
   const add = sec["id-kind"] === "fixed" ? "" :
@@ -2193,7 +2197,10 @@ function renderSetup(form) {
     ? `<details class="sec" open><summary><span class="sec-title">Custom / Unrecognized Fields</span><span class="count">${form.unknown.length}</span></summary>` +
       `<div class="sec-body"><div class="entry"><div class="rows">${form.unknown.map(rowHtml).join("")}</div></div></div></details>`
     : "";
-  setupEl.innerHTML = form.sections.map(sectionHtml).join("") + unknown;
+  const targets = form.targets ? `<details class="sec" open><summary><span class="sec-title">Resolved targets</span></summary>` +
+    form.targets.map(e => `<div class="secdoc"><strong>${esc(e.kind + "/" + e.id)}</strong> ${esc(e.selector)}<br>` +
+      esc(e.paths.length ? e.paths.join(" · ") : (e.selector === ":all" ? "User scope" : "No repositories matched")) + `</div>`).join("") + `</details>` : "";
+  setupEl.innerHTML = form.sections.map(sectionHtml).join("") + targets + unknown;
   for (const ta of setupEl.querySelectorAll("textarea")) grow(ta);
   applySearchFilter();
 }
