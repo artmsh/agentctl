@@ -1183,6 +1183,24 @@
         (is (= (u/tilde repo) (get-in projects [:repo :path])))
         (is (some #(str/includes? % "skipped 1 trusted non-repository") @imports/notes))))))
 
+(deftest import-preserves-native-project-permissions
+  (let [repo (str (temp-dir) "/repo")
+        native {:allow ["Bash(bb:*)" "mcp__search__query"]
+                :ask ["Bash(ssh:*)"]}]
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [toml/read-toml (fn [_] {"projects" {repo {"trust_level" "trusted"}}})
+                  u/read-json (fn [path]
+                                (when (= path (str repo "/.claude/settings.json"))
+                                  {:permissions native}))]
+      (let [discovered {:projects (imports/scan-projects)}
+            converted (imports/entity-config discovered)
+            cfg (config/normalize converted "import")
+            ops (claude/project-ops cfg state/empty-state)]
+        (is (= native (get-in discovered [:projects :repo :permissions])))
+        (is (= native (select-keys (first (:permissions converted)) [:allow :ask])))
+        (is (not-any? #(= :permissions (first (:path %))) ops)
+            "imported permission buckets require no writes")))))
+
 (deftest removing-a-json-entry-leaves-its-neighbours-alone
   (let [dir (temp-dir) f (str dir "/claude.json")]
     (u/write-json! f {:projects {:proj {:mcpServers {:gone {:command "/bin/echo"}

@@ -323,6 +323,8 @@
                                     base))]]
             [id {:path (u/tilde path)
                  :trusted true
+                 :permissions (not-empty (:permissions (u/read-json
+                                                       (claude/project-settings-file {:path path}))))
                  ;; only the tools that trust it today, so import -> apply is a no-op
                  :tools (vec (sort (distinct (keep (fn [[_ trusted tool]] (when trusted tool))
                                                    (get all path)))))}]))))
