@@ -1762,6 +1762,27 @@
     (is (= 1 (count (:cmds g))))
     (is (str/starts-with? (first (:cmds g)) "ln -s "))))
 
+(deftest global-promotion-keeps-edited-cli-copies
+  (let [root (temp-dir) src (str root "/pack/skills/review")
+        repo (str root "/repo") dest (str repo "/.agents/skills/review")
+        raw {:skill-packs {:kit {:uri (str "file://" root "/pack")}}
+             :skills {:review {:from :kit :scope :global :tools [:codex]}}
+             :projects {:repo {:path repo :executors #{:codex}}}}
+        content "---\nname: review\n---\nOriginal\n"]
+    (fs/create-dirs src)
+    (fs/create-dirs dest)
+    (spit (str src "/SKILL.md") content)
+    (spit (str dest "/SKILL.md") (str content "Local edit\n"))
+    (u/write-json! (str repo "/skills-lock.json")
+                   {:skills {:review {:source src :sourceType "local"}}})
+    (let [cfg (config/normalize raw "test")
+          ops #(skills-cli/global-duplicate-ops cfg (:tools cfg) #{:codex}
+                                                {:codex (str root "/global")})]
+      (is (empty? (:ops (ops))) "the source recorded in the lock cannot justify deleting edits")
+      (is (empty? (:drop (ops))) "adapter preservation remains active")
+      (spit (str dest "/SKILL.md") content)
+      (is (= 1 (count (:ops (ops)))) "an identical copy can be promoted"))))
+
 (deftest global-wrap-up-removes-project-copies
   (doseq [[tool subdir global-var] [[:claude "/.claude/skills" #'claude/skills-dir]
                                     [:antigravity "/.agents/skills" #'antigravity/skills-dir]]]

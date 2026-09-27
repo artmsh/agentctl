@@ -301,11 +301,12 @@
                           n (some-> src skill-name)
                           ts (filter #(and (contains? (:tools s) %) (contains? (:for-tools proj) %) (selected %))
                                      (keys agents))]
-                    ;; the same skill: from the same source, or byte-identical
+                    ;; A lock records origin, not current contents. Preserve
+                    ;; edited copies even when installed from this source.
                     :when (and n (contains? lock n) (seq ts) (not (keep-names n))
-                               (or (= (get lock n) (real src))
-                                   (some #(= (u/path-sha256 %) (u/path-sha256 src))
-                                     [(canonical dir n) (claude-link dir n)])))]
+                               (let [copies (filter u/exists? [(canonical dir n) (claude-link dir n)])]
+                                 (and (seq copies)
+                                      (every? #(= (u/path-sha256 %) (u/path-sha256 src)) copies))))]
                 {:pid pid :dir dir :sid sid :n n :src src :ts ts})]
     {:drop (set (mapcat (fn [{:keys [dir n]}] [(claude-link dir n) (canonical dir n)]) found))
      :ops (for [{:keys [pid dir sid n src ts]} found
