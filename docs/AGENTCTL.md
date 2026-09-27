@@ -248,7 +248,7 @@ underscores; keyword and string keys both work. Codex validates the supported
 actions and shortcuts for the installed version. See the
 [official keymap reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-Codex CLI 0.153.4 has no bindable action for opening the model selector;
+Codex CLI 0.157.1 has no bindable action for opening the model selector;
 `open_model` is rejected at startup. Use `/model` to open it. The keymap can
 only rebind actions Codex exposes, so `alt-t` cannot open that selector through
 this setting in that version.
