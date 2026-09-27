@@ -50,14 +50,14 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` |
 | `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` |
 | `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` |
-| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md`&nbsp;¹ | `~/.omp/agent/AGENTS.md`&nbsp;¹ | — | `~/.gemini/config/rules/AGENTS.md` |
+| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` |
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — |
-| `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | |
 
-¹ Unverified: the claude and codex paths are confirmed, the `pi`/`omp` global
-memory paths are the documented convention but were not tested against a
-running agent. Check before relying on them.
+Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
+instructions file. Omp's context-file provider loads `AGENTS.md` from its
+`getAgentDir()` at the user level (normally `~/.omp/agent`).
 
 The antigravity binary is `agy`, not the tool key. Its two roots are distinct on
 purpose: `~/.gemini/antigravity-cli` holds the CLI's own settings blob, while
@@ -83,8 +83,48 @@ a slug — a value copied from another tool's stanza fails silently.
 
 ## DSL
 
-A complete file is in [`examples/agents.edn`](../examples/agents.edn); the
-sections below explain each part of it.
+The current file shape is **entity-first**. Each declaration chooses its own
+placement with `:in`; there is no project registry to keep in sync. Most kinds
+are vectors of declarations. `:skills` and `:skill-packs` are maps keyed by
+their source selector. [`SCOPE-DSL.md`](SCOPE-DSL.md) specifies discovery,
+placement and ownership in detail.
+
+```clojure
+{:#def {workspace "~/projects"}
+ :settings [{:id :claude-defaults :model "sonnet" :tools [:claude] :in :all}
+            {:id :codex-defaults :model "gpt-5.6-sol" :tools [:codex] :in :all}]
+ :mcps [{:id :search :cmd "search-mcp --stdio" :in "projects/sample"}
+        {:id :notes :url "https://notes.example.com/mcp" :type :http
+         :bearer-token-env "MCP_BEARER_TOKEN" :tools [:codex] :in :all}]
+ :permissions [{:allow {:Bash ["bb:*"]} :in "projects/sample"}]
+ :skill-packs {[:gh "example/agent-skills"] {:alias shared}}
+ :skills {[shared "review"] {:in "projects/sample" :acli [:claude :codex]}}
+ :memory [{:from "~/notes/AGENTS.md" :mode :symlink :in :all}]
+ :providers [{:id :gateway :url "https://api.example.com/v1"
+              :key $EXAMPLE_API_KEY :in :all}]
+ :trust [{:in "projects/sample"}]}
+```
+
+`:in :all` means one user-wide install; `:in :none` declares a source without
+placing it. A path such as `"projects/sample"` is relative to `$HOME` and
+selects a repository. A directory that is not itself a repository selects the
+repositories beneath it. `:in ["projects" "!projects/vendor"]` excludes a
+subtree; exclusions win regardless of order. Discovery stops at repository
+roots, does not follow child symlinks and skips common dependency and VCS
+directories. Narrower paths win when declarations overlap.
+
+For MCPs, `:at :machine` (the default) uses the machine-local placement;
+`:at :repo` writes the project's `.mcp.json`. `:scope` remains a deprecated
+alias. Tool support still applies, and unsupported placements produce warnings.
+The ownership manifest records resolved paths so a repository that disappears
+from a selector can still have its owned entries pruned.
+
+The older project-registry form remains readable for compatibility. The
+following example and its project-specific sections describe that legacy form;
+new imports emit the entity-first shape. A complete legacy file is in
+[`examples/agents.edn`](../examples/agents.edn).
+
+### Legacy map form
 
 ```clojure
 {;; ---- root-level bindings; `$name` expands anywhere below -----------------
@@ -284,7 +324,7 @@ gets a positional placeholder (`:SessionStart-0`) so two id-less hooks can't
 collide onto the same key, and `structural-findings` reports the missing
 `:id` as an error rather than planning against a name nobody chose.
 
-### Project location
+### Project location (legacy)
 
 `:path` is the whole location. `:parent` is the directory it sits in, for the
 usual case of one workspace root holding many projects — the project's key
@@ -294,7 +334,7 @@ supplies the last segment. Neither given falls back to `~/projects/<key>`.
 :projects {:sample {:parent $workspace}}   ; -> $workspace/sample
 ```
 
-### Project executors
+### Project executors (legacy)
 
 A project's `:executors` says either *who it is for* or *what to override*:
 
@@ -322,7 +362,7 @@ nothing.
 Skills follow the same line: a skill a project names is installed only for that
 project's executors, unless the skill declaration carries its own `:tools`.
 
-### MCP scope
+### MCP scope (legacy)
 
 An MCP named in a project's `:mcp` belongs to that project, not to the machine.
 Declaring it under `:mcps` gives it a definition; listing it in a project says
@@ -369,11 +409,10 @@ Dropping a server from a project's `:mcp` removes the entry agentctl wrote,
 whichever scope it landed in — the user-wide prune loop deliberately skips
 namespaced ids, since `claude mcp remove --scope user` would take out an
 unrelated server of the same name, so the project's own entry is cleaned up
-separately. A project deleted from `agents.edn` outright is the one gap: the
-ownership manifest stores the id, never the path, so there is nothing left to
-point a delete at.
+separately. The ownership manifest also records the resolved path, so deleting
+the entire project declaration still prunes entries agentctl wrote there.
 
-### Project skills
+### Project skills (legacy)
 
 A project's `:skills` names a whole skill-pack, a skill declared under
 `:skills`, or — the common case — a skill directory found inside a declared
@@ -391,7 +430,7 @@ or to break a tie when the same skill name lives in more than one pack, which
 is reported as an error rather than guessed. Naming a pack instead of a skill
 asks for every skill in it — the way to follow a pack that grows.
 
-Resolved skills are linked into `<project>/.claude/skills/`, not the user's
+Resolved local skills are linked into `<project>/.claude/skills/`, not the user's
 home: a skill a project asked for is that project's, and a link already
 pointing elsewhere (a hand-made one into some other checkout, or a dangling
 relative one) is repointed at the pack cache under `~/.agents/skill-packs`.
@@ -402,10 +441,10 @@ A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
-claude (`<project>/.claude/skills`) and antigravity (`<project>/.agents/skills`)
-have a project-level skills directory. For codex, pi and omp a project's
-declared skills are installed user-wide instead — that is the only place those
-tools read skills from — and are owned there.
+For current entity-first declarations, a repository placement uses the skills
+CLI. Claude reads `<project>/.claude/skills`, while Codex and Antigravity
+share `<project>/.agents/skills`. The legacy project registry is kept for
+existing files; see [`SCOPE-DSL.md`](SCOPE-DSL.md) for current placement rules.
 
 ### MCP shorthand
 
@@ -418,19 +457,25 @@ A bare string *is* the declaration — a command line, or a URL:
 
 Anything beyond that (env, cwd, per-tool selection) needs the map form.
 
+For Codex HTTP servers, import maps `http_headers` to `:headers` and
+`bearer_token_env_var` to `:bearer-token-env`. Header credentials are redacted
+to `!bw://` references; apply resolves them and writes the native
+`http_headers` table. Codex's `env_http_headers` and `http_headers_helper` are
+not yet modelled by this DSL.
+
 `:cmd "srv --transport stdio"` is one shell-ish line, split on whitespace with
 single and double quotes honoured. `:command` + `:args` is the same thing
 exploded; giving both keeps `:command` and appends `:args`. `:type` is an alias
 for `:transport`.
 
-### `:tools`
+### `:tools` and `:acli`
 
-Every resource takes an optional `:tools [...]` selector. Omitted, it fans out
-to every tool that supports the entity — that is the point of the file: declare
-an MCP server once, get it in all four agents. `:projects` takes the same
-selector (`:tools [:claude :pi]` trusts a path in those two only).
+Every resource takes an optional `:tools [...]` selector. `:acli` is the short
+spelling accepted by entity-first declarations, including the aliases `:cc`
+and `:agy`. Omitted, a resource fans out to every tool that supports its kind.
+The legacy `:projects` map also accepts `:tools`.
 
-### `:per-tool` overrides
+### `:per-tool` overrides (legacy)
 
 Fan-out is the default, not a straitjacket. When one agent genuinely needs a
 different value, override just that field:

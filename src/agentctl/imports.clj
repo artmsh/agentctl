@@ -7,6 +7,7 @@
   (:require [agentctl.adapters.antigravity :as antigravity]
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
+            [agentctl.config :as config]
             [agentctl.adapters.llm :as llm]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
@@ -118,7 +119,11 @@
       :env (not-empty (redact-map nm (or (:env t) (:env entry))))
       ;; an http server's whole credential rides in a header, so it needs the
       ;; same redaction as :env — left unmodelled it would land in :extra verbatim
-      :headers (not-empty (redact-map nm (or (:headers t) (:headers entry))))
+      :headers (not-empty (redact-map nm (or (:headers t) (:http_headers t) (:headers entry))))
+      ;; Codex exposes this as a variable name, never the token value.
+      :bearer-token-env (or (:bearer_token_env_var t) (:bearer_token_env_var entry))
+      ;; Codex's env_http_headers and http_headers_helper have no DSL shape or
+      ;; write path yet; they remain unsupported import fields.
       :enabled (if (false? (:enabled entry)) false nil)
       :cwd (or (:cwd t) (:cwd entry))
       ;; keys agentctl does not model are round-tripped verbatim
@@ -398,7 +403,9 @@
   "Import emits literal selectors; it cannot infer a user's intended tree."
   [config]
   (if (scope/dsl? config) config
-      (let [projects (:projects config)
+      (let [resolved (:projects (config/normalize config "import"))
+            projects (into {} (for [[id p] (:projects config)]
+                                [id (assoc p :path (get-in resolved [id :path]))]))
             placements (fn [kind id decl]
                          (let [ps (for [[_ p] projects :when (some #{id} (get p kind))] (:path p))]
                            (if (or (= :global (:scope decl)) (empty? ps)) :all (vec ps))))]
@@ -407,7 +414,7 @@
          {:settings (vec (concat
                           (for [[t s] (or (:executors config) (:cli-code config))]
                             (assoc s :id (keyword (str "user-" (name t))) :tools [t] :in :all))
-                          (for [[pid p] projects [t s] (:executors p)]
+                          (for [[pid p] projects [t s] (when (map? (:executors p)) (:executors p))]
                             (assoc s :id (keyword (str (name pid) "-" (name t))) :tools [t] :in (:path p)))))
           :trust (vec (for [[id p] projects :when (some? (:trusted p))]
                         {:id id :in (:path p) :trusted (:trusted p) :tools (:tools p)}))}

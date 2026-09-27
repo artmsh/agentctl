@@ -131,6 +131,7 @@
                  op (plan/json-array-merge-op
                      {:tool tool :kind :hooks :id id
                       :file settings-file :path path :old old :value value
+                      :report-converged? true
                       :summary (str "settings.json hooks." (name (last path))
                                     (when-let [m (:matcher decl)] (str " [" m "]")))})]
            :when op]
@@ -339,8 +340,8 @@
                                        (and (:scope old) (not= (:scope old) wanted-scope))))
           :let [proj (or (get-in cfg [:projects (keyword (namespace id))])
                          (when (:project-path old) {:path (:project-path old)}))]
-          ;; a project gone from agents.edn takes its path with it, and the
-          ;; manifest never recorded one — nothing left to point a delete at
+          ;; Version 2 state records the path even after the project declaration
+          ;; disappears. Version 1 cannot recover a path it never stored.
           :when proj
           [file path] (let [local [runtime-file [:projects (keyword (:path proj)) :mcpServers (keyword (name id))]]
                             repo [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]

@@ -133,7 +133,7 @@
           (when scope (println (scope-note cfg scope)))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
-          (if (seq changes)
+          (if (or (seq changes) (:show-noop opts))
             (println (plan/render-plan ops opts))
             (println "\nno changes — environment matches agents.edn"))
           (println)

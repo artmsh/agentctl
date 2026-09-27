@@ -897,8 +897,11 @@
                    (map #(get-in % [:hooks 0 :command])
                         (concat (get-in (u/read-json f) [:hooks :PreToolUse])
                                 (get-in (u/read-json f) [:hooks :SessionStart]))))))
-          (testing "a second pass with the same config is fully converged"
-            (is (empty? (claude/hook-ops cfg1 st1))))
+          (testing "a second pass reports both converged hooks"
+            (let [again (claude/hook-ops cfg1 st1)]
+              (is (= #{[:noop :reminder] [:noop :lock]}
+                     (set (map (juxt :action :id) again))))
+              (is (str/includes? (plan/render-plan again {:show-noop true}) "= hooks/{lock reminder}"))))
           (testing "changing one hook's command updates it in place"
             (let [cfg2 (config/normalize
                         {:executors {:claude {:hooks {:reminder {:event :SessionStart :matcher "startup"
@@ -908,8 +911,9 @@
                          :projects {:p {:path "/tmp/p" :executors #{:claude}}}}
                         "x")
                   ops2 (claude/hook-ops cfg2 st1)]
-              (is (= [[:update :lock]] (map (juxt :action :id) ops2)))
-              (doseq [op ops2] ((:exec! op)))
+              (is (= #{[:update :lock] [:noop :reminder]}
+                     (set (map (juxt :action :id) ops2))))
+              (doseq [op (filter plan/mutating? ops2)] ((:exec! op)))
               (is (= ["orca-inject" "lock-v2.sh"]
                      (map #(get-in % [:hooks 0 :command]) (get-in (u/read-json f) [:hooks :PreToolUse]))))
               (testing "dropping a hook from agents.edn prunes only that element"
@@ -920,8 +924,9 @@
                              :projects {:p {:path "/tmp/p" :executors #{:claude}}}}
                             "x")
                       ops3 (claude/hook-ops cfg3 st2)]
-                  (is (= [[:delete :lock]] (map (juxt :action :id) ops3)))
-                  (doseq [op ops3] ((:exec! op)))
+                  (is (= #{[:delete :lock] [:noop :reminder]}
+                         (set (map (juxt :action :id) ops3))))
+                  (doseq [op (filter plan/mutating? ops3)] ((:exec! op)))
                   (let [after (u/read-json f)]
                     (is (= ["orca-inject"]
                            (map :command (mapcat :hooks (get-in after [:hooks :PreToolUse])))))
@@ -1103,6 +1108,68 @@
     (testing "an actual literal still gets caught"
       (is (seq (findings {:mcps {:remote {:url "https://notes.example.com/mcp"
                                           :env {"API_TOKEN" "abcdef0123456789"}}}}))))))
+
+(deftest codex-http-import-keeps-headers-and-bearer-variable
+  (let [server {:name "docs"
+                :transport {:type "streamable_http"
+                            :url "https://example.com/mcp"
+                            :bearer_token_env_var "DOCS_TOKEN"
+                            :http_headers {"X-Api-Key" "sk-test-secret"}}}]
+    (with-redefs [codex/mcp-list (fn [] {"docs" server})]
+      (let [entry (get (imports/scan-mcps) :docs)]
+        (is (= "https://example.com/mcp" (:url entry)))
+        (is (= "DOCS_TOKEN" (:bearer-token-env entry)))
+        (is (= {"X-Api-Key" "!bw://docs/X-Api-Key"} (:headers entry)))
+        (is (not (str/includes? (imports/render {:mcps {:docs entry}})
+                                "sk-test-secret")))))))
+
+(deftest codex-http-import-fallback-keeps-headers
+  (let [dir (temp-dir) file (str dir "/config.toml")]
+    (spit file (str "[mcp_servers.docs]\n"
+                    "url = \"https://example.com/mcp\"\n"
+                    "bearer_token_env_var = \"DOCS_TOKEN\"\n"
+                    "[mcp_servers.docs.http_headers]\n"
+                    "X-Api-Key = \"sk-test-secret\"\n"))
+    (with-redefs [codex/config-file file
+                  codex/codex-sh (fn [& _] {:exit 1 :out ""})]
+      (let [entry (get (codex/mcp-list) "docs")]
+        (is (= "DOCS_TOKEN" (get-in entry [:transport :bearer_token_env_var])))
+        (is (= {"X-Api-Key" "sk-test-secret"}
+               (get-in entry [:transport :http_headers])))))))
+
+(deftest codex-http-apply-writes-imported-header-shape
+  (let [dir (temp-dir) file (str dir "/config.toml")
+        current (atom {})
+        cfg (config/normalize
+             {:mcps {:docs {:url "https://example.com/mcp" :tools [:codex]
+                            :bearer-token-env "DOCS_TOKEN"
+                            :headers {"X-Api-Key" "sk-test-secret"}}}}
+             "x")]
+    (with-redefs [codex/config-file file
+                  codex/mcp-list (fn [] @current)
+                  codex/codex-sh (fn [& _] {:exit 0})]
+      (let [[op] (codex/mcp-ops cfg state/empty-state)]
+        (is (= :create (:action op)))
+        ((:exec! op))
+        (is (= {"X-Api-Key" "sk-test-secret"}
+               (get-in (toml/read-toml file) ["mcp_servers" "docs" "http_headers"])))
+        (reset! current {"docs" {:transport {:url "https://example.com/mcp"
+                                                :bearer_token_env_var "DOCS_TOKEN"
+                                                :http_headers {"X-Api-Key" "sk-test-secret"}}}})
+        (is (empty? (codex/mcp-ops cfg state/empty-state)) "imported HTTP server converges")))))
+
+(deftest legacy-import-conversion-resolves-project-parent
+  (let [legacy {:projects {:sample {:parent "/tmp/agentctl-conversion"
+                                    :executors #{:claude}
+                                    :trusted true
+                                    :mcp [:search]
+                                    :permissions {:allow {:Bash ["bb:*"]}}}}
+                :mcps {:search {:command "/bin/echo" :tools [:claude]}}}
+        converted (imports/entity-config legacy)]
+    (is (= "/tmp/agentctl-conversion/sample" (get-in converted [:trust 0 :in])))
+    (is (= "/tmp/agentctl-conversion/sample" (get-in converted [:permissions 0 :in])))
+    (is (= ["/tmp/agentctl-conversion/sample"] (get-in converted [:mcps 0 :in])))
+    (is (empty? (:settings converted)) "executor selection alone is not a settings declaration")))
 
 (deftest removing-a-json-entry-leaves-its-neighbours-alone
   (let [dir (temp-dir) f (str dir "/claude.json")]

@@ -249,6 +249,45 @@ assert [p for p, v in d.get("projects", {}).items()
         if "handmade" in v.get("mcpServers", {})]
 PY
 
+echo "14b. deleting whole projects prunes owned MCPs in both placements"
+mkdir -p "$SB/gone-local" "$SB/gone-repo"
+cat > "$SB/gone-with.edn" <<EDN
+{:mcps {:owned-local {:cmd "/bin/echo local" :tools [:claude] :scope :local}
+        :owned-repo {:cmd "/bin/echo repo" :tools [:claude] :scope :project}}
+ :projects {:gone-local {:path "$SB/gone-local" :executors {:claude {}} :mcp [:owned-local]}
+            :gone-repo {:path "$SB/gone-repo" :executors {:claude {}} :mcp [:owned-repo]}}}
+EDN
+printf '{}\n' > "$SB/gone-without.edn"
+run apply! -f "$SB/gone-with.edn" -y > /dev/null
+python3 - "$SB/.claude.json" "$SB/gone-local" "$SB/gone-repo/.mcp.json" <<'PY' || fail "project MCP fixture setup failed"
+import json, sys
+runtime, local, repo = sys.argv[1:]
+d = json.load(open(runtime))
+servers = d["projects"][local]["mcpServers"]
+assert "owned-local" in servers
+servers["handmade"] = {"command": "/bin/echo"}
+json.dump(d, open(runtime, "w"))
+d = json.load(open(repo))
+assert "owned-repo" in d["mcpServers"]
+d["mcpServers"]["handmade"] = {"command": "/bin/echo"}
+json.dump(d, open(repo, "w"))
+PY
+set +e
+run apply -f "$SB/gone-without.edn" -t claude > "$SB/plan14b.txt"; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SB/plan14b.txt"; fail "project deletion reported no drift"; }
+grep -q 'mcps/owned-local' "$SB/plan14b.txt" || fail "local MCP prune missing"
+grep -q 'mcps/owned-repo' "$SB/plan14b.txt" || fail "repo MCP prune missing"
+run apply! -f "$SB/gone-without.edn" -t claude -y > /dev/null
+python3 - "$SB/.claude.json" "$SB/gone-local" "$SB/gone-repo/.mcp.json" <<'PY' || fail "project deletion did not preserve hand-made siblings"
+import json, sys
+runtime, local, repo = sys.argv[1:]
+local_servers = json.load(open(runtime))["projects"][local]["mcpServers"]
+repo_servers = json.load(open(repo))["mcpServers"]
+assert "owned-local" not in local_servers and "handmade" in local_servers
+assert "owned-repo" not in repo_servers and "handmade" in repo_servers
+PY
+
 echo "15. antigravity converges, and trust is unioned rather than overwritten"
 mkdir -p "$SB/.gemini/antigravity-cli" "$SB/aproj" "$SB/packs/demo/skills/local-skill"
 # the skills CLI installs under SKILL.md's name, so this one needs its own
@@ -576,6 +615,9 @@ sed -i.bak 's/v1\.sh/v2.sh/' "$SB/hooks.edn" && rm -f "$SB/hooks.edn.bak"
 run apply! -f "$SB/hooks.edn" -y > "$SB/hooks-apply.txt"
 grep -q 'no changes' "$SB/hooks-apply.txt" || { cat "$SB/hooks-apply.txt"; fail "expected the hand-edit to already match — no op to plan"; }
 grep -q 'v2.sh' "$SB/.config/agentctl/state.edn" || { cat "$SB/.config/agentctl/state.edn"; fail "unfiltered apply! did not refresh the hook's stored value"; }
+run apply -f "$SB/hooks.edn" -t claude -v --show-noop > "$SB/hooks-noop.txt"
+grep -q '= hooks/probe' "$SB/hooks-noop.txt" || { cat "$SB/hooks-noop.txt"; fail "fully converged hook not shown"; }
+grep -q '1 unchanged' "$SB/hooks-noop.txt" || { cat "$SB/hooks-noop.txt"; fail "converged hook not counted"; }
 
 echo "19. promoting wrap-up to global previews and removes every project copy"
 mkdir -p "$SB/wrap-pack/skills/wrap-up"

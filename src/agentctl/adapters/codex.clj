@@ -46,7 +46,9 @@
 
 (defn mcp-list
   "Configured servers, keyed by name. Falls back to reading config.toml when the
-   CLI refuses to start (a bad provider table must not read as `no servers`)."
+   CLI refuses to start (a bad provider table must not read as `no servers`).
+   The fallback carries HTTP headers and bearer-token env names for import;
+   Codex's env_http_headers and http_headers_helper remain unsupported."
   []
   (let [{:keys [exit out]} (codex-sh "codex" "mcp" "list" "--json")]
     (if (zero? exit)
@@ -55,7 +57,9 @@
                       [nm {:name nm
                            :transport {:command (get t "command")
                                        :args (get t "args")
-                                       :url (get t "url")}
+                                       :url (get t "url")
+                                       :http_headers (get t "http_headers")
+                                       :bearer_token_env_var (get t "bearer_token_env_var")}
                            :enabled (get t "enabled" true)}]))
             (get (try (toml/read-toml config-file) (catch Exception _ nil)) "mcp_servers")))))
 
@@ -102,18 +106,22 @@
 
 ;; ---------------------------------------------------------------- mcps
 
-(defn- mcp-desired-shape [m]
+(defn- mcp-desired-shape [m headers]
   (u/prune-nils
    {:command (:command m)
     :args (vec (:args m))
-    :url (:url m)}))
+    :url (:url m)
+    :bearer-token-env (:bearer-token-env m)
+    :headers (not-empty headers)}))
 
 (defn- mcp-current-shape [entry]
   (let [t (:transport entry)]
     (u/prune-nils
      {:command (:command t)
       :args (vec (:args t))
-      :url (:url t)})))
+      :url (:url t)
+      :bearer-token-env (:bearer_token_env_var t)
+      :headers (not-empty (:http_headers t))})))
 
 (defn mcp-ops [cfg state]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
@@ -123,17 +131,22 @@
      (for [[id m] desired
            :let [name* (u/kw->str id)
                  cur (get current name*)
-                 want (mcp-desired-shape m)
-                 have (some-> cur mcp-current-shape)
-                 env (common/resolve-env (:env m))]
-           :when (not= (u/norm want) (u/norm have))]
-       (plan/op {:action (if cur :update :create)
+                 env (common/resolve-env (:env m))
+                 headers (common/resolve-env (:headers m))
+                 want (mcp-desired-shape m (:values headers))
+                 have (some-> cur mcp-current-shape)]
+           :when (or (seq (:issues headers)) (not= (u/norm want) (u/norm have)))]
+       (if (seq (:issues headers))
+         (plan/op {:tool tool :kind :mcps :id id :warn true
+                   :summary "HTTP header reference unresolved — existing server left untouched"})
+         (plan/op {:action (if cur :update :create)
                  :tool tool :kind :mcps :id id
                  :target config-file
                  :summary (common/mcp-summary m)
-                 :note (when (common/holds-secret? (:env m)) "⚠ writes resolved secret to config.toml")
+                 :note (when (common/holds-secret? (merge (:env m) (:headers m)))
+                         "⚠ writes resolved secret to config.toml")
                  :diffs (plan/field-diffs (or have {}) want)
-                 :risk (if (common/holds-secret? (:env m)) :secret :low)
+                 :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                  :exec! (fn []
                           (u/backup! config-file)
                           (when cur (ok! (codex-sh "codex" "mcp" "remove" name*) "codex mcp remove"))
@@ -145,9 +158,13 @@
                                    (codex-sh (concat ["codex" "mcp" "add" name*] env-args
                                                      ["--"] [(:command m)] (:args m))))
                                  (str "codex mcp add " name*)))
+                          (when (seq (:values headers))
+                            (toml/update-file! config-file
+                                               #(toml/set-keys % ["mcp_servers" name* "http_headers"]
+                                                               (:values headers))))
                           (when-not (:enabled m)
                             (toml/update-file! config-file
-                                               #(toml/set-key % ["mcp_servers" name*] :enabled false))))}))
+                                               #(toml/set-key % ["mcp_servers" name*] :enabled false))))})))
      ;; prune servers we own that left the DSL
      (for [id managed
            :when (and (nil? (namespace id))
