@@ -299,11 +299,19 @@
         agy-trust (for [p (:trustedWorkspaces (u/read-json antigravity/settings-file))]
                     [(str p) true :antigravity])
         all (group-by first (concat codex-projects pi-trust claude-projects agy-trust))
-        interesting (for [[path entries] all
-                          ;; "/" and $HOME are trust artefacts, not projects
-                          :when (and (some second entries)
-                                     (not (contains? #{"/" u/home ""} path)))]
-                      path)
+        trusted-paths (for [[path entries] all
+                            ;; "/" and $HOME are trust artefacts, not projects
+                            :when (and (some second entries)
+                                       (not (contains? #{"/" u/home ""} path)))]
+                        path)
+        ;; In the entity DSL, a directory that is not a repository root means
+        ;; *every* repository below it. Importing a native trust entry for
+        ;; ~/projects as :in ~/projects would broaden one entry into dozens.
+        interesting (filter #(scope/repo? (u/abs-path %)) trusted-paths)
+        skipped (remove #(scope/repo? (u/abs-path %)) trusted-paths)
+        _ (when (seq skipped)
+            (note! (str "skipped " (count skipped)
+                        " trusted non-repository path(s); :in would expand them to child repositories")))
         ;; two checkouts can share a basename; disambiguate with the parent dir
         by-name (group-by #(fs/file-name %) interesting)]
     (into (sorted-map)

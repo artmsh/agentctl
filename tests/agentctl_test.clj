@@ -1171,6 +1171,18 @@
     (is (= ["/tmp/agentctl-conversion/sample"] (get-in converted [:mcps 0 :in])))
     (is (empty? (:settings converted)) "executor selection alone is not a settings declaration")))
 
+(deftest import-does-not-expand-a-trusted-parent-directory
+  (let [parent (temp-dir) repo (str parent "/repo")]
+    (fs/create-dirs (str repo "/.git"))
+    (reset! imports/notes [])
+    (with-redefs [toml/read-toml (fn [_] {"projects" {parent {"trust_level" "trusted"}
+                                                   repo {"trust_level" "trusted"}}})
+                  u/read-json (fn [_] nil)]
+      (let [projects (imports/scan-projects)]
+        (is (= #{:repo} (set (keys projects))))
+        (is (= (u/tilde repo) (get-in projects [:repo :path])))
+        (is (some #(str/includes? % "skipped 1 trusted non-repository") @imports/notes))))))
+
 (deftest removing-a-json-entry-leaves-its-neighbours-alone
   (let [dir (temp-dir) f (str dir "/claude.json")]
     (u/write-json! f {:projects {:proj {:mcpServers {:gone {:command "/bin/echo"}
