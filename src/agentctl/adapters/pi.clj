@@ -1,11 +1,13 @@
 (ns agentctl.adapters.pi
   "pi adapter — plain JSON config files under ~/.pi/agent."
   (:require [agentctl.adapters.common :as common]
+            [agentctl.extensions :as extensions]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
-            [agentctl.util :as u]))
+            [agentctl.util :as u]
+            [babashka.fs :as fs]))
 
 (def tool :pi)
 (def home (str u/home "/.pi/agent"))
@@ -15,6 +17,7 @@
 (def trust-file (str home "/trust.json"))
 (def skills-dir (str home "/skills"))
 (def memory-file (str home "/AGENTS.md"))
+(def extensions-dir (str home "/extensions"))
 
 (def setting-keys
   {:model :defaultModel
@@ -147,9 +150,64 @@
                            :dest memory-file :mode (:mode m)})))
         (common/for-tool (:memory cfg) tool)))
 
+(defn- default-tool-op
+  "One entry of settings.json `defaultTools`. The array is the user's as much
+   as ours — `+name` entries from other extensions sit in it — so an entry is
+   added or taken out by value and the rest is never rewritten."
+  [id entry present?]
+  (let [args {:tool tool :kind :extensions :id id :file settings-file :path [:defaultTools]}]
+    (if present?
+      (plan/json-array-merge-op (assoc args :value entry
+                                       :summary (str "settings.json defaultTools " entry)))
+      (plan/json-array-unset-op (assoc args :old entry
+                                       :summary (str "settings.json defaultTools " entry " — no longer declared"))))))
+
+(defn extension-ops
+  "Link each declared extension into pi's extensions directory and switch its
+   tools on. The manifest remembers which `defaultTools` entries an extension
+   brought, which is the only way to take one back out later."
+  [cfg st]
+  (let [desired (into {} (filter (fn [[_ e]] (contains? (:for-tools e) tool))) (:extensions cfg))
+        wanted (set (mapcat :default-tools (vals desired)))
+        managed (into #{} (map keyword) (state/managed-ids st tool :extensions))
+        dropped (fn [id] (remove wanted (:default-tools (state/entry st tool :extensions id))))]
+    (concat
+     (mapcat
+      (fn [[id e]]
+        ;; re-checked when each op runs: the fetch and the build come first in
+        ;; the same plan, and either may have failed. Nothing is linked or
+        ;; switched on for an extension that is not there to load
+        (let [guard (fn [o what]
+                      (when o
+                        (assoc o :exec! (fn []
+                                          (when-not (extensions/ready? e)
+                                            (throw (ex-info (str "extension " (name id) " is not "
+                                                                 (if (fs/directory? (:root e)) "built" "fetched")
+                                                                 " — not " what)
+                                                            {:root (:root e)})))
+                                          ((:exec! o))))))]
+          (concat
+           [(some-> (plan/link-op {:tool tool :kind :extensions :id id :src (:root e)
+                                   :dest (str extensions-dir "/" (name id))})
+                    (assoc :entry "folder")
+                    (guard "linked"))]
+           (map #(guard (default-tool-op id % true) "switched on") (:default-tools e))
+           (map #(default-tool-op id % false) (dropped id)))))
+      (sort-by key desired))
+     (mapcat
+      (fn [id]
+        (let [dest (str extensions-dir "/" (name id))]
+          (concat
+           ;; only ever a link we made; a directory there is someone's work
+           [(when (fs/sym-link? dest)
+              (plan/unlink-op {:tool tool :kind :extensions :id id :dest dest}))]
+           (map #(default-tool-op id % false) (dropped id)))))
+      (sort (remove #(contains? desired %) managed))))))
+
 (defn plan [cfg st]
   (concat (settings-ops cfg) (mcp-ops cfg st)
           (common/project-scope-skip-ops cfg tool) (provider-ops cfg)
-          (project-ops cfg) (skill-ops cfg st) (memory-ops cfg)))
+          (project-ops cfg) (skill-ops cfg st) (memory-ops cfg)
+          (remove nil? (extension-ops cfg st))))
 
 (defn present? [] (some? (u/which "pi")))

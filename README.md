@@ -298,6 +298,40 @@ several share one:
 there; a missing one is a structural error, not a guess. Both forms normalize
 to the same thing and can be mixed in one `:hooks` map.
 
+## Extensions
+
+An extension is code a CLI loads, so installing one is more than a link: the
+source is fetched and, when it ships sources rather than artifacts, built.
+`:extensions` is a map keyed by source, like `:skill-packs`:
+
+```clojure
+{:extensions {[:gh "artmsh/pi-codemode-clj"]
+              {:alias codemode-clj
+               :acli  [:pi]
+               :build "./build.sh"
+               :tools ["+codemode_clj"]}}}
+```
+
+`apply!` clones the repository to `~/.agents/extensions/<id>`, runs `:build`
+in that directory, links it into `~/.pi/agent/extensions/<id>`, and adds each
+`:tools` entry to `defaultTools` in pi's `settings.json`, leaving the entries
+it did not add alone. `<id>` is `:alias`, or the repository name without one.
+
+| Key | Meaning |
+| --- | --- |
+| `:acli` | CLIs that load the extension. Only pi has extensions today, and it is the default. |
+| `:build` | Shell command run in the checkout. It runs again when the revision or the command changes; a failed build fails `apply!` and nothing is linked or switched on. |
+| `:tools` | Tool names the extension registers, as pi's `defaultTools` spells them (`"+name"` adds to the defaults). Not a CLI selector — that is `:acli`. |
+| `:type` | `:git` or `:file`, when the URI does not say. |
+
+A `[:uri "file:///path"]` source is used where it stands: nothing is cloned,
+`:build` runs in that directory, and the link points at it — the shape for an
+extension under development. A git source follows its remote: when the remote
+moves, `apply` plans a fetch, a hard reset and a rebuild, so local edits in
+`~/.agents/extensions` do not survive. Dropping an entry removes the link and
+the `defaultTools` entries it brought; the checkout stays as a cache.
+Extensions are user-wide, and `:in` does not apply to them.
+
 ## Project skills
 
 A project's `:skills` names a whole skill-pack, a skill declared under `:skills`,

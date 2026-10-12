@@ -19,15 +19,15 @@
   "Short agent-CLI names accepted by `:acli`, mapped onto the internal tool key."
   {:cc :claude :claude-code :claude :agy :antigravity})
 
-(defn- acli [v]
+(defn acli [v]
   (cond (nil? v) nil
         (= :all v) :all
         :else (mapv #(get acli-aliases % %) (if (keyword? v) [v] v))))
 
-(defn- basename [s] (keyword (str (fs/file-name (str/replace (str s) #"/+$" "")))))
-(defn- local-uri? [uri] (or (str/starts-with? uri "file://") (not (re-find #"^[a-z+]+://|^[^/]+@[^:/]+:" uri))))
+(defn basename [s] (keyword (str (fs/file-name (str/replace (str s) #"/+$" "")))))
+(defn local-uri? [uri] (or (str/starts-with? uri "file://") (not (re-find #"^[a-z+]+://|^[^/]+@[^:/]+:" uri))))
 
-(defn- source
+(defn source
   "A `[:gh \"owner/repo\"]` or `[:uri \"…\"]` key as a URI, or nil."
   [[head arg :as k]]
   (when (and (= 2 (count k)) (string? arg) (not (str/blank? arg)))

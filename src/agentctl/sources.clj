@@ -220,16 +220,16 @@
 
 ;; ---------------------------------------------------------------- pack ops
 
-(defn- git-head [dir]
+(defn git-head [dir]
   (let [{:keys [exit out]} (u/sh "git" "-C" (u/abs-path dir) "rev-parse" "HEAD")]
     (when (zero? exit) (str/trim out))))
 
-(defn- git-remote-head [uri ref]
+(defn git-remote-head [uri ref]
   (let [{:keys [exit out]} (u/sh "git" "ls-remote" uri (or ref "HEAD"))]
     (when (and (zero? exit) (seq out))
       (first (str/split (str/trim out) #"\s+")))))
 
-(defn- uri-parts
+(defn uri-parts
   "[label repo] for a git URI. `https://github.com/example/agent-skills` and
    `git@github.com:example/agent-skills.git` both read as `gh` + `example/agent-skills`
    — the host is a label, the path is the name people actually use."
@@ -252,7 +252,7 @@
        (or host "git"))
      (or path s)]))
 
-(defn- clone-run
+(defn clone-run
   "How a person would clone it by hand: `gh` for a github repo when it is on
    PATH, git otherwise. Whatever this returns is what runs and what the plan
    prints — the line is a command, not a description of one. It is described
@@ -269,6 +269,20 @@
        :flags (cond-> [["--depth" "1"]] ref (conj ["--branch" ref]))
        :argv (into ["git" "clone" "--depth" "1"]
                    (concat (when ref ["--branch" ref]) [uri root]))})))
+
+(defn checkout-runs
+  "The commands that bring a git checkout at `root` level with its remote:
+   a clone when it is not there yet, a fetch and a hard reset when it is."
+  [{:keys [uri ref root]} present]
+  (if present
+    [{:program "git" :action ["fetch"] :into root
+      :flags [["--all"] ["--tags"] ["--prune"]]
+      :argv ["git" "-C" root "fetch" "--all" "--tags" "--prune"]}
+     {:program "git" :action ["reset"] :into root
+      :subject (or ref "@{upstream}")
+      :flags [["--hard"]]
+      :argv ["git" "-C" root "reset" "--hard" (or ref "@{upstream}")]}]
+    [(clone-run uri ref root)]))
 
 (defn cloned-for-user?
   "A pack agentctl itself links from: placed user-wide, or the source of a
@@ -290,16 +304,7 @@
               local (when present (git-head root))
               remote (git-remote-head (:uri pack) (:ref pack))
               [label repo] (uri-parts (:uri pack))
-              runs (if present
-                     [{:program "git" :action ["fetch"] :into root
-                       :flags [["--all"] ["--tags"] ["--prune"]]
-                       :argv ["git" "-C" root "fetch" "--all" "--tags" "--prune"]}
-                      {:program "git" :action ["reset"] :into root
-                       :subject (or (:ref pack) "@{upstream}")
-                       :flags [["--hard"]]
-                       :argv ["git" "-C" root "reset" "--hard"
-                              (or (:ref pack) "@{upstream}")]}]
-                     [(clone-run (:uri pack) (:ref pack) root)])
+              runs (checkout-runs pack present)
               cmds (mapv :argv runs)
               what (if (:implicit pack) "skill" "pack")]
         :when (or (not present) (and remote local (not= local remote)))]

@@ -8,6 +8,7 @@
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
+            [agentctl.extensions :as extensions]
             [agentctl.scope :as scope]
             [agentctl.ownership :as ownership]
             [agentctl.plan :as plan]
@@ -355,6 +356,7 @@
                                                (= (:id o) (:project o))) :trust
                                            :else :settings)))) tool-ops) tool-ops)]
     (-> (concat (sources/pack-ops cfg)
+                (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
                 (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) ((:drop dups) (:target %)))
                                                        tool-ops))
@@ -417,6 +419,10 @@
    ;; the same name is never pruned on their behalf
    (skills-cli/inventory cfg tool-cfg)
    (for [[id p] (:providers cfg) t (:tools p)] [t :providers id])
+   ;; `defaultTools` is an array shared with the user; what an extension put
+   ;; in it has to be remembered to be taken out again
+   (for [[id e] (:extensions cfg) t (:for-tools e)]
+     [t :extensions id {:root (:root e) :default-tools (vec (:default-tools e))}])
    (for [[id m] (:memory cfg) t (:tools m)] [t :memory id])
    (for [[id p] (:projects cfg) t (:for-tools p)]
      [t :projects id {:entity-id id :project-id id :project-path (:path p)}]))))

@@ -34,6 +34,7 @@
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"
     "                       settings permissions hooks mcps skills providers memory trust skill-packs"
+    "                       extensions"
     "  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
     "  -A, --all            apply/apply!: ignore the working directory and plan the"

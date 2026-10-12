@@ -18,7 +18,7 @@
   "Which resource kinds each tool can be provisioned with."
   {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks}
    :codex       #{:settings :mcps :skills :memory :projects :providers}
-   :pi          #{:settings :mcps :skills :memory :providers :projects}
+   :pi          #{:settings :mcps :skills :memory :providers :projects :extensions}
    :omp         #{:settings :mcps :skills :memory :providers}
    :llm         #{:providers :settings}
    :antigravity #{:settings :mcps :skills :memory :projects}})
@@ -428,9 +428,11 @@
    once a project does name its executors, the tools left unnamed are ones
    nothing asked for, and agentctl has no business writing their files."
   [cfg]
-  (or (not-empty (:active-tools cfg)) (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
-                         #{} (:projects cfg)))
-      (set all-tools)))
+  (into (or (not-empty (:active-tools cfg)) (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
+                               #{} (:projects cfg)))
+            (set all-tools))
+        ;; an extension names its CLI outright, with no project in between
+        (mapcat :for-tools (vals (:extensions cfg)))))
 
 (defn- bare-project-skills
   "A project can name a skill id that resolves only by scanning a declared
@@ -506,7 +508,55 @@
      :memory (into {} (map (fn [[k v]] [k (norm-memory k v)])) (:memory raw))
      :projects projects}))
 
+(defn- norm-extension
+  "An extension is a checkout a CLI loads code from: a git repository cloned
+   under ~/.agents/extensions, or a directory used where it stands. `:acli`
+   picks the CLIs — `:tools` is taken already, by the tool names the extension
+   registers and the CLI should switch on by default."
+  [k decl]
+  (when-not (and (vector? k) (scope/source k))
+    (throw (ex-info (str "invalid :extensions key " (pr-str k)
+                         " — expected [:gh \"owner/repo\"] or [:uri \"…\"]") {:kind :extensions :key k})))
+  (when-not (or (nil? decl) (map? decl))
+    (throw (ex-info "keyed entry value must be a map" {:kind :extensions :key k})))
+  (let [uri (scope/source k)
+        id (if-let [a (:alias decl)] (keyword (name a)) (scope/basename uri))
+        type (cond (:type decl) (keyword (u/kw->str (:type decl)))
+                   (scope/local-uri? uri) :file
+                   :else :git)
+        sel (scope/acli (:acli decl))]
+    (u/prune-nils
+     {:id id
+      :kind :extensions
+      :uri uri
+      :type type
+      :ref (:ref decl)
+      :build (:build decl)
+      :default-tools (:tools decl)
+      :in (:in decl)
+      :acli sel
+      :for-tools (set (if (or (nil? sel) (= :all sel))
+                        (tools-for :extensions)
+                        (filter #(supports? % :extensions) sel)))
+      :root (case type
+              :file (u/abs-path (str/replace uri #"^file://" ""))
+              :git (str u/home "/.agents/extensions/" (name id))
+              nil)})))
+
+(defn- norm-extensions [raw]
+  (when-not (or (nil? raw) (map? raw))
+    (throw (ex-info ":extensions must be a map keyed by source, e.g. {[:gh \"owner/repo\"] {:acli [:pi]}}"
+                    {:kind :extensions})))
+  (into {} (map (fn [[k v]] (let [e (norm-extension k v)] [(:id e) e]))) raw))
+
+(declare normalize-resources)
+
 (defn normalize [raw path & [load-findings]]
+  ;; read off the file as written: extensions are placed for a whole machine,
+  ;; so they take no part in the entity lowering below
+  (assoc (normalize-resources raw path load-findings) :extensions (norm-extensions (:extensions raw))))
+
+(defn- normalize-resources [raw path & [load-findings]]
   (if-not (scope/dsl? raw)
     (normalize-legacy raw path load-findings)
     (let [{lowered :raw :keys [entities active-tools]} (scope/compile-config raw tools-for)
@@ -530,7 +580,7 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :settings :permissions :trust :hooks :#def})
+    :settings :permissions :trust :hooks :extensions :#def})
 
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]
@@ -554,6 +604,23 @@
        [(finding :warn [:cli-code] ":cli-code is the old name for :executors — rename it")])
      (for [[_ proj] (:projects raw) :when (contains? proj :cli-code)]
        (finding :warn [:projects :cli-code] ":cli-code is the old name for :executors — rename it"))
+     (mapcat
+      (fn [[id e]]
+        (concat
+         (when-not (or (nil? (:default-tools e))
+                       (and (vector? (:default-tools e)) (every? string? (:default-tools e))))
+           [(finding :error [:extensions id :tools]
+                     ":tools lists the tool names to switch on, as strings (e.g. [\"+name\"]) — :acli picks the CLIs")])
+         (when-not (or (nil? (:build e)) (string? (:build e)))
+           [(finding :error [:extensions id :build] ":build is a shell command, run in the extension's directory")])
+         (when (and (some? (:in e)) (not= :all (:in e)))
+           [(finding :warn [:extensions id :in] "extensions are installed user-wide; :in is ignored")])
+         (for [t (let [a (:acli e)] (if (keyword? a) [] a)) :when (not (supports? t :extensions))]
+           (finding (if (some #{t} all-tools) :warn :error) [:extensions id :acli]
+                    (if (some #{t} all-tools)
+                      (str (name t) " has no extensions agentctl can install — ignored")
+                      (str "unknown tool " t))))))
+      (:extensions cfg))
      (for [k (keys raw) :when (not (known-top-keys k))]
        (finding :warn [k] (str "unknown top-level key " k " — ignored")))
      (for [t (keys (:tools cfg)) :when (not (some #{t} all-tools))]

@@ -141,6 +141,16 @@
       (catch Exception e
         {:exit 127 :out "" :err (.getMessage e)}))))
 
+(defn sh-in
+  "Like `sh`, run with `dir` as the working directory."
+  [dir & args]
+  (let [args (remove nil? (flatten args))]
+    (try
+      (let [{:keys [exit out err]} @(p/process args {:dir (str dir) :out :string :err :string})]
+        {:exit exit :out (str/trim (or out "")) :err (str/trim (or err ""))})
+      (catch Exception e
+        {:exit 127 :out "" :err (.getMessage e)}))))
+
 (defn sh-env
   "Like `sh` but with extra environment variables layered on top."
   [env & args]
