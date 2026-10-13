@@ -4,6 +4,7 @@
    Surface forms accepted in agents.edn:
      $FOO                     symbol   -> env var FOO
      \"$FOO\"                   string   -> env var FOO
+     \"$HOME/bin/x\"            string   -> literal, with $VAR and ~ expanded
      \"!env://FOO\"             string   -> env var FOO
      \"!bw://item/field\"       string   -> bitwarden item + field
      \"!bw://folder/item/field\"
@@ -22,6 +23,16 @@
   [v]
   (and (map? v) (boolean (some #{:ref/kind} (keys v)))))
 
+(defn- dollar
+  "A value spelled with a leading `$`. Only a whole `$NAME` is a reference to
+   that variable. Anything longer — `$HOME/bin/x` — is a string with a variable
+   in it: read as a reference it names a variable that cannot exist, and the
+   value is dropped without a word."
+  [s]
+  (if-let [[_ n] (re-matches #"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?" s)]
+    {:ref/kind :env :ref/var n :ref/raw s}
+    {:ref/kind :literal :ref/value (u/expand s) :ref/raw s}))
+
 (defn parse
   "Normalize a declared value into a ref map. Non-secret scalars become :literal."
   [v]
@@ -31,7 +42,7 @@
     (symbol? v)
     (let [s (str v)]
       (if (str/starts-with? s "$")
-        {:ref/kind :env :ref/var (subs s 1) :ref/raw s}
+        (dollar s)
         {:ref/kind :literal :ref/value s :ref/raw s}))
 
     (string? v)
@@ -47,7 +58,7 @@
       (str/starts-with? v "!env://") {:ref/kind :env :ref/var (subs v 7) :ref/raw v}
       (str/starts-with? v "!file://") {:ref/kind :file :ref/path (subs v 8) :ref/raw v}
       (str/starts-with? v "!cmd://") {:ref/kind :cmd :ref/cmd (subs v 7) :ref/raw v}
-      (str/starts-with? v "$") {:ref/kind :env :ref/var (subs v 1) :ref/raw v}
+      (str/starts-with? v "$") (dollar v)
       :else {:ref/kind :literal :ref/value v :ref/raw v})
 
     (nil? v) nil

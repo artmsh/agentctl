@@ -550,6 +550,7 @@ field, so the provider's headers are merged onto each of its models there.
 | Form | Meaning |
 |---|---|
 | `$FOO` or `"!env://FOO"` | environment variable |
+| `"$HOME/bin/x"` | a literal: `$VAR`, `${VAR}` and a leading `~` are expanded when the file is read. Only a whole `$NAME` is a reference |
 | `"!bw://item/field"`, `"!bw://folder/item/field"` | Bitwarden item field |
 | `"!file://~/path"` | file contents, trimmed |
 | `"!cmd://some command"` | stdout of a command |

@@ -83,7 +83,18 @@
          ((juxt :ref/folder :ref/item :ref/field) (refs/parse "!bw://folder/item/field"))))
   (is (= ["item" "field"]
          ((juxt :ref/item :ref/field) (refs/parse "!bw://item/field"))))
-  (is (= :literal (:ref/kind (refs/parse "plain")))))
+  (is (= :literal (:ref/kind (refs/parse "plain"))))
+  (testing "only a whole $NAME is a reference; a longer value is a string with a variable in it"
+    (is (= "FOO" (:ref/var (refs/parse "$FOO"))))
+    (is (= "FOO" (:ref/var (refs/parse "${FOO}"))))
+    (let [home (System/getenv "HOME")]
+      (doseq [v ["$HOME/x/calls.log" (symbol "$HOME/x/calls.log") "${HOME}/x/calls.log"]]
+        (is (= {:ref/kind :literal :ref/value (str home "/x/calls.log")}
+               (dissoc (refs/parse v) :ref/raw)) (pr-str v)))
+      (is (= {:status :ok :value (str home "/x")} (refs/resolve-ref (refs/parse "$HOME/x")))))
+    (is (= "$AGENTCTL_DEFINITELY_UNSET/x" (:ref/value (refs/parse "$AGENTCTL_DEFINITELY_UNSET/x")))
+        "an unset variable stays as written rather than vanishing")
+    (is (not (refs/secret-ref? (refs/parse "$HOME/x"))) "a path is not a credential")))
 
 (deftest describe-never-leaks-a-secret
   (let [r (refs/parse "!bw://dev/item/field")]
