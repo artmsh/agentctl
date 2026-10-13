@@ -208,10 +208,12 @@
            (assoc o :project-path p)))) (:entities cfg))))
 
 (defn- tool-cfg
-  "`cfg` as tool `t` sees it: each project's skills narrowed to those placed
-   for `t`, and its per-tool trust."
+  "`cfg` as tool `t` sees it: each MCP server at the scope `t` keeps it in,
+   each project's skills narrowed to those placed for `t`, and its per-tool trust."
   [cfg t]
-  (update cfg :projects
+  (update (update cfg :mcps
+                  #(into {} (map (fn [[id m]] [id (assoc m :scope (common/mcp-scope m t))])) %))
+          :projects
           #(into {} (map (fn [[id p]]
                            [id (cond-> p
                                  (:entity-dsl? cfg)
@@ -416,14 +418,15 @@
    (for [[id decl] (:hooks (get-in cfg [:tools :claude]))
          :let [path [:hooks (keyword (u/kw->str (:event decl)))]]]
      [:claude :hooks id {:path path :value (claude/hook-group decl)}])
-   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (:scope m))] [t :mcps id])
+   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))] [t :mcps id])
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)
          :let [m (get-in cfg [:mcps mid])]
-         :when (and m (common/project-scopes (:scope m)))
+         :when m
          t (:tools m)
-         :when (contains? common/project-mcp-tools t)]
-     [t :mcps (keyword (name pid) (name mid)) {:entity-id mid :project-id pid :project-path (:path proj) :scope (:scope m)}])
+         :when (and (common/project-scopes (common/mcp-scope m t))
+                    (contains? common/project-mcp-tools t))]
+     [t :mcps (keyword (name pid) (name mid)) {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}])
    ;; a project's skill is owned user-wide only by tools that cannot host one
    ;; inside a project — for them the user's home is the only place it fits
    (for [[id s] (sources/all-skills cfg) t (:tools s)

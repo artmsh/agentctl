@@ -178,10 +178,25 @@
                          (when-not (contains? #{nil :global :local :project :machine :repo} (:scope row))
                            (throw (ex-info "invalid deprecated :scope value" {:id id})))
                          {:kind kind :id id :in s :targets (resolve-targets s) :order i :decl row}))) rows))) kinds))]
-    (when-let [duplicate (first (filter #(> (val %) 1) (frequencies (map (juxt :kind :id) es))))]
-      (throw (ex-info (str "duplicate " (pr-str (key duplicate))
-                           "; give distinct entries an explicit :alias (skills, skill-packs) or :id")
-                      {:duplicate (key duplicate)})))
+    (doseq [[k rows] (group-by (juxt :kind :id) es)
+            :when (next rows)
+            :let [tools (map #(let [ts (or (get-in % [:decl :tools]) (get-in % [:decl :for]))]
+                                (cond (keyword? ts) (when-not (= :all ts) #{ts})
+                                      (seq ts) (set ts)))
+                             rows)
+                  bodies (distinct (remove empty? (map #(apply dissoc (:decl %) metadata-keys) rows)))]]
+      ;; one MCP server may be placed differently per tool — user-wide for one,
+      ;; inside a project for another — as long as no tool is asked twice
+      (when-not (and (= :mcps (first k)) (every? some? tools) (apply distinct? (mapcat seq tools)))
+        (throw (ex-info (str "duplicate " (pr-str k)
+                             "; give distinct entries an explicit :alias (skills, skill-packs) or :id"
+                             (when (= :mcps (first k))
+                               ", or place one server per tool with disjoint :acli"))
+                        {:duplicate k})))
+      (when (next bodies)
+        (throw (ex-info (str "duplicate " (pr-str k) "; rows sharing an :id must share one definition"
+                             " — write it once and leave the other rows as placements")
+                        {:duplicate k}))))
     es))
 
 (defn compile-config
@@ -194,6 +209,10 @@
                            (set (if (or (nil? ts) (= :all ts))
                                   (tools-for (case (:kind e) :trust :projects :skill-packs :skills (:kind e)))
                                   (if (keyword? ts) [ts] ts)))))
+        ;; an :mcps id placed by several rows: one definition, a scope per tool
+        shared (into {} (for [[id rows] (group-by :id (filter #(= :mcps (:kind %)) es))
+                              :when (next rows)]
+                          [id (first (remove empty? (map #(apply dissoc (:decl %) metadata-keys) rows)))]))
         paths (sort (distinct (mapcat :targets es)))
         base {:projects (into {} (map (fn [p] [(target-id p) {:path p :tools []}]) paths))}
         place (fn [cfg e target]
@@ -217,7 +236,13 @@
                                         (or (:hooks body) {id body})) cfg)
                     :trust (if pid (-> cfg (assoc-in [:projects pid :trusted] (get body :trusted true))
                                        (update-in [:projects pid :trust-by-tool] merge (zipmap ts (repeat (get body :trusted true))))) cfg)
-                    :mcps (cond-> (assoc-in cfg [:mcps id] (assoc body :tools ts :scope scope))
+                    :mcps (cond-> (if (contains? shared id)
+                                    (update-in cfg [:mcps id]
+                                               #(-> (merge % (get shared id))
+                                                    (assoc :scope scope)
+                                                    (update :tools (fnil into #{}) ts)
+                                                    (update :scope-by-tool merge (zipmap ts (repeat scope)))))
+                                    (assoc-in cfg [:mcps id] (assoc body :tools ts :scope scope)))
                             pid (update-in [:projects pid :mcp] (fnil conj []) id))
                     :skills (cond-> (assoc-in cfg [:skills id] (assoc body :tools ts :scope (if pid :project :global)))
                               pid (update-in [:projects pid :skills] (fnil conj []) id))

@@ -1882,6 +1882,44 @@
       (is (not (fs/exists? (str a "/.mcp.json")))))
     (is (thrown? Exception (config/normalize {:settings [{:in :all} {:in :all}]} "test")))))
 
+(deftest entity-mcp-placed-per-tool
+  (let [root (temp-dir) repo (str root "/infra")]
+    (fs/create-dirs (str repo "/.git"))
+    (let [srv {:id :srv :cmd "/bin/echo srv"}
+          cfg (config/normalize {:mcps [(assoc srv :in :all :acli [:codex])
+                                        {:id :srv :in repo :acli [:claude]}]} "test")
+          pid (scope/target-id repo)
+          m (get-in cfg [:mcps :srv])
+          owned (set (map #(vec (take 3 %)) (core/inventory cfg)))]
+      (testing "one definition, a scope per tool"
+        (is (= #{:codex :claude} (:tools m)))
+        (is (= "/bin/echo" (:command m)) "the placement row borrows the definition")
+        (is (= :global (common/mcp-scope m :codex)))
+        (is (= :local (common/mcp-scope m :claude)))
+        (is (= {:srv m} (common/project-mcps (#'core/tool-cfg cfg :claude) (get-in cfg [:projects pid]) :claude))
+            "claude keeps it in the project")
+        (is (empty? (common/global-mcps (:mcps (#'core/tool-cfg cfg :claude)) :claude))
+            "and not user-wide")
+        (is (= [:srv] (keys (common/global-mcps (:mcps (#'core/tool-cfg cfg :codex)) :codex))))
+        (is (empty? (common/project-mcps (#'core/tool-cfg cfg :codex) (get-in cfg [:projects pid]) :codex))
+            "codex has nothing project-scoped to warn about"))
+      (testing "each tool owns the entry at its own scope"
+        (is (contains? owned [:codex :mcps :srv]))
+        (is (contains? owned [:claude :mcps (keyword (name pid) "srv")]))
+        (is (not (contains? owned [:claude :mcps :srv])) "or a prune would remove a user-wide server"))
+      (testing "a tool asked twice, or an unnamed tool set, is still a duplicate"
+        (is (thrown-with-msg? Exception #"duplicate"
+                              (config/normalize {:mcps [(assoc srv :in :all :acli [:codex :claude])
+                                                        {:id :srv :in repo :acli [:claude]}]} "test")))
+        (is (thrown-with-msg? Exception #"duplicate"
+                              (config/normalize {:mcps [(assoc srv :in :all)
+                                                        {:id :srv :in repo :acli [:claude]}]} "test"))))
+      (testing "two definitions under one id are refused"
+        (is (thrown-with-msg? Exception #"share one definition"
+                              (config/normalize {:mcps [(assoc srv :in :all :acli [:codex])
+                                                        {:id :srv :cmd "/bin/echo other" :in repo :acli [:claude]}]}
+                                                "test")))))))
+
 (deftest entity-prune-retains-resolved-path
   (let [root (temp-dir) repo (str root "/repo") runtime (str root "/runtime.json")]
     (fs/create-dirs (str repo "/.git"))
@@ -2139,6 +2177,22 @@
                                  :skills {[:gh "o/r"] {}}} "test")]
       (is (= [:mine] (keys (:skill-packs cfg))))
       (is (= :mine (get-in cfg [:skills :r :from])))))
+  (testing "one key can name several skills of a pack, sharing one value"
+    (let [cfg (config/normalize {:skill-packs {[:uri "/tmp/kit"] {:alias 'kit}}
+                                 :skills {['kit ["review" "triage"]] {:acli [:cc]}
+                                          ['kit "solo"] {}}} "test")]
+      (is (= #{:review :triage :solo} (set (keys (:skills cfg)))))
+      (is (= ["review" "triage"] (map #(get-in cfg [:skills % :subdir]) [:review :triage])))
+      (is (= #{:claude} (get-in cfg [:skills :review :tools]) (get-in cfg [:skills :triage :tools])))
+      (is (every? #(= :kit (:from %)) (vals (:skills cfg))))))
+  (testing "grouped key shape errors"
+    (let [packs {[:uri "/tmp/kit"] {:alias 'kit}}
+          bad #(config/normalize {:skill-packs packs :skills %} "test")]
+      (is (thrown-with-msg? Exception #"invalid :skills key" (bad {['kit []] {}})))
+      (is (thrown-with-msg? Exception #"invalid :skills key" (bad {['kit ["a" :b]] {}})))
+      (is (thrown-with-msg? Exception #"one :alias to several" (bad {['kit ["a" "b"]] {:alias 'x}})))
+      (is (thrown-with-msg? Exception #"duplicate" (bad {['kit ["a" "b"]] {} ['kit "a"] {}})))
+      (is (thrown-with-msg? Exception #"duplicate" (bad {['kit ["a" "a"]] {}})))))
   (testing "shape errors"
     (is (thrown-with-msg? Exception #"undefined pack nope"
                           (config/normalize {:skills {['nope "x"] {}}} "test")))
@@ -2165,19 +2219,3 @@
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))
-  (testing "one key can name several skills of a pack, sharing one value"
-    (let [cfg (config/normalize {:skill-packs {[:uri "/tmp/kit"] {:alias 'kit}}
-                                 :skills {['kit ["review" "triage"]] {:acli [:cc]}
-                                          ['kit "solo"] {}}} "test")]
-      (is (= #{:review :triage :solo} (set (keys (:skills cfg)))))
-      (is (= ["review" "triage"] (map #(get-in cfg [:skills % :subdir]) [:review :triage])))
-      (is (= #{:claude} (get-in cfg [:skills :review :tools]) (get-in cfg [:skills :triage :tools])))
-      (is (every? #(= :kit (:from %)) (vals (:skills cfg))))))
-  (testing "grouped key shape errors"
-    (let [packs {[:uri "/tmp/kit"] {:alias 'kit}}
-          bad #(config/normalize {:skill-packs packs :skills %} "test")]
-      (is (thrown-with-msg? Exception #"invalid :skills key" (bad {['kit []] {}})))
-      (is (thrown-with-msg? Exception #"invalid :skills key" (bad {['kit ["a" :b]] {}})))
-      (is (thrown-with-msg? Exception #"one :alias to several" (bad {['kit ["a" "b"]] {:alias 'x}})))
-      (is (thrown-with-msg? Exception #"duplicate" (bad {['kit ["a" "b"]] {} ['kit "a"] {}})))
-      (is (thrown-with-msg? Exception #"duplicate" (bad {['kit ["a" "a"]] {}})))))

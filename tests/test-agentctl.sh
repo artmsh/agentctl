@@ -733,4 +733,34 @@ grep -q 'only-p' "$SB/dash-p.txt" && grep -q 'only-q' "$SB/dash-p.txt" || { cat 
 (cd "$SB" && run apply -f "$SB/dash-p.edn" -p ws2/nope || true) > "$SB/dash-p.txt"
 grep -q -- '-p ws2/nope — no declared project there' "$SB/dash-p.txt" || { cat "$SB/dash-p.txt"; fail "a -p that selects nothing was not reported"; }
 
+# one server, placed per tool: user-wide for pi, inside one repository for claude
+mkdir -p "$SB/ws3/r/.git"
+claude_has() { python3 - "$SB/.claude.json" "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+want = sys.argv[2]
+local = any(p.endswith("/ws3/r") and want in v.get("mcpServers", {}) for p, v in d.get("projects", {}).items())
+assert want not in d.get("mcpServers", {}), "claude got the server user-wide"
+sys.exit(0 if local else 1)
+PY
+}
+cat > "$SB/split.edn" <<'EDN'
+{:mcps [{:id :split :cmd "/bin/echo split" :in :all :acli [:pi]}
+        {:id :split :in "ws3/r" :acli [:claude]}]}
+EDN
+(cd "$SB" && run apply! -f "$SB/split.edn" --all -y) > "$SB/split.txt"
+grep -q '"split"' "$SB/.pi/agent/mcp.json" || { cat "$SB/split.txt"; fail "per-tool placement: pi did not get the server user-wide"; }
+claude_has split || { cat "$SB/split.txt"; fail "per-tool placement: claude did not get the server in the project"; }
+set +e
+(cd "$SB" && run apply -f "$SB/split.edn" --all) > "$SB/split-again.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/split-again.txt"; fail "per-tool placement did not converge"; }
+# dropping the project placement prunes claude's entry and leaves pi's alone
+cat > "$SB/split.edn" <<'EDN'
+{:mcps [{:id :split :cmd "/bin/echo split" :in :all :acli [:pi]}]}
+EDN
+(cd "$SB" && run apply! -f "$SB/split.edn" --all -y) > "$SB/split.txt"
+claude_has split && { cat "$SB/split.txt"; fail "per-tool placement: dropped project placement was not pruned"; }
+grep -q '"split"' "$SB/.pi/agent/mcp.json" || { cat "$SB/split.txt"; fail "per-tool placement: pruning claude took pi's server"; }
+
 echo "all agentctl e2e checks passed"

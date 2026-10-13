@@ -18,6 +18,15 @@ cannot recover paths it never recorded. `:at :machine` is the default;
 Tool capabilities still apply: unsupported project placements report warnings.
 The GUI edits the section vectors and shows a read-only resolved-targets pane.
 
+One MCP server can be placed differently per tool by repeating its `:id` with
+disjoint `:acli`: write the definition once and leave the other rows as bare
+placements. A tool named by two rows, or a row naming no tools, is a duplicate.
+
+```edn
+:mcps [{:id :tracker :cmd "tracker-mcp -t stdio" :in :all :acli [:codex]}
+       {:id :tracker :in "projects/infra" :acli [:claude]}]
+```
+
 Placement-derived ids collide when two unnamed stanzas share a selector. Give
 those stanzas distinct explicit `:id` values, including settings for different tools.
 
@@ -40,6 +49,7 @@ selector and is unique by construction; the value holds placement and options.
 | `[:gh "owner/repo"]` | both | `https://github.com/owner/repo`, cloned under `~/.agents/skill-packs/<id>` |
 | `[:uri "…"]` | both | a git URL, or a local directory (`file://`, `/`, `~`, `$VAR`) |
 | `[pack "name"]` | `:skills` | skill directory `name` inside the pack whose id or `:alias` is `pack` |
+| `[pack ["a" "b"]]` | `:skills` | the same, for several skills at once; they share the value, so `:alias` is not allowed |
 
 - **Id.** `:alias sym` names the entity; without it the id is the last path
   segment of the key (`:superpowers`, `:Uncodixfy`, `:wrap-up`). Two keys with
@@ -49,7 +59,6 @@ selector and is unique by construction; the value holds placement and options.
   fetched as an implicit pack (`:in :none`) and resolves to the repository's
   `SKILL.md`, or `skills/<id>`. A declared pack with the same URI is reused.
 - **`:acli`** selects agent CLIs: `:claude`/`:cc`, `:codex`, `:pi`, `:omp`,
-| `[pack ["a" "b"]]` | `:skills` | the same, for several skills at once; they share the value, so `:alias` is not allowed |
   `:llm`, `:antigravity`/`:agy`. It is `:tools` with short names; the other
   entity kinds accept it too.
 - **`:in`** is unchanged. Packs default to `:none`, skills to `:all`. A placed

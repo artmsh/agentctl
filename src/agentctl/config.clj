@@ -231,6 +231,7 @@
       :enabled (get decl :enabled true)
       :scope (or (case (:at decl) :repo :project :machine :local nil)
                  (some-> (:scope decl) u/kw->str keyword))
+      :scope-by-tool (:scope-by-tool decl)
       :extra (:extra decl)
       :per-tool (norm-per-tool id decl norm-mcp)
       :tools (tool-selection decl :mcps)})))

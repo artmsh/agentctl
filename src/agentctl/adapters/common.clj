@@ -106,6 +106,13 @@
    tracked `.mcp.json`."
   #{:local :project})
 
+(defn mcp-scope
+  "Where `tool` keeps server `m`. One server can be user-wide for one tool and
+   inside a project for another; `:scope-by-tool` carries that, `:scope` is
+   the answer when every tool agrees."
+  [m tool]
+  (get (:scope-by-tool m) tool (:scope m)))
+
 (defn global-mcps
   "MCPs that belong to the machine. Project-scoped servers are provisioned by
    the project that names them, not user-wide."
