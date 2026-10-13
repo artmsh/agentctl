@@ -37,6 +37,26 @@
 (defn- keep-kinds [ops {:keys [kinds]}]
   (if (seq kinds) (filter #(contains? (set kinds) (:kind %)) ops) ops))
 
+(defn- project-ids
+  "The declared projects one `--project` value selects: a project id as is,
+   otherwise a HOME-relative path or tree."
+  [cfg p]
+  (cond
+    (contains? (:projects cfg) p) [p]
+    (:entity-dsl? cfg)
+    ;; id->str, not kw->str: `-p projects/x` arrives as a keyword, which files
+    ;; everything before the first slash under its namespace
+    (let [s (scope/selector (u/id->str p))]
+      (for [[id target] (:projects cfg) :when (scope/matches? s (:path target))] id))
+    :else [p]))
+
+(defn unmatched-projects
+  "`--project` values that select nothing declared. A run narrowed to nothing
+   plans nothing, which reads exactly like a converged machine."
+  [cfg {:keys [projects]}]
+  (sort (for [p projects :when (not-any? #(contains? (:projects cfg) %) (project-ids cfg p))]
+          (u/id->str p))))
+
 (defn- keep-projects
   "`--project` selects everything that belongs to a project, across kinds: a
    project's MCP servers are `:mcps` ops, so filtering by kind would miss them.
@@ -49,12 +69,7 @@
   [ops cfg {:keys [projects]}]
   (if (empty? projects)
     ops
-    (let [projects (if (:entity-dsl? cfg)
-                     (set (mapcat (fn [p]
-                                    (if (contains? (:projects cfg) p) [p]
-                                        (let [s (scope/selector (u/kw->str p))]
-                                          (for [[id target] (:projects cfg) :when (scope/matches? s (:path target))] id)))) projects))
-                     projects)
+    (let [projects (set (mapcat #(project-ids cfg %) projects))
           packs (sources/packs-for cfg projects)]
       (filter #(or (contains? projects (:project %))
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))

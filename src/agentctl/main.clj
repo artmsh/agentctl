@@ -132,6 +132,8 @@
                   {:pretty true}))
         (do
           (when scope (println (scope-note cfg scope)))
+          (doseq [p (core/unmatched-projects cfg opts)]
+            (println (str "  ⚠ -p " p " — no declared project there")))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
           (if (or (seq changes) (:show-noop opts))

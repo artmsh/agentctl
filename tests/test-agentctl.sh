@@ -716,4 +716,21 @@ grep -q '+ skill-pack .*/theirs' "$SB/cwd-all.txt" || { cat "$SB/cwd-all.txt"; f
 plan_in "$SB" > "$SB/cwd-out.txt"
 grep -q '^scope:' "$SB/cwd-out.txt" && fail "a directory above the workspace is not a scope"
 
+# -p names a HOME-relative path. Every spelling of it has to select the project:
+# a path that silently matches nothing plans nothing, and reads as "converged".
+mkdir -p "$SB/ws2/p/.git" "$SB/ws2/q/.git"
+cat > "$SB/dash-p.edn" <<'EDN'
+{:mcps [{:id :only-p :cmd "/bin/echo p" :in "ws2/p" :tools [:claude]}
+        {:id :only-q :cmd "/bin/echo q" :in "ws2/q" :tools [:claude]}]}
+EDN
+for spelling in "ws2/p" "$SB/ws2/p" '~/ws2/p' "ws2/p/"; do
+  (cd "$SB" && run apply -f "$SB/dash-p.edn" -p "$spelling" || true) > "$SB/dash-p.txt"
+  grep -q 'mcps/only-p' "$SB/dash-p.txt" || { cat "$SB/dash-p.txt"; fail "-p $spelling did not select the project"; }
+  grep -q 'only-q' "$SB/dash-p.txt" && fail "-p $spelling leaked another project"
+done
+(cd "$SB" && run apply -f "$SB/dash-p.edn" -p ws2 || true) > "$SB/dash-p.txt"
+grep -q 'only-p' "$SB/dash-p.txt" && grep -q 'only-q' "$SB/dash-p.txt" || { cat "$SB/dash-p.txt"; fail "-p on a tree did not select the projects beneath it"; }
+(cd "$SB" && run apply -f "$SB/dash-p.edn" -p ws2/nope || true) > "$SB/dash-p.txt"
+grep -q -- '-p ws2/nope — no declared project there' "$SB/dash-p.txt" || { cat "$SB/dash-p.txt"; fail "a -p that selects nothing was not reported"; }
+
 echo "all agentctl e2e checks passed"
