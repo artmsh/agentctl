@@ -36,10 +36,12 @@
       :uri arg
       nil)))
 
+(defn- non-blank? [s] (and (string? s) (not (str/blank? s))))
+
 (defn- bad-key [kind k]
   (throw (ex-info (str "invalid " kind " key " (pr-str k)
                        (if (= kind :skills)
-                         " — expected [:gh \"owner/repo\"], [:uri \"…\"] or [pack \"skill\"]"
+                         " — expected [:gh \"owner/repo\"], [:uri \"…\"], [pack \"skill\"] or [pack [\"skill\" …]]"
                          " — expected [:gh \"owner/repo\"] or [:uri \"…\"]"))
                   {:kind kind :key k})))
 
@@ -59,6 +61,7 @@
 (defn- skill-rows
   "A skill key names where the skill comes from:
      [pack \"name\"]            a skill inside a declared pack (by `:alias` or id)
+     [pack [\"a\" \"b\"]]       several skills of one pack sharing one value
      [:uri \"file:///dir\"]      a skill directory on disk
      [:gh \"owner/repo\"]        a repository that is a skill; fetched as an
                                   implicit pack, reusing a declared pack of the same URI"
@@ -68,13 +71,17 @@
      (fn [{:keys [skills packs]} [k v]]
        (let [[head arg] k]
          (cond
-           (and (symbol? head) (= 2 (count k)) (string? arg))
-           (let [pid (keyword (name head))]
+           (and (symbol? head) (= 2 (count k))
+                (or (non-blank? arg) (and (vector? arg) (seq arg) (every? non-blank? arg))))
+           (let [pid (keyword (name head))
+                 names (if (string? arg) [arg] arg)]
              (when-not (pack-ids pid)
                (throw (ex-info (str "skill " (pr-str k) " names undefined pack " head
                                     " — declare it under :skill-packs with {:alias " head "}")
                                {:key k})))
-             {:skills (conj skills (assoc (row (basename arg) v) :from pid :subdir arg)) :packs packs})
+             (when (and (next names) (:alias v))
+               (throw (ex-info (str "skill " (pr-str k) " gives one :alias to several skills") {:key k})))
+             {:skills (into skills (map #(assoc (row (basename %) v) :from pid :subdir %)) names) :packs packs})
 
            (source k)
            (let [uri (source k) id (basename uri)]

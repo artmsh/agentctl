@@ -49,6 +49,7 @@ selector and is unique by construction; the value holds placement and options.
   fetched as an implicit pack (`:in :none`) and resolves to the repository's
   `SKILL.md`, or `skills/<id>`. A declared pack with the same URI is reused.
 - **`:acli`** selects agent CLIs: `:claude`/`:cc`, `:codex`, `:pi`, `:omp`,
+| `[pack ["a" "b"]]` | `:skills` | the same, for several skills at once; they share the value, so `:alias` is not allowed |
   `:llm`, `:antigravity`/`:agy`. It is `:tools` with short names; the other
   entity kinds accept it too.
 - **`:in`** is unchanged. Packs default to `:none`, skills to `:all`. A placed

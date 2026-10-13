@@ -2165,3 +2165,19 @@
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))
+  (testing "one key can name several skills of a pack, sharing one value"
+    (let [cfg (config/normalize {:skill-packs {[:uri "/tmp/kit"] {:alias 'kit}}
+                                 :skills {['kit ["review" "triage"]] {:acli [:cc]}
+                                          ['kit "solo"] {}}} "test")]
+      (is (= #{:review :triage :solo} (set (keys (:skills cfg)))))
+      (is (= ["review" "triage"] (map #(get-in cfg [:skills % :subdir]) [:review :triage])))
+      (is (= #{:claude} (get-in cfg [:skills :review :tools]) (get-in cfg [:skills :triage :tools])))
+      (is (every? #(= :kit (:from %)) (vals (:skills cfg))))))
+  (testing "grouped key shape errors"
+    (let [packs {[:uri "/tmp/kit"] {:alias 'kit}}
+          bad #(config/normalize {:skill-packs packs :skills %} "test")]
+      (is (thrown-with-msg? Exception #"invalid :skills key" (bad {['kit []] {}})))
+      (is (thrown-with-msg? Exception #"invalid :skills key" (bad {['kit ["a" :b]] {}})))
+      (is (thrown-with-msg? Exception #"one :alias to several" (bad {['kit ["a" "b"]] {:alias 'x}})))
+      (is (thrown-with-msg? Exception #"duplicate" (bad {['kit ["a" "b"]] {} ['kit "a"] {}})))
+      (is (thrown-with-msg? Exception #"duplicate" (bad {['kit ["a" "a"]] {}})))))
