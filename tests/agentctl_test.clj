@@ -21,6 +21,7 @@
             [agentctl.util :as u]
             [agentctl.validate :as validate]
             [babashka.fs :as fs]
+            [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests testing]]))
@@ -1803,7 +1804,11 @@
                 local-ops (filter #(and (= :skills (:kind %)) (#{:a :b} (:project %)))
                                   (planner local state/empty-state))
                 _ (is (empty? (:failed (core/execute! local-ops))))
-                _ (is (fs/directory? (str dir "/a" subdir "/wrap-up")) "installed by the skills CLI")
+                _ (is (= (u/real-path src) (u/real-path (str dir "/a" subdir "/wrap-up")))
+                      "linked to the source")
+                _ (is (fs/sym-link? (str dir "/a" subdir "/wrap-up")))
+                _ (when (= :claude tool)
+                    (is (not (u/exists? (str dir "/a/.agents/skills/wrap-up"))) "nothing in .agents/skills for claude alone"))
                 st (core/sync-state! state/empty-state local)
                 legacy (str dir "/legacy" subdir "/wrap-up")
                 directory (str dir "/directory" subdir "/wrap-up")
@@ -1825,7 +1830,7 @@
             (doseq [id [:a :b]]
               (is (str/includes? out (str "PROJECT(" (str/replace (u/tilde (str dir "/" (name id))) #"^~/" "") ")")))
               (is (u/exists? (str dir "/" (name id) subdir "/wrap-up"))))
-            (is (str/includes? out "remove wrap-up -y"))
+            (is (str/includes? out (str "unlink " dir "/a" subdir "/wrap-up")) "a local source is linked, not copied")
             (is (not (u/exists? (str global-dir "/wrap-up"))) "dry plan writes nothing")
             (testing "a project-scoped run leaves the user-wide install out, so it keeps the copy"
               (let [scoped (filter #(= :skills (:kind %))
@@ -2047,12 +2052,12 @@
     (let [cfg (config/normalize (raw [:codex :agy]) "test")
           ops (plan-for cfg state/empty-state)
           adds (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops)]
-      (is (= 1 (count adds)) "one skills add for the directory both tools read")
-      (is (= ["add" (u/real-path skill) "-a" "antigravity" "-a" "codex" "-y"]
-             (drop (count (skills-cli/command)) (first (:cmds (first adds))))))
+      (is (= 1 (count adds)) "one link for the directory both tools read")
+      (is (= [["ln" "-sfn" (u/abs-path skill) dest]] (:cmds (first adds))))
       (is (empty? (:failed (core/execute! ops))))
-      (is (fs/directory? dest))
-      (is (= (u/real-path skill) (get (skills-cli/read-lock repo) "review")))
+      (is (fs/sym-link? dest))
+      (is (= (u/real-path skill) (u/real-path dest)))
+      (is (empty? (skills-cli/read-lock repo)) "the CLI holds nothing it did not copy")
       (is (empty? (filter plan/mutating? (plan-for cfg state/empty-state))) "converged")
       (let [st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
             _ (is (state/managed? st :codex :skills (keyword (name (scope/target-id repo)) "review")))
@@ -2062,10 +2067,35 @@
             "dropping codex keeps the copy antigravity still reads")
         (let [gone (plan-for (config/normalize {:skills {}} "test") st)
               rm (filter #(= :delete (:action %)) gone)]
-          (is (= [["remove" "review" "-y"]] (map #(drop (count (skills-cli/command)) (first (:cmds %))) rm)))
+          (is (= [dest] (map :target rm)))
           (is (empty? (:failed (core/execute! rm))))
-          (is (not (fs/exists? dest)))
-          (is (empty? (skills-cli/read-lock repo))))))))
+          (is (not (u/exists? dest)))
+          (is (fs/directory? skill) "unlinking keeps the source"))))))
+
+(deftest a-local-skill-the-cli-copied-is-moved-to-a-link
+  ;; installed by the CLI before: its copy and lock entry go, a link replaces them
+  (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")
+        cfg (config/normalize {:skill-packs {:kit {:uri (str "file://" pack)}}
+                               :projects {:p {:path repo :executors #{:claude} :skills [:kit]}}}
+                              "test")
+        plan-for #(core/build-plan cfg state/empty-state {:tools #{:claude}})]
+    (doseq [n ["one" "two"]]
+      (fs/create-dirs (str pack "/skills/" n))
+      (spit (str pack "/skills/" n "/SKILL.md") (str "---\nname: " n "\n---\n")))
+    (fs/create-dirs (str repo "/.git"))
+    (is (zero? (:exit @(p/process (concat (skills-cli/command)
+                                          ["add" (str pack "/skills") "-a" "codex" "-a" "claude-code" "-y"])
+                                  {:dir repo}))))
+    (is (= #{"one" "two"} (set (keys (skills-cli/read-lock repo)))))
+    (let [[o] (filter #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for))]
+      (is (= (vec (concat (skills-cli/command) ["remove" "one" "two" "-y"])) (first (:cmds o))))
+      (is (empty? (:failed (core/execute! [o])))))
+    (doseq [n ["one" "two"]]
+      (is (fs/sym-link? (str repo "/.claude/skills/" n)))
+      (is (= (u/real-path (str pack "/skills/" n)) (u/real-path (str repo "/.claude/skills/" n))))
+      (is (not (u/exists? (str repo "/.agents/skills/" n)))))
+    (is (empty? (skills-cli/read-lock repo)))
+    (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for)) "converged")))
 
 (deftest keyed-skills-and-packs
   (let [root (temp-dir) local (str root "/agents-setup") core (str root "/core-vector")

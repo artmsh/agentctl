@@ -161,10 +161,11 @@ set -e
 grep -A1 'PROJECT(.*pproj)' "$SB/plan11.txt" | grep -q '+ skill-pack \[agents: claude-code\]' || { cat "$SB/plan11.txt"; fail "unfetched pack not reported"; }
 run apply! -f "$SB/pskills.edn" -y > "$SB/apply11.txt"
 [ -d "$SB/.agents/skill-packs/fresh2/.git" ] || { cat "$SB/apply11.txt"; fail "project pack not cloned"; }
-# for claude alone the skills CLI copies from the clone straight into .claude/skills
-[ -d "$SB/pproj/.claude/skills/fresh-skill" ] && [ ! -L "$SB/pproj/.claude/skills/fresh-skill" ] || { cat "$SB/apply11.txt"; fail "stale project skill link not replaced by the skills CLI install"; }
+# a skill already on disk is linked from the clone, not copied by the skills CLI
+link=$(readlink "$SB/pproj/.claude/skills/fresh-skill")
+[ "$link" = "$SB/.agents/skill-packs/fresh2/skills/fresh-skill" ] || { cat "$SB/apply11.txt"; fail "stale project skill link not repointed at the clone (-> $link)"; }
 [ ! -e "$SB/pproj/.agents/skills/fresh-skill" ] || fail "claude-only install wrote the shared .agents/skills copy"
-grep -q '"fresh-skill"' "$SB/pproj/skills-lock.json" || fail "install not recorded in skills-lock.json"
+[ ! -e "$SB/pproj/skills-lock.json" ] || fail "a linked skill was handed to the skills CLI"
 [ -f "$SB/pproj/.claude/skills/fresh-skill/SKILL.md" ] || fail "repointed link does not resolve"
 set +e
 run apply -f "$SB/pskills.edn" > "$SB/plan11b.txt"; code=$?
@@ -636,7 +637,7 @@ set -e
 [ "$code" = 2 ] || fail "global promotion should report drift"
 for id in wrap-a wrap-b; do
   grep -q "PROJECT(.*$id)" "$SB/wrap-plan.txt" || { cat "$SB/wrap-plan.txt"; fail "missing project deletion section"; }
-  grep -A2 "PROJECT(.*$id)" "$SB/wrap-plan.txt" | grep -q "^exec: '.* remove wrap-up -y'" || { cat "$SB/wrap-plan.txt"; fail "missing skills remove preview"; }
+  grep -A2 "PROJECT(.*$id)" "$SB/wrap-plan.txt" | grep -q "^exec: 'unlink .*/$id/.claude/skills/wrap-up'" || { cat "$SB/wrap-plan.txt"; fail "missing unlink preview"; }
   [ -d "$SB/$id/.claude/skills/wrap-up" ] || fail "dry run removed a project copy"
 done
 run apply! -f "$SB/wrap-global.edn" -t claude -k skills -y > /dev/null
@@ -644,7 +645,7 @@ run apply! -f "$SB/wrap-global.edn" -t claude -k skills -y > /dev/null
 for id in wrap-a wrap-b; do
   [ ! -e "$SB/$id/.claude/skills/wrap-up" ] || fail "project wrap-up remains"
   [ ! -e "$SB/$id/.agents/skills/wrap-up" ] || fail "project wrap-up copy remains"
-  grep -q '"wrap-up"' "$SB/$id/skills-lock.json" && fail "wrap-up still in the project's skills-lock.json"
+  grep -qs '"wrap-up"' "$SB/$id/skills-lock.json" && fail "wrap-up still in the project's skills-lock.json"
 done
 [ -f "$SB/wrap-pack/skills/wrap-up/SKILL.md" ] || fail "removal took the source"
 run apply -f "$SB/wrap-global.edn" -t claude -k skills > /dev/null

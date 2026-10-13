@@ -6,9 +6,15 @@
    `<repo>/skills-lock.json`. Installed for claude alone, the copy goes
    straight into `.claude/skills/<name>` and `.agents/skills` is not touched.
 
+   The CLI only copies, so a skill whose source is already on disk — a path,
+   a local pack, a git pack agentctl clones — is not handed to it: agentctl
+   links each agent's directory straight to the source, `.claude/skills/<name>`
+   for claude and `.agents/skills/<name>` only when codex or antigravity read
+   it. A name the CLI installed earlier is removed with it first, so the lock
+   stays true.
+
    The CLI has no dry run, so drift is read from disk: the lock entry, the
-   copy (compared with the source for a local one), and claude's link. User-wide
-   skills stay agentctl's own symlinks."
+   copy, and claude's link. User-wide skills stay agentctl's own symlinks."
   (:require [agentctl.plan :as plan]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
@@ -129,6 +135,26 @@
           (seq sel) sel
           :else nil)))
 
+(defn- link-paths
+  "Where agentctl links a local skill for these tools."
+  [dir n tools]
+  (cond-> []
+    (contains? tools :claude) (conj (claude-link dir n))
+    (shared? tools) (conj (canonical dir n))))
+
+(defn- linked?
+  "Every name links, in each of these tools' directories, to its source; the
+   CLI holds none of them; and no copy is left in `.agents/skills` when
+   nothing in the project reads it."
+  [dir u tools shared-wanted?]
+  (let [lock (read-lock dir)]
+    (every? (fn [[n src]]
+              (and (not (contains? lock n))
+                   (every? #(and (fs/sym-link? %) (= (u/real-path %) (real src)))
+                           (link-paths dir n tools))
+                   (or shared-wanted? (not (u/exists? (canonical dir n))))))
+            (zipmap (:names u) (:dirs u)))))
+
 (defn- installed?
   "Every name from this source is in the lock, its copy is a directory
    (matching the source when that is local), and claude — when it shares the
@@ -166,6 +192,39 @@
      :skills (when whole? (:names u))
      :alias (when whole? (:alias p))
      :agents (sort (map agents tools))}))
+
+(defn- link-op
+  "Links a local unit's skills to their source, after the CLI drops any it
+   installed. `shared-wanted?`: codex or antigravity read this project's
+   `.agents/skills`, whether or not this run selects them."
+  [cfg pid dir u tools shared-wanted?]
+  (when-not (linked? dir u tools shared-wanted?)
+    (let [lock (read-lock dir)
+          by-name (zipmap (:names u) (:dirs u))
+          held (filterv #(contains? lock %) (:names u))
+          rm-argv (when (seq held) (vec (concat (command) ["remove"] held ["-y"])))
+          links (for [n (:names u) p (link-paths dir n tools)] [p (u/abs-path (by-name n))])
+          stale (when-not shared-wanted?
+                  (filterv u/exists? (map #(canonical dir %) (:names u))))
+          oid (keyword (name pid) (name (:entity u)))]
+      (plan/op {:action (if (some (comp u/exists? first) links) :update :create)
+                :tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                :target (str dir "/.claude/skills") :category :fs
+                :owns (mapv #(vector % :skills oid) (sort tools))
+                :summary (str "link " (u/tilde (:source u)))
+                :cmds (vec (concat (when rm-argv [rm-argv])
+                                   (for [p stale] ["rm" "-r" p])
+                                   (for [[p src] links] ["ln" "-sfn" src p])))
+                :display (display cfg u tools)
+                :exec! (fn []
+                         (when rm-argv (run! dir rm-argv "skills remove"))
+                         (doseq [p (concat stale (map first links))
+                                 :when (u/exists? p)]
+                           (u/backup! p)
+                           (fs/delete-tree p {:nofollow-links true}))
+                         (doseq [[p src] links]
+                           (fs/create-dirs (fs/parent p))
+                           (fs/create-sym-link p src)))}))))
 
 (defn- add-op [cfg pid dir u tools]
   (when-not (installed? dir u tools)
@@ -214,11 +273,12 @@
                               ;; now user-wide: `global-duplicate-ops` removes it
                               ;; once the user-wide copy is in place
                               (not= :global (get-in cfg [:skills entity :scope])))]
-               {:t t :id id :pid pid :dir dir :entity entity :source (:source e)})]
+               {:t t :id id :pid pid :dir dir :entity entity :source (:source e) :names (:names e)})]
     (for [[[pid dir entity] rows] (group-by (juxt :pid :dir :entity) gone)
           :let [dropped (set (map :t rows))
                 staying (set (for [t (keys agents) :when (contains? (get desired [pid t]) entity)] t))
                 src (some :source rows)
+                linked (or (some :names rows) [(name entity)])
                 lock (read-lock dir)
                 names (or (not-empty (vec (sort (keep (fn [[n s]] (when (and src (= s src)) n)) lock))))
                           (when (contains? lock (name entity)) [(name entity)]))
@@ -238,18 +298,20 @@
                          :display {:kind "skill" :entity entity :source (or (some-> src u/tilde) (name entity))
                                    :agents (sort (map agents dropped))}
                          :exec! #(run! dir argv "skills remove")})]
-              ;; installed before the CLI took over: agentctl's own links
+              ;; agentctl's own links to a local source
               (when (empty? names)
                 (keep identity
                       (concat
                        (when (dropped :claude)
-                         [(plan/unlink-op {:tool :claude :kind :skills :project pid :id oid
-                                           :dest (claude-link dir (name entity))})])
+                         (for [n linked]
+                           (plan/unlink-op {:tool :claude :kind :skills :project pid :id oid
+                                            :dest (claude-link dir n)})))
                        (when (and (some #{:codex :antigravity} dropped)
                                   (not-any? #{:codex :antigravity} staying))
-                         [(plan/unlink-op {:tool (first (filter #{:codex :antigravity} (sort dropped)))
-                                           :kind :skills :project pid :id oid
-                                           :dest (canonical dir (name entity))})])))))
+                         (for [n linked]
+                           (plan/unlink-op {:tool (first (filter #{:codex :antigravity} (sort dropped)))
+                                            :kind :skills :project pid :id oid
+                                            :dest (canonical dir n)})))))))
           :when o]
       o)))
 
@@ -273,7 +335,11 @@
                           :summary (:warn u)
                           :display {:kind "skill" :entity id :source (name id)
                                     :agents (sort (map agents ts))}})]
-               (keep identity [(add-op cfg pid dir u ts)]))]
+               (keep identity
+                     [(if (:local u)
+                        (link-op cfg pid dir u ts
+                                 (some #(contains? (get desired [pid %]) id) [:codex :antigravity]))
+                        (add-op cfg pid dir u ts))]))]
        o))))
 
 (defn- desired-names
@@ -334,4 +400,5 @@
         :when (and u (not (:warn u)))
         :let [proj (get-in cfg [:projects pid])]]
     [t :skills (keyword (name pid) (name id))
-     {:entity-id id :project-id pid :project-path (:path proj) :source (:source u)}]))
+     (cond-> {:entity-id id :project-id pid :project-path (:path proj) :source (:source u)}
+       (:local u) (assoc :names (:names u)))]))
