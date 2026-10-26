@@ -151,19 +151,24 @@
       (catch Exception e
         {:exit 127 :out "" :err (.getMessage e)}))))
 
-(defn sh-env
-  "Like `sh` but with extra environment variables layered on top."
-  [env & args]
+(defn sh-env-in
+  "Like `sh-env`, run from directory `dir`."
+  [dir env & args]
   (let [args (remove nil? (flatten args))]
     (try
       (let [{:keys [exit out err]}
-            @(p/process args {:out :string :err :string
+            @(p/process args {:out :string :err :string :dir dir
                               :extra-env (into {} (map (fn [[k v]]
                                                          [(if (keyword? k) (name k) (str k)) (str v)]))
                                                env)})]
         {:exit exit :out (str/trim (or out "")) :err (str/trim (or err ""))})
       (catch Exception e
         {:exit 127 :out "" :err (.getMessage e)}))))
+
+(defn sh-env
+  "Like `sh` but with extra environment variables layered on top."
+  [env & args]
+  (sh-env-in nil env args))
 
 (defn which [cmd]
   (when-not (str/blank? (str cmd))

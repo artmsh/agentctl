@@ -589,6 +589,9 @@
      (:load-findings cfg)
      (for [{:keys [kind id decl]} (:entities cfg) :when (contains? decl :scope)]
        (finding :warn [kind id :scope] ":scope is deprecated; use :at :machine or :repo"))
+     (for [{:keys [kind id in targets]} (:entities cfg)
+           :when (and (vector? in) (empty? targets))]
+       (finding :warn [kind id :in] (str (pr-str in) " matches no directory — placed nowhere")))
      (for [{:keys [kind id in]} (:entities cfg) :when (and (= kind :trust) (= in :all))]
        (finding :warn [kind id :in] "trust requires a repository path; tools have no user-wide trust location"))
      (for [{:keys [kind id decl targets]} (:entities cfg)

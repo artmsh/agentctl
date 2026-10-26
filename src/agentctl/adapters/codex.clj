@@ -21,9 +21,11 @@
 (def memory-file (str home "/AGENTS.md"))
 
 (defn codex-sh
-  "Run the codex CLI against the home directory agentctl is managing."
+  "Run the codex CLI against the home directory agentctl is managing. From `/`:
+   codex merges the working directory's `.codex/config.toml` into what `mcp
+   list` reports, and a project's servers must not read as user-wide ones."
   [& args]
-  (u/sh-env {:CODEX_HOME home} args))
+  (u/sh-env-in "/" {:CODEX_HOME home} args))
 
 (def setting-keys
   {:model "model"
@@ -177,6 +179,94 @@
                  :exec! (fn [] (u/backup! config-file)
                           (ok! (codex-sh "codex" "mcp" "remove" (u/kw->str id)) "codex mcp remove"))})))))
 
+;; ---------------------------------------------------------------- project mcps
+
+(defn project-config-file
+  "Codex layers `<project>/.codex/config.toml` over the user config, for a
+   trusted project only."
+  [proj] (str (:path proj) "/.codex/config.toml"))
+
+(defn- project-mcp-table
+  "The `[mcp_servers.<id>]` table as codex itself writes it."
+  [m env headers]
+  (u/prune-nils
+   {"command" (:command m)
+    "args" (when (:command m) (vec (:args m)))
+    "url" (:url m)
+    "bearer_token_env_var" (:bearer-token-env m)
+    "env" (not-empty env)
+    "http_headers" (not-empty headers)
+    "enabled" (when-not (:enabled m) false)}))
+
+(defn- trusted?
+  "Codex ignores an untrusted project's config without a word. Trust is per
+   exact project root, never inherited from a parent directory. A declared
+   trust is the one `project-ops` writes."
+  [proj]
+  (or (true? (:trusted proj))
+      (= "trusted" (get-in (try (toml/read-toml config-file) (catch Exception _ nil))
+                           ["projects" (:path proj) "trust_level"]))))
+
+(defn- project-mcp-ops [cfg pid proj]
+  (let [file (project-config-file proj)
+        servers (get (try (toml/read-toml file) (catch Exception _ nil)) "mcp_servers")
+        ms (common/project-mcps cfg proj tool)]
+    (concat
+     (when (and (seq ms) (not (trusted? proj)))
+       [(plan/op {:action :noop :warn true :tool tool :kind :mcps :project pid
+                  :id (keyword (str (name pid) "/trust"))
+                  :summary (str (u/tilde (:path proj)) " is not trusted — codex ignores its "
+                                ".codex/config.toml; add a :trust row for :codex")})])
+     (for [[mid m] ms
+           :let [m (common/for-this-tool m tool)
+                 name* (u/kw->str mid)
+                 id (keyword (name pid) name*)
+                 env (common/resolve-env (:env m))
+                 headers (common/resolve-env (:headers m))
+                 issues (concat (:issues env) (:issues headers))
+                 have (get servers name*)
+                 want (project-mcp-table m (:values env) (:values headers))
+                 secret? (common/holds-secret? (merge (:env m) (:headers m)))]
+           :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
+       (if (seq issues)
+         (plan/op {:tool tool :kind :mcps :project pid :id id :warn true
+                   :summary "env or header reference unresolved — existing server left untouched"})
+         (plan/op {:action (if have :update :create)
+                   :tool tool :kind :mcps :project pid :id id
+                   :target file
+                   :path ["mcp_servers" name*]
+                   :summary (common/mcp-summary m)
+                   :note (when secret? "⚠ secret value written into the project — .codex/ may be tracked")
+                   :diffs (plan/field-diffs (or have {}) want)
+                   :risk (if secret? :secret :low)
+                   ;; the whole table is rewritten: a key left from an
+                   ;; earlier shape (stdio → http) would change what codex runs
+                   :exec! (fn []
+                            (u/backup! file)
+                            (toml/update-file! file #(-> (toml/remove-table % ["mcp_servers" name*])
+                                                         (toml/set-keys ["mcp_servers" name*] want))))}))))))
+
+(defn- project-mcp-prune-ops
+  "A project's server dropped from agents.edn. The path comes from the state
+   when the project itself is gone from the config."
+  [cfg st]
+  (let [desired (into #{} (for [[pid proj] (:projects cfg)
+                                :when (contains? (:for-tools proj) tool)
+                                [mid _] (common/project-mcps cfg proj tool)]
+                            (keyword (name pid) (u/kw->str mid))))]
+    (for [id (map keyword (state/managed-ids st tool :mcps))
+          :when (and (namespace id) (not (contains? desired id)))
+          :let [path (or (get-in cfg [:projects (keyword (namespace id)) :path])
+                         (:project-path (state/entry st tool :mcps id)))]
+          :when path
+          :let [op (plan/toml-remove-table-op {:tool tool :kind :mcps :id id
+                                               :project (keyword (namespace id))
+                                               :file (project-config-file {:path path})
+                                               :table ["mcp_servers" (name id)]
+                                               :summary "removed from agents.edn"})]
+          :when op]
+      op)))
+
 ;; ---------------------------------------------------------------- providers
 
 (defn provider-ops [cfg]
@@ -222,6 +312,11 @@
                                      :summary (u/tilde (:path proj))})]
          :when op]
      op)
+   (mapcat (fn [[id proj]]
+             (when (contains? (:for-tools proj) tool)
+               (project-mcp-ops cfg id proj)))
+           (:projects cfg))
+   (project-mcp-prune-ops cfg st)
    (mapcat (fn [[id proj]]
              (when (contains? (:for-tools proj) tool)
                ;; installs are the `skills` CLI's (`skills-cli`); this drops
@@ -271,7 +366,6 @@
 (defn plan [cfg state]
   (concat (settings-ops cfg)
           (mcp-ops cfg state)
-          (common/project-scope-skip-ops cfg tool)
           (provider-ops cfg)
           (project-ops cfg state)
           (skill-ops cfg state)

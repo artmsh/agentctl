@@ -222,7 +222,7 @@
       (is (= #{:searxng :everywhere}
              (set (keys (common/global-mcps mcps :claude))))))
     (testing "tools without project MCP config report the skip instead of dropping it"
-      (let [ops (common/project-scope-skip-ops cfg :codex)]
+      (let [ops (common/project-scope-skip-ops cfg :pi)]
         (is (= 1 (count ops)))
         (is (true? (:warn (first ops))))
         (is (str/includes? (:summary (first ops)) "slack"))))))
@@ -630,15 +630,62 @@
         inv (set (map #(vec (take 3 %)) (core/inventory cfg)))]
     (testing "a project's server is owned per project, never as the user-wide one"
       (is (contains? inv [:claude :mcps :example/slack]))
+      (is (contains? inv [:codex :mcps :example/slack]))
       (is (not (contains? inv [:claude :mcps :slack]))))
     (testing "tools with no project MCP config own nothing for it"
       (is (not-any? #(= [:mcps :example/slack] (rest %))
-                    (filter #(not= :claude (first %)) inv))))
+                    (remove #(common/project-mcp-tools (first %)) inv))))
     (testing "global servers stay plain"
       (is (contains? inv [:claude :mcps :searxng])))
     (testing "the manifest key keeps the namespace apart from the bare name"
       (is (not= (state/key-for :claude :mcps :example/slack)
                 (state/key-for :claude :mcps :slack))))))
+
+(deftest codex-places-project-mcps-in-the-project-config
+  (let [root (temp-dir)
+        proj (str root "/plain")
+        user (str root "/user.toml")
+        file (str proj "/.codex/config.toml")
+        compile (fn [rows] (config/normalize {:mcps rows} "/tmp/agents.edn"))
+        row {:id :dbx :command "/bin/dbx" :args ["--x"] :env {:K "v"} :in proj :acli [:codex]}]
+    (fs/create-dirs proj)
+    (with-redefs [codex/config-file user
+                  codex/mcp-list (constantly {})]
+      (testing "a directory with no repository below it is its own target"
+        (is (= [proj] (scope/targets (scope/selector proj)))))
+      (let [cfg (compile [row])
+            ops (vec (codex/plan cfg state/empty-state))
+            create (first (filter #(= :create (:action %)) ops))]
+        (testing "the project row plans into <project>/.codex/config.toml, not user-wide"
+          (is (= file (:target create)))
+          (is (= :mcps (:kind create)))
+          (is (= "dbx" (name (:id create))))
+          (is (not-any? #(and (= :mcps (:kind %)) (= user (:target %))) ops)))
+        (testing "an untrusted project is reported: codex would ignore the file"
+          (is (some #(and (:warn %) (str/includes? (str (:summary %)) "not trusted")) ops)))
+        ((:exec! create))
+        (is (= {"command" "/bin/dbx" "args" ["--x"] "env" {"K" "v"}}
+               (get-in (toml/read-toml file) ["mcp_servers" "dbx"])))
+        (testing "a second plan converges"
+          (is (empty? (filter #(and (= :mcps (:kind %)) (plan/mutating? %))
+                              (codex/plan cfg state/empty-state)))))
+        (testing "a declared trust silences the warning"
+          (let [cfg (config/normalize {:mcps [row] :trust [{:in proj :acli [:codex]}]} "/tmp/agents.edn")]
+            (is (not-any? #(str/includes? (str (:summary %)) "not trusted") (codex/plan cfg state/empty-state)))))
+        (testing "a server dropped from agents.edn is removed from the project file"
+          (let [st (state/record state/empty-state :codex :mcps (:id create) {:project-path proj})
+                prune (filter #(= :delete (:action %)) (codex/plan (compile []) st))]
+            (is (= [file] (map :target prune)))
+            (doseq [o prune] ((:exec! o)))
+            (is (nil? (get-in (toml/read-toml file) ["mcp_servers" "dbx"])))))
+        (testing "a user-wide row stays user-wide"
+          (let [ops (codex/plan (compile [(assoc row :in :all)]) state/empty-state)]
+            (is (not-any? #(= file (:target %)) ops))
+            (is (some #(and (= :mcps (:kind %)) (= user (:target %))) ops))))))
+    (testing "a selector naming nothing on disk warns instead of placing nothing silently"
+      (let [cfg (compile [(assoc row :in (str root "/missing"))])]
+        (is (some #(and (= :warn (:level %)) (= [:mcps :dbx :in] (vec (:where %))))
+                  (config/structural-findings cfg)))))))
 
 (deftest a-project-server-never-uninstalls-its-user-wide-namesake
   ;; the prune loop reads ids out of the manifest: if `:example/slack` were

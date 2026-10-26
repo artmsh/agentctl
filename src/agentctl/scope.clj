@@ -141,7 +141,10 @@
 (defn targets [s]
   (if (keyword? s) []
       (let [denies (map #(subs % 1) (filter #(str/starts-with? % "!") s))]
-        (->> s (remove #(str/starts-with? % "!")) (mapcat repositories) distinct
+        ;; a directory holding no repository is the place the user named
+        (->> s (remove #(str/starts-with? % "!"))
+             (mapcat #(or (not-empty (repositories %)) (when (fs/directory? %) [%])))
+             distinct
              (remove #(some (fn [d] (under? d %)) denies)) sort vec))))
 (defn matches? [s p]
   (and (vector? s)

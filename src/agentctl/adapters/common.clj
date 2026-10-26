@@ -91,7 +91,7 @@
 
 (def project-mcp-tools
   "Tools with a project-level MCP config. Everything else is user-wide only."
-  #{:claude})
+  #{:claude :codex})
 
 (def project-skill-tools
   "Tools with a project-level skills directory. The rest read skills only from
@@ -130,7 +130,7 @@
 
 (defn project-scope-skip-ops
   "Report, rather than silently drop, project-scoped servers a tool cannot host.
-   Only claude has a project-level MCP config; the rest are user-wide only."
+   Only `project-mcp-tools` have a project-level MCP config."
   [cfg tool]
   (for [[pid proj] (:projects cfg)
         ;; a project that does not target this tool has nothing to skip
