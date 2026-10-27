@@ -545,6 +545,44 @@ rides on the models that belong to it instead of forcing a second provider row
 whose only difference is one header value. `llm` has no provider-level header
 field, so the provider's headers are merged onto each of its models there.
 
+A model may also declare what it can do. A custom id or alias is nothing a
+tool can look up, so without this pi treats it as text-only, without thinking,
+at its generic 128K context / 16K output:
+
+```clojure
+:sw {:url "https://sw.example" :api "anthropic-messages"
+     :models [{:id "opus-5-5"
+               :reasoning true
+               :input [:text :image]
+               :context-window 1000000
+               :max-tokens 128000
+               :cost {:input 5 :output 25 :cacheRead 0.5 :cacheWrite 6.25}
+               :thinking-level-map {:minimal nil :xhigh "xhigh"}
+               :compat {:forceAdaptiveThinking true}}]}
+```
+
+| DSL key | pi `models.json` field | Checked |
+|---|---|---|
+| `:reasoning` | `reasoning` | `true` / `false` |
+| `:input` | `input` | non-empty, of `text` and `image` |
+| `:context-window` | `contextWindow` | positive integer |
+| `:max-tokens` | `maxTokens` | positive integer |
+| `:cost` | `cost` | `input`, `output`, `cacheRead`, `cacheWrite` numbers (USD per 1M tokens); `tiers` passed through |
+| `:thinking-level-map` | `thinkingLevelMap` | levels `off` … `max`; value a string, a number, or `nil` (level unsupported) |
+| `:compat` | `compat` | a map, passed through; `forceAdaptiveThinking` must be boolean |
+
+pi's own spelling (`:contextWindow`, …) is accepted as well, though not both for
+one field. Nested maps are pi's own and are written as given. `false`, and
+`nil` inside a map, are declarations and are written; a field left out is
+left alone, so whatever pi already stores for that model — a hand-set value,
+`inputLimits`, `samplingParams` — survives an apply. A key agentctl does not
+know is reported by `validate` rather than dropped without a word. omp and
+llm get no capability fields; their plans say so. The values are yours to know:
+agentctl checks shapes, not what an upstream route really offers.
+
+A provider's `:overrides` is written as pi's `modelOverrides` (and omp's), for
+changing built-in models in place.
+
 ### Secret references
 
 | Form | Meaning |
