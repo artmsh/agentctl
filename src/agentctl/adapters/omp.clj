@@ -108,7 +108,8 @@
        (let [cur (get-in (u/read-yaml models-file) [:providers (keyword (u/kw->str id))])
              {:keys [status message]} (refs/resolve-ref (:key p))]
          (remove nil?
-                 [(when (and (:key p) (not= :ok status))
+                 [(some-> (common/caps-not-written-op tool id p) plan/op)
+                  (when (and (:key p) (not= :ok status))
                     (plan/op {:action :noop :tool tool :kind :providers :id id :warn true
                               :summary (str "key " (refs/describe (:key p)) " unresolved (" (or message (name status))
                                             ") — existing credential left untouched")}))

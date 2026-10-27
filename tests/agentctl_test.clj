@@ -4,6 +4,7 @@
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
             [agentctl.adapters.llm :as llm]
+            [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
             [agentctl.core :as core]
@@ -352,6 +353,80 @@
       (let [only-anthropic (assoc p :api ["anthropic-messages"])]
         (is (nil? (common/provider-dialect only-anthropic llm/dialects)))
         (is (true? (:warn (common/no-dialect-op :llm :router only-anthropic))))))))
+
+;; an alias is nothing pi can look up, so what it can do has to be declared
+(def caps-config
+  {:extra-providers
+   {:sw {:url "https://sw.example" :api "anthropic-messages" :tools [:pi :omp]
+         :overrides {"vendor/base" {:maxTokens 64000}}
+         :models [{:id "opus-5-5" :reasoning true :input [:text :image]
+                   :context-window 1000000 :max-tokens 128000
+                   :cost {:input 5 :output 25 :cacheRead 0.5 :cacheWrite 6.25}
+                   :thinking-level-map {:minimal nil :high "high" :xhigh "xhigh"}
+                   :compat {:forceAdaptiveThinking true}}
+                  {:id "sonnet-5-5" :reasoning false :contextWindow 200000}]}}})
+
+(deftest model-capabilities-normalize-and-validate
+  (let [cfg (config/normalize caps-config "/tmp/agents.edn")
+        [opus sonnet] (get-in cfg [:providers :sw :models])]
+    (testing "declared capabilities are keyed by pi's own field names"
+      (is (= {:reasoning true :input ["text" "image"] :contextWindow 1000000 :maxTokens 128000
+              :cost {:input 5 :output 25 :cacheRead 0.5 :cacheWrite 6.25}
+              :thinkingLevelMap {:minimal nil :high "high" :xhigh "xhigh"}
+              :compat {:forceAdaptiveThinking true}}
+             (:caps opus))))
+    (testing "false is a declaration; the native spelling is accepted"
+      (is (= {:reasoning false :contextWindow 200000} (:caps sonnet))))
+    (testing "a well-formed declaration has nothing to report"
+      (is (empty? (filter #(= :models (get (:where %) 2)) (config/structural-findings cfg))))))
+  (let [msgs (fn [model]
+               (->> (config/structural-findings
+                     (config/normalize {:extra-providers {:p {:url "http://x" :models [model]}}} "x"))
+                    (filter #(= [:providers :p :models "m"] (:where %)))
+                    (map (juxt :level :message))))]
+    (testing "an unknown field is reported, not silently dropped"
+      (is (some (fn [[l m]] (and (= :warn l) (str/includes? m ":vision"))) (msgs {:id "m" :vision true}))))
+    (testing "shapes are checked"
+      (is (seq (msgs {:id "m" :reasoning "yes"})))
+      (is (seq (msgs {:id "m" :input [:text :audio]})))
+      (is (seq (msgs {:id "m" :context-window -1})))
+      (is (seq (msgs {:id "m" :cost {:input 1}})))
+      (is (seq (msgs {:id "m" :thinking-level-map {:turbo "x"}})))
+      (is (seq (msgs {:id "m" :compat {:forceAdaptiveThinking "on"}})))
+      (is (seq (msgs {:id "m" :max-tokens 1 :maxTokens 2}))))))
+
+(deftest pi-writes-model-capabilities-and-converges
+  (let [dir (temp-dir) f (str dir "/models.json") yml (str dir "/models.yml")]
+    ;; an unrelated provider, and a native field pi stores that the DSL leaves alone
+    (u/write-json! f {:providers {:other {:baseUrl "http://o" :models [{:id "x"}]}
+                                  :sw {:models [{:id "opus-5-5" :inputLimits {:maxRequestBytes 1000}}]}}})
+    (with-redefs [pi/models-file f omp/models-file yml]
+      (let [cfg (config/normalize caps-config "/tmp/agents.edn")
+            ops (pi/provider-ops cfg)]
+        (doseq [op ops] ((:exec! op)))
+        (let [written (json/parse-string (slurp f))
+              sw (get-in written ["providers" "sw"])
+              [opus sonnet] (get sw "models")]
+          (testing "capabilities land on the model, false and nil included"
+            (is (= true (get opus "reasoning")))
+            (is (= ["text" "image"] (get opus "input")))
+            (is (= 1000000 (get opus "contextWindow")))
+            (is (= 128000 (get opus "maxTokens")))
+            (is (= 6.25 (get-in opus ["cost" "cacheWrite"])))
+            (is (contains? (get opus "thinkingLevelMap") "minimal"))
+            (is (nil? (get-in opus ["thinkingLevelMap" "minimal"])))
+            (is (= true (get-in opus ["compat" "forceAdaptiveThinking"])))
+            (is (= false (get sonnet "reasoning"))))
+          (testing ":overrides is applied as modelOverrides"
+            (is (= 64000 (get-in sw ["modelOverrides" "vendor/base" "maxTokens"]))))
+          (testing "native fields and unrelated providers survive"
+            (is (= 1000 (get-in opus ["inputLimits" "maxRequestBytes"])))
+            (is (= "http://o" (get-in written ["providers" "other" "baseUrl"])))))
+        (testing "a second pass has nothing to do"
+          (is (empty? (filter plan/mutating? (pi/provider-ops cfg)))))
+        (testing "omp has nowhere to put them and says so"
+          (is (some #(and (:warn %) (str/includes? (str (:summary %)) "not written for omp"))
+                    (omp/provider-ops cfg))))))))
 
 (deftest structural-checks-catch-dangling-references
   (let [cfg (config/normalize sample-config "/tmp/agents.edn")
