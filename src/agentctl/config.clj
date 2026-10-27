@@ -274,6 +274,39 @@
               :git (str u/home "/.agents/skill-packs/" (name id))
               nil)})))
 
+(def model-caps
+  "What a model can do, declared rather than detected: a custom id or alias
+   is nothing a tool can look up, so without these it falls back to text-only,
+   no thinking and generic limits. DSL key -> pi's field for it, which is also
+   accepted as a spelling. Nested maps (`:cost`, `:thinking-level-map`,
+   `:compat`) are pi's own and pass through as written."
+  {:reasoning :reasoning
+   :input :input
+   :context-window :contextWindow
+   :max-tokens :maxTokens
+   :cost :cost
+   :thinking-level-map :thinkingLevelMap
+   :compat :compat})
+
+(def model-caps-tools
+  "Tools that write `model-caps`; every other provider tool says it does not."
+  #{:pi})
+
+(def ^:private known-model-keys
+  (into #{:id :name :api :url :headers} cat model-caps))
+
+(defn- model-caps-of
+  "Declared capabilities. Presence is what counts: `false` is a declaration
+   (and so is nil inside a nested map — pi reads a nil thinking level as
+   unsupported); only a top-level nil means unset."
+  [m]
+  (not-empty
+   (into {} (keep (fn [[dsl native]]
+                    (let [v (if (contains? m dsl) (get m dsl) (get m native))]
+                      (when (some? v)
+                        [dsl (if (and (= :input dsl) (sequential? v)) (mapv u/kw->str v) v)]))))
+         model-caps)))
+
 (defn- norm-provider-model
   "A model is a bare id, or a map carrying what differs about it. The map form
    is what lets one provider entry serve two pools of the same host: pi, omp
@@ -287,7 +320,11 @@
       :name (:name m)
       :api (:api m)
       :url (:url m)
-      :headers (norm-headers (:headers m))})))
+      :headers (norm-headers (:headers m))
+      :caps (model-caps-of m)
+      ;; kept so validation can name a key it does not know: dropping one the
+      ;; user wrote, without a word, is how a model ends up quietly text-only
+      :decl-keys (set (keys m))})))
 
 (defn- norm-provider [id decl]
   (let [decl (or decl {})]
@@ -579,6 +616,63 @@
 
 ;; ---------------------------------------------------------------- structural check
 
+(def ^:private thinking-levels #{"off" "minimal" "low" "medium" "high" "xhigh" "max"})
+(def ^:private cost-keys #{"input" "output" "cacheRead" "cacheWrite"})
+
+(defn- model-cap-problems
+  "What is wrong with one model's declared capabilities, as messages. Shapes
+   only — whether an upstream route really has that window or that price is
+   the user's to know."
+  [{:keys [caps decl-keys]}]
+  (let [{:keys [reasoning input context-window max-tokens cost thinking-level-map compat]} caps]
+    (concat
+     (for [k (remove known-model-keys decl-keys)]
+       [:warn (str "model field " k " is not one agentctl knows — not written (known: "
+                   (str/join " " (sort (keys model-caps))) ")")])
+     (for [[dsl native] model-caps
+           :when (and (not= dsl native) (decl-keys dsl) (decl-keys native))]
+       [:error (str dsl " and " native " are the same field — keep one")])
+     (when (and (contains? caps :reasoning) (not (boolean? reasoning)))
+       [[:error ":reasoning must be true or false"]])
+     (when (and (contains? caps :input)
+                (not (and (sequential? input) (seq input) (every? #{"text" "image"} input))))
+       [[:error ":input must be a non-empty vector of \"text\" and \"image\""]])
+     (for [[k v] [[:context-window context-window] [:max-tokens max-tokens]]
+           :when (and (some? v) (not (pos-int? v)))]
+       [:error (str k " must be a positive integer")])
+     (for [[k v] [[:cost cost] [:thinking-level-map thinking-level-map] [:compat compat]]
+           :when (and (some? v) (not (map? v)))]
+       [:error (str k " must be a map")])
+     (when (map? cost)
+       (let [ks (set (map u/kw->str (keys cost)))]
+         (concat
+          (for [k (sort (remove (conj cost-keys "tiers") ks))]
+            [:error (str ":cost has no field " k)])
+          (for [k (sort (remove ks cost-keys))]
+            [:error (str ":cost needs " k " (input, output, cacheRead and cacheWrite are all required)")])
+          (for [[k v] cost :when (and (cost-keys (u/kw->str k)) (not (number? v)))]
+            [:error (str ":cost " (u/kw->str k) " must be a number")]))))
+     (when (map? thinking-level-map)
+       (for [[k v] thinking-level-map
+             :let [msg (cond (not (thinking-levels (u/kw->str k)))
+                             " is not a level (off minimal low medium high xhigh max)"
+                             (not (or (nil? v) (string? v) (number? v)))
+                             " must be a string, a number, or nil (unsupported)")]
+             :when msg]
+         [:error (str ":thinking-level-map " (u/kw->str k) msg)]))
+     (when (map? compat)
+       (for [[k v] compat
+             :when (and (= "forceAdaptiveThinking" (u/kw->str k)) (not (boolean? v)))]
+         [:error ":compat forceAdaptiveThinking must be true or false"])))))
+
+(defn- provider-model-findings [cfg]
+  (for [[id p] (:providers cfg)
+        [where p] (cons [[:providers id] p]
+                        (for [[t o] (:per-tool p)] [[:providers id :per-tool t] o]))
+        m (when (vector? (:models p)) (:models p))
+        [level msg] (model-cap-problems m)]
+    (finding level (conj where :models (:id m)) msg)))
+
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
     :settings :permissions :trust :hooks :extensions :#def})
@@ -647,6 +741,7 @@
                 "stdio MCP server needs :command (or :url for http) — an empty map declares nothing"))
      (for [[id p] (:providers cfg) :when (nil? (:url p))]
        (finding :error [:providers id] "provider needs :url"))
+     (provider-model-findings cfg)
      (for [[pid proj] (:projects cfg)
            mid (:mcp proj)
            :when (not (contains? (:mcps cfg) mid))]

@@ -291,7 +291,7 @@
                (f :api :edn :hint "one dialect, or a vector of them in preference order"
                   :suggest ["openai-completions" "responses" "anthropic-messages"])
                (f :headers :edn :hint "{\"x-header\" \"value or $ENV_VAR\"}")
-               (f :models :edn :hint ":all, [\"vendor/model\"], or [{:id .. :headers {..}}]")
+               (f :models :edn :hint ":all, [\"vendor/model\"], or [{:id .. :headers {..} :reasoning true :input [:text :image]}]")
                (f :overrides :edn) (f :tools :kw-set :of :providers) (f :per-tool :edn)]}
 
      {:key :providers :title "Providers (:providers)" :entry "provider" :id-kind :free
