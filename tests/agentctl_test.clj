@@ -4,7 +4,6 @@
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
             [agentctl.adapters.llm :as llm]
-            [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
             [agentctl.core :as core]
@@ -369,14 +368,14 @@
 (deftest model-capabilities-normalize-and-validate
   (let [cfg (config/normalize caps-config "/tmp/agents.edn")
         [opus sonnet] (get-in cfg [:providers :sw :models])]
-    (testing "declared capabilities are keyed by pi's own field names"
-      (is (= {:reasoning true :input ["text" "image"] :contextWindow 1000000 :maxTokens 128000
+    (testing "declared capabilities are kept under the DSL's keys"
+      (is (= {:reasoning true :input ["text" "image"] :context-window 1000000 :max-tokens 128000
               :cost {:input 5 :output 25 :cacheRead 0.5 :cacheWrite 6.25}
-              :thinkingLevelMap {:minimal nil :high "high" :xhigh "xhigh"}
+              :thinking-level-map {:minimal nil :high "high" :xhigh "xhigh"}
               :compat {:forceAdaptiveThinking true}}
              (:caps opus))))
-    (testing "false is a declaration; the native spelling is accepted"
-      (is (= {:reasoning false :contextWindow 200000} (:caps sonnet))))
+    (testing "false is a declaration; pi's spelling is accepted"
+      (is (= {:reasoning false :context-window 200000} (:caps sonnet))))
     (testing "a well-formed declaration has nothing to report"
       (is (empty? (filter #(= :models (get (:where %) 2)) (config/structural-findings cfg))))))
   (let [msgs (fn [model]
@@ -396,11 +395,11 @@
       (is (seq (msgs {:id "m" :max-tokens 1 :maxTokens 2}))))))
 
 (deftest pi-writes-model-capabilities-and-converges
-  (let [dir (temp-dir) f (str dir "/models.json") yml (str dir "/models.yml")]
+  (let [dir (temp-dir) f (str dir "/models.json")]
     ;; an unrelated provider, and a native field pi stores that the DSL leaves alone
     (u/write-json! f {:providers {:other {:baseUrl "http://o" :models [{:id "x"}]}
                                   :sw {:models [{:id "opus-5-5" :inputLimits {:maxRequestBytes 1000}}]}}})
-    (with-redefs [pi/models-file f omp/models-file yml]
+    (with-redefs [pi/models-file f]
       (let [cfg (config/normalize caps-config "/tmp/agents.edn")
             ops (pi/provider-ops cfg)]
         (doseq [op ops] ((:exec! op)))
@@ -424,9 +423,10 @@
             (is (= "http://o" (get-in written ["providers" "other" "baseUrl"])))))
         (testing "a second pass has nothing to do"
           (is (empty? (filter plan/mutating? (pi/provider-ops cfg)))))
-        (testing "omp has nowhere to put them and says so"
-          (is (some #(and (:warn %) (str/includes? (str (:summary %)) "not written for omp"))
-                    (omp/provider-ops cfg))))))))
+        (testing "omp has nowhere to put them and says so; pi does not"
+          (is (some #(str/includes? (:summary %) "not written for omp")
+                    (common/caps-not-written-ops cfg :omp)))
+          (is (empty? (common/caps-not-written-ops cfg :pi))))))))
 
 (deftest structural-checks-catch-dangling-references
   (let [cfg (config/normalize sample-config "/tmp/agents.edn")

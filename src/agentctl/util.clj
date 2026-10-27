@@ -211,9 +211,9 @@
   [v]
   (cond
     (keyword? v) (name v)
-    ;; id->str: a JSON key such as "vendor/model" reads back as a namespaced
-    ;; keyword, and must still compare equal to the string it was written from
-    (map? v) (into (sorted-map) (map (fn [[k x]] [(id->str k) (norm x)])) v)
+    ;; a JSON key such as "vendor/model" reads back as a namespaced keyword,
+    ;; and must still compare equal to the string it was written from
+    (map? v) (into (sorted-map) (map (fn [[k x]] [(key-str k) (norm x)])) v)
     (sequential? v) (mapv norm v)
     :else v))
 

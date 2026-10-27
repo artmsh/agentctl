@@ -277,10 +277,9 @@
 (def model-caps
   "What a model can do, declared rather than detected: a custom id or alias
    is nothing a tool can look up, so without these it falls back to text-only,
-   no thinking and generic limits. DSL key -> the tool-native field it is
-   written as. The native spelling is accepted too; nested maps (`:cost`,
-   `:thinking-level-map`, `:compat`) are the tool's own and pass through as
-   written."
+   no thinking and generic limits. DSL key -> pi's field for it, which is also
+   accepted as a spelling. Nested maps (`:cost`, `:thinking-level-map`,
+   `:compat`) are pi's own and pass through as written."
   {:reasoning :reasoning
    :input :input
    :context-window :contextWindow
@@ -289,20 +288,23 @@
    :thinking-level-map :thinkingLevelMap
    :compat :compat})
 
-(def ^:private model-base-keys #{:id :name :api :url :headers})
+(def model-caps-tools
+  "Tools that write `model-caps`; every other provider tool says it does not."
+  #{:pi})
 
-(def ^:private native->cap (into {} (map (fn [[k v]] [v k])) model-caps))
+(def ^:private known-model-keys
+  (into #{:id :name :api :url :headers} cat model-caps))
 
 (defn- model-caps-of
-  "Declared capabilities, keyed by their native field. Presence is what counts:
-   `false` is a declaration (and so is nil inside a nested map — pi reads a nil
-   thinking level as unsupported); only a top-level nil means unset."
+  "Declared capabilities. Presence is what counts: `false` is a declaration
+   (and so is nil inside a nested map — pi reads a nil thinking level as
+   unsupported); only a top-level nil means unset."
   [m]
   (not-empty
    (into {} (keep (fn [[dsl native]]
                     (let [v (if (contains? m dsl) (get m dsl) (get m native))]
                       (when (some? v)
-                        [native (if (and (= :input dsl) (sequential? v)) (mapv u/kw->str v) v)]))))
+                        [dsl (if (and (= :input dsl) (sequential? v)) (mapv u/kw->str v) v)]))))
          model-caps)))
 
 (defn- norm-provider-model
@@ -319,16 +321,10 @@
       :api (:api m)
       :url (:url m)
       :headers (norm-headers (:headers m))
-      :caps (when (map? m) (model-caps-of m))
-      ;; kept so validation can name them: dropping a key the user wrote,
-      ;; without a word, is how a model ends up quietly text-only
-      :unknown (when (map? m)
-                 (not-empty (vec (remove #(or (model-base-keys %) (model-caps %) (native->cap %))
-                                         (keys m)))))
-      :both-spellings (when (map? m)
-                        (not-empty (vec (for [[dsl native] model-caps
-                                              :when (and (not= dsl native) (contains? m dsl) (contains? m native))]
-                                          dsl))))})))
+      :caps (model-caps-of m)
+      ;; kept so validation can name a key it does not know: dropping one the
+      ;; user wrote, without a word, is how a model ends up quietly text-only
+      :decl-keys (set (keys m))})))
 
 (defn- norm-provider [id decl]
   (let [decl (or decl {})]
@@ -627,48 +623,47 @@
   "What is wrong with one model's declared capabilities, as messages. Shapes
    only — whether an upstream route really has that window or that price is
    the user's to know."
-  [{:keys [caps unknown both-spellings]}]
-  (let [{:keys [reasoning input contextWindow maxTokens cost thinkingLevelMap compat]} caps]
+  [{:keys [caps decl-keys]}]
+  (let [{:keys [reasoning input context-window max-tokens cost thinking-level-map compat]} caps]
     (concat
-     (for [k unknown]
+     (for [k (remove known-model-keys decl-keys)]
        [:warn (str "model field " k " is not one agentctl knows — not written (known: "
                    (str/join " " (sort (keys model-caps))) ")")])
-     (for [k both-spellings]
-       [:error (str k " and " (model-caps k) " are the same field — keep one")])
+     (for [[dsl native] model-caps
+           :when (and (not= dsl native) (decl-keys dsl) (decl-keys native))]
+       [:error (str dsl " and " native " are the same field — keep one")])
      (when (and (contains? caps :reasoning) (not (boolean? reasoning)))
        [[:error ":reasoning must be true or false"]])
      (when (and (contains? caps :input)
                 (not (and (sequential? input) (seq input) (every? #{"text" "image"} input))))
        [[:error ":input must be a non-empty vector of \"text\" and \"image\""]])
-     (for [[k v] [[:context-window contextWindow] [:max-tokens maxTokens]]
+     (for [[k v] [[:context-window context-window] [:max-tokens max-tokens]]
            :when (and (some? v) (not (pos-int? v)))]
        [:error (str k " must be a positive integer")])
-     (when (some? cost)
-       (if-not (map? cost)
-         [[:error ":cost must be a map of USD per million tokens"]]
-         (let [ks (set (map u/kw->str (keys cost)))]
-           (concat
-            (for [k (sort (remove (conj cost-keys "tiers") ks))]
-              [:error (str ":cost has no field " k)])
-            (for [k (sort (remove ks cost-keys))]
-              [:error (str ":cost needs " k " (input, output, cacheRead and cacheWrite are all required)")])
-            (for [[k v] cost :when (and (cost-keys (u/kw->str k)) (not (number? v)))]
-              [:error (str ":cost " (u/kw->str k) " must be a number")])))))
-     (when (some? thinkingLevelMap)
-       (if-not (map? thinkingLevelMap)
-         [[:error ":thinking-level-map must be a map of thinking level to provider value"]]
+     (for [[k v] [[:cost cost] [:thinking-level-map thinking-level-map] [:compat compat]]
+           :when (and (some? v) (not (map? v)))]
+       [:error (str k " must be a map")])
+     (when (map? cost)
+       (let [ks (set (map u/kw->str (keys cost)))]
          (concat
-          (for [k (keys thinkingLevelMap) :when (not (thinking-levels (u/kw->str k)))]
-            [:error (str ":thinking-level-map has no level " (u/kw->str k)
-                         " (levels: off minimal low medium high xhigh max)")])
-          (for [[k v] thinkingLevelMap :when (not (or (nil? v) (string? v) (number? v)))]
-            [:error (str ":thinking-level-map " (u/kw->str k) " must be a string, a number, or nil (unsupported)")]))))
-     (when (some? compat)
-       (if-not (map? compat)
-         [[:error ":compat must be a map"]]
-         (for [[k v] compat
-               :when (and (= "forceAdaptiveThinking" (u/kw->str k)) (not (boolean? v)))]
-           [:error ":compat forceAdaptiveThinking must be true or false"]))))))
+          (for [k (sort (remove (conj cost-keys "tiers") ks))]
+            [:error (str ":cost has no field " k)])
+          (for [k (sort (remove ks cost-keys))]
+            [:error (str ":cost needs " k " (input, output, cacheRead and cacheWrite are all required)")])
+          (for [[k v] cost :when (and (cost-keys (u/kw->str k)) (not (number? v)))]
+            [:error (str ":cost " (u/kw->str k) " must be a number")]))))
+     (when (map? thinking-level-map)
+       (for [[k v] thinking-level-map
+             :let [msg (cond (not (thinking-levels (u/kw->str k)))
+                             " is not a level (off minimal low medium high xhigh max)"
+                             (not (or (nil? v) (string? v) (number? v)))
+                             " must be a string, a number, or nil (unsupported)")]
+             :when msg]
+         [:error (str ":thinking-level-map " (u/kw->str k) msg)]))
+     (when (map? compat)
+       (for [[k v] compat
+             :when (and (= "forceAdaptiveThinking" (u/kw->str k)) (not (boolean? v)))]
+         [:error ":compat forceAdaptiveThinking must be true or false"])))))
 
 (defn- provider-model-findings [cfg]
   (for [[id p] (:providers cfg)

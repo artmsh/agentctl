@@ -1,6 +1,7 @@
 (ns agentctl.adapters.common
   "Helpers every adapter shares."
-  (:require [agentctl.refs :as refs]
+  (:require [agentctl.config :as config]
+            [agentctl.refs :as refs]
             [agentctl.util :as u]
             [clojure.string :as str]))
 
@@ -75,14 +76,17 @@
   [p]
   (when (vector? (:models p)) (:models p)))
 
-(defn caps-not-written-op
-  "A tool with nowhere to put model capabilities says so, once per provider,
-   instead of writing a model that quietly reads as text-only."
-  [tool id p]
-  (when-let [ms (seq (filter :caps (declared-models p)))]
-    {:action :noop :tool tool :kind :providers :id id :warn true
-     :summary (str "model capabilities on " (str/join ", " (map :id ms))
-                   " are not written for " (name tool) " — ignored")}))
+(defn caps-not-written-ops
+  "A provider tool with nowhere to put model capabilities says so, once per
+   provider, instead of writing a model that quietly reads as text-only."
+  [cfg tool]
+  (when-not (config/model-caps-tools tool)
+    (for [[id p] (for-tool-resources (:providers cfg) tool)
+          :let [ms (filter :caps (declared-models p))]
+          :when (seq ms)]
+      {:action :noop :tool tool :kind :providers :id id :warn true
+       :summary (str "model capabilities on " (str/join ", " (map :id ms))
+                     " are not written for " (name tool) " — ignored")})))
 
 (defn resolved-headers
   "Header map with every ref resolved. An unresolvable ref drops its header

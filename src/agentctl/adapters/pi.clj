@@ -1,6 +1,7 @@
 (ns agentctl.adapters.pi
   "pi adapter — plain JSON config files under ~/.pi/agent."
   (:require [agentctl.adapters.common :as common]
+            [agentctl.config :as config]
             [agentctl.extensions :as extensions]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
@@ -83,7 +84,7 @@
    field pi stores that the DSL leaves alone — a hand-set contextWindow,
    inputLimits, samplingParams — stays on the entry it was found on."
   [m cur]
-  (merge (apply dissoc cur [:id :name :api :baseUrl :headers])
+  (merge (dissoc cur :id :name :api :baseUrl :headers)
          (u/prune-nils
           {:id (:id m)
            :name (or (:name m) (:id m))
@@ -92,7 +93,7 @@
            :headers (common/resolved-headers (:headers m))})
          ;; not pruned: `:reasoning false` is a declaration, and so is a nil
          ;; thinking level inside the map
-         (:caps m)))
+         (update-keys (:caps m) config/model-caps)))
 
 (defn- provider-entry [p cur d]
   (let [{:keys [status value]} (refs/resolve-ref (:key p))

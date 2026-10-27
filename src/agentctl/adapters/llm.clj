@@ -97,9 +97,7 @@
                                                         (u/write-yaml! (models-file)
                                                                        (vec (concat others [d])))))}))))
                              desired)]
-         (remove nil? (concat [no-dialect key-op enumerate-warn
-                               (when d (some-> (common/caps-not-written-op tool id p) plan/op))]
-                              model-ops))))
+         (remove nil? (concat [no-dialect key-op enumerate-warn] model-ops))))
      (common/for-tool-resources (:providers cfg) tool))))
 
 (defn settings-ops [cfg]
