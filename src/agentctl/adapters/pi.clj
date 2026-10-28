@@ -1,6 +1,7 @@
 (ns agentctl.adapters.pi
   "pi adapter — plain JSON config files under ~/.pi/agent."
   (:require [agentctl.adapters.common :as common]
+            [agentctl.config :as config]
             [agentctl.extensions :as extensions]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
@@ -78,23 +79,34 @@
    speak is one a multi-dialect provider may offer it."
   #{"anthropic-messages" "anthropic" "openai-completions" "responses"})
 
-(defn- model-entry [m]
-  (u/prune-nils
-   {:id (:id m)
-    :name (or (:name m) (:id m))
-    :api (:api m)
-    :baseUrl (:url m)
-    :headers (common/resolved-headers (:headers m))}))
+(defn- model-entry
+  "The routing fields are ours outright; capabilities only where declared. A
+   field pi stores that the DSL leaves alone — a hand-set contextWindow,
+   inputLimits, samplingParams — stays on the entry it was found on."
+  [m cur]
+  (merge (dissoc cur :id :name :api :baseUrl :headers)
+         (u/prune-nils
+          {:id (:id m)
+           :name (or (:name m) (:id m))
+           :api (:api m)
+           :baseUrl (:url m)
+           :headers (common/resolved-headers (:headers m))})
+         ;; not pruned: `:reasoning false` is a declaration, and so is a nil
+         ;; thinking level inside the map
+         (update-keys (:caps m) config/model-caps)))
 
 (defn- provider-entry [p cur d]
-  (let [{:keys [status value]} (refs/resolve-ref (:key p))]
+  (let [{:keys [status value]} (refs/resolve-ref (:key p))
+        cur-models (into {} (map (juxt :id identity)) (:models cur))]
     (u/prune-nils
      {:baseUrl (:url d)
       :api (:api d)
       :headers (common/resolved-headers (:headers p))
       ;; an unresolvable ref (locked vault, unset env) must never wipe a working key
       :apiKey (if (= :ok status) value (:apiKey cur))
-      :models (some->> (common/declared-models p) (mapv model-entry))})))
+      :modelOverrides (:overrides p)
+      :models (some->> (common/declared-models p)
+                       (mapv #(model-entry % (get cur-models (:id %)))))})))
 
 (defn provider-ops [cfg]
   (mapcat
