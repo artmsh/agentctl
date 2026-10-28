@@ -188,6 +188,15 @@
                     :url base
                     :key-name (:api_key_name (first es))
                     :models (vec (sort (map :model_id es)))}))
+        ;; Native files can contain built-in provider overrides (for example a
+        ;; Pi apiKey without baseUrl). The DSL requires an endpoint; importing
+        ;; such a row would make the entire emitted config refuse to plan.
+        entries (into [] (keep (fn [{:keys [id tool url] :as entry}]
+                                 (if (str/blank? (str url))
+                                   (note! (str "skipped " (name tool) " provider " (name id)
+                                               " without a base URL — built-in provider overrides are not supported"))
+                                   entry)))
+                      entries)
         ;; llm entries are keyed by host, so fold them into the named provider
         ;; that serves the same endpoint instead of inventing a second provider
         by-url (into {} (for [e entries
@@ -397,8 +406,11 @@
       (seq packs)
       (assoc :skill-packs
              (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
-                   (for [[id decl] packs :let [k (source-key (:uri decl))]]
-                     [k (keyed-entry k id decl)])))
+                   (for [[id decl] packs
+                         :let [k (source-key (:uri decl))
+                               in (placements :skills id decl)]]
+                     [k (cond-> (keyed-entry k id decl)
+                          (not= :all in) (assoc :in in))])))
       (seq skills)
       (assoc :skills
              (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
@@ -413,12 +425,29 @@
   "Import emits literal selectors; it cannot infer a user's intended tree."
   [config]
   (if (scope/dsl? config) config
-      (let [resolved (:projects (config/normalize config "import"))
+      (let [normalized (config/normalize config "import")
+            resolved (:projects normalized)
             projects (into {} (for [[id p] (:projects config)]
                                 [id (assoc p :path (get-in resolved [id :path]))]))
             placements (fn [kind id decl]
-                         (let [ps (for [[_ p] projects :when (some #{id} (get p kind))] (:path p))]
-                           (if (or (= :global (:scope decl)) (empty? ps)) :all (vec ps))))]
+                         (let [ps (for [[_ p] resolved :when (contains? (get p kind) id)] (:path p))]
+                           (if (or (= :global (:scope decl)) (empty? ps)) :all (vec ps))))
+            ;; Legacy projects can name a skill without a declaration. Keep
+            ;; the pack that normalization resolved for it, and retain the
+            ;; inferred CLI selection for project skills and whole packs.
+            config (update config :skills
+                           #(into {} (for [[id s] (:skills normalized)
+                                           :let [decl (or (get % id) (select-keys s [:from :subdir :mode]))]]
+                                       [id (cond-> decl
+                                             (and (= :project (:scope s)) (not (or (:tools decl) (:for decl))))
+                                             (assoc :tools (vec (sort (:tools s)))))])))
+            config (update config :skill-packs
+                           #(into {} (for [[id decl] %
+                                           :let [tools (set (mapcat (comp keys :tools val)
+                                                                    (filter (fn [[_ p]] (contains? (:skills p) id)) resolved)))]]
+                                       [id (cond-> decl
+                                             (and (seq tools) (not (or (:tools decl) (:for decl))))
+                                             (assoc :tools (vec (sort tools))))])))]
         (merge
          (apply dissoc config [:executors :cli-code :projects :mcps :skills :skill-packs :providers :extra-providers :memory])
          {:settings (vec (concat
@@ -427,7 +456,8 @@
                           (for [[pid p] projects [t s] (when (map? (:executors p)) (:executors p))]
                             (assoc s :id (keyword (str (name pid) "-" (name t))) :tools [t] :in (:path p)))))
           :trust (vec (for [[id p] projects :when (some? (:trusted p))]
-                        {:id id :in (:path p) :trusted (:trusted p) :tools (:tools p)}))}
+                        {:id id :in (:path p) :trusted (:trusted p)
+                         :tools (vec (sort (get-in resolved [id :for-tools])))}))}
          (keyed-skills config placements)
          (into {} (for [kind [:mcps :providers :memory]
                         :let [rows (if (= kind :providers) (merge (:extra-providers config) (:providers config)) (get config kind))]

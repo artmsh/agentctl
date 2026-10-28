@@ -1347,6 +1347,27 @@
                                                 :http_headers {"X-Api-Key" "sk-test-secret"}}}})
         (is (empty? (codex/mcp-ops cfg state/empty-state)) "imported HTTP server converges")))))
 
+(deftest import-skips-provider-overrides-without-endpoints
+  (reset! imports/notes [])
+  (with-redefs [toml/read-toml (fn [_] {"model_providers" {"builtin" {"wire_api" "responses"}}})
+                u/read-yaml (fn [_] {:providers {:builtin {:apiKey "sk-omp-secret"}}})
+                u/read-json (fn [_] {:providers {:builtin {:apiKey "sk-pi-secret"}
+                                                :gateway {:baseUrl "https://example.com/v1"
+                                                          :api "openai-completions"}}})]
+    (let [providers (imports/scan-providers)
+          converted (imports/entity-config {:extra-providers providers})
+          cfg (config/normalize converted "import")]
+      (is (= #{:gateway} (set (keys providers))))
+      (is (= "https://example.com/v1" (get-in providers [:gateway :url]))
+          "custom providers still import")
+      (is (not-any? #(= :error (:level %)) (config/structural-findings cfg))
+          "an unrepresentable built-in override cannot invalidate the import")
+      (doseq [tool ["codex" "pi" "omp"]]
+        (is (some #(str/includes? % (str "skipped " tool " provider builtin without a base URL"))
+                  @imports/notes)))
+      (is (not (re-find #"sk-(pi|omp)-secret"
+                       (str (imports/render converted) @imports/notes)))))))
+
 (deftest legacy-import-conversion-resolves-project-parent
   (let [legacy {:projects {:sample {:parent "/tmp/agentctl-conversion"
                                     :executors #{:claude}
@@ -1358,7 +1379,33 @@
     (is (= "/tmp/agentctl-conversion/sample" (get-in converted [:trust 0 :in])))
     (is (= "/tmp/agentctl-conversion/sample" (get-in converted [:permissions 0 :in])))
     (is (= ["/tmp/agentctl-conversion/sample"] (get-in converted [:mcps 0 :in])))
+    (is (= [:claude] (get-in converted [:trust 0 :tools]))
+        "executor selection must not broaden trust to other agents")
     (is (empty? (:settings converted)) "executor selection alone is not a settings declaration")))
+
+(deftest legacy-import-conversion-keeps-project-skills
+  (let [dir (temp-dir)
+        repo (str dir "/repo")
+        pack (str dir "/kit")]
+    (fs/create-dirs (str repo "/.git"))
+    (doseq [skill ["review" "triage"]]
+      (fs/create-dirs (str pack "/skills/" skill))
+      (spit (str pack "/skills/" skill "/SKILL.md") "---\nname: skill\ndescription: Test.\n---\n"))
+    (doseq [wanted [[:review] [:kit] [:declared]]]
+      (let [legacy {:skill-packs {:kit {:uri (str "file://" pack)}}
+                    :skills (when (= wanted [:declared]) {:declared {:from :kit :subdir "review"}})
+                    :projects {:repo {:path repo :executors #{:claude} :skills wanted}}}
+            converted (imports/entity-config legacy)
+            cfg (config/normalize converted "import")
+            project (first (vals (:projects cfg)))
+            resolved (:skills (sources/project-skills cfg project))]
+        (is (= (if (= wanted [:kit]) #{:review :triage} (set wanted)) (set (keys resolved)))
+            (str "project skill references survive conversion: " wanted))
+        (is (= #{:claude} (:for-tools project))
+            "conversion retains the project's selected CLIs")
+        (when-not (= wanted [:kit])
+          (is (= #{:claude} (:tools (first (vals resolved)))))
+          (is (= :kit (:from (first (vals resolved))))))))))
 
 (deftest import-does-not-expand-a-trusted-parent-directory
   (let [parent (temp-dir) repo (str parent "/repo")]
