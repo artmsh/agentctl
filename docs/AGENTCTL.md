@@ -248,10 +248,22 @@ underscores; keyword and string keys both work. Codex validates the supported
 actions and shortcuts for the installed version. See the
 [official keymap reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-Codex CLI 0.157.1 has no bindable action for opening the model selector;
-`open_model` is rejected at startup. Use `/model` to open it. The keymap can
-only rebind actions Codex exposes, so `alt-t` cannot open that selector through
-this setting in that version.
+Codex CLI 0.165.0 rejects `open_model` in the `global` and `chat` contexts
+under strict configuration checking. Use `/model` to open the selector and
+`/keymap` to inspect the actions the installed release exposes. An accepted
+`codex mcp list --json` invocation is no longer proof that an action exists:
+unknown fields are ignored unless strict checking is enabled. Re-probe in a
+scratch `CODEX_HOME` without changing the real configuration:
+
+```sh
+probe_dir=$(mktemp -d)
+printf '[tui.keymap.global]\nopen_model = "alt-t"\n' > "$probe_dir/config.toml"
+CODEX_HOME="$probe_dir" codex app-server --strict-config --print-startup-config
+rm -rf "$probe_dir"
+```
+
+Repeat with `tui.keymap.chat`. Compare with `open_transcript`, a known valid
+action, before treating a failure as evidence about the model-picker binding.
 
 Only declared actions are updated. Undeclared bindings, other TUI settings,
 comments, and Codex-owned state are preserved. Omitting an action (or using an
@@ -498,7 +510,7 @@ different value, override just that field:
 ```
 
 `import` writes these automatically wherever it finds a resource configured
-differently per tool, which is what makes `import` → `apply` a no-op.
+differently per tool, preserving those differences in the emitted declaration.
 
 ### Fields agentctl does not model
 
@@ -766,13 +778,44 @@ mini-DSL and `:cmd` are surface syntax and do not survive a round trip — the
 result is semantically equal, not textually equal. Import over a hand-written
 file backs the original up first.
 
+Native built-in provider overrides without a base URL are skipped with an
+import note: the provider DSL requires an endpoint. Their native entries stay
+untouched; the emitted config must not contain a provider it cannot validate.
+
+Legacy conversion retains project trust's executor selection, whole-pack
+placements and bare skill names that resolve in a fetched pack. A pack that
+has not been fetched cannot resolve a bare skill name yet; fetch and validate
+the legacy configuration before converting it.
+
+Import does not currently reconstruct project MCPs, project skills, hooks or
+extensions from the environment. Replacing the source can prune owned
+resources omitted by the scanners. Even a merge that preserves existing
+declarations can discover additional trusted projects and bring their stale
+owned resources into the prune plan. Keep existing declarations and inspect
+`apply --all` before writing; a full-config `import` → `apply` fixpoint is not
+yet guaranteed.
+
+For a full-config live verification, first run `tests/run.sh`, confirm all six
+CLIs (`claude`, `codex`, `pi`, `omp`, `llm`, `agy`) are installed, and save private
+copies of the current source and ownership manifest. Prepare a separate
+candidate that preserves current declarations, compare any legacy additions,
+and run `validate -f <candidate>` plus `apply --all -f <candidate>`. Missing
+CLIs, unresolved credentials and unexpected removals leave verification
+incomplete. Only after reviewing that complete plan should the candidate
+become the source for a backed-up `apply!`; require a second read-only plan
+with no drift. Compare parsed configuration and plans for the import check,
+rather than text or sugar spelling.
+
 ## Tests
 
 ```
-tests/run.sh                       # everything, against a scratch HOME
-bb -cp src tests/agentctl_test.clj  # unit
-tests/test-agentctl.sh              # e2e
+tests/run.sh                       # unit, e2e and extensions, in a scratch home
 ```
+
+Use this runner even for local verification. It sets `AGENTCTL_HOME` before
+loading the code and supplies all six CLI stubs; running the unit file directly
+can skip adapters whose CLIs are missing and can write backups into the real
+home.
 
 The e2e suite drives the GUI as a real subprocess (step 16): it parses the URL
 the command prints, plans a buffer the file does not hold, asserts an
