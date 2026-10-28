@@ -124,6 +124,16 @@ agentctl gui         Edit the config in a browser beside its live dry run
 Use `--tool`, `--kind`, or `--project` to narrow an operation. Set
 `AGENTCTL_HOME` to point all managed paths at a scratch home for testing.
 
+Claude Code session retention can be declared in days:
+
+```clojure
+{:settings [{:cleanup-period-days 3650 :acli [:claude] :in :all}]}
+```
+
+This writes the integer `cleanupPeriodDays` to `~/.claude/settings.json`.
+`validate` checks its type and minimum against the cached SchemaStore schema;
+use `validate --deep` to fetch the current schema.
+
 ### Where you run it is a scope
 
 `apply` and `apply!` read the working directory, because standing in a project

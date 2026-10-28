@@ -396,6 +396,33 @@
   ;; the value is the whole credential while the key name says nothing about it
   (is (refs/credential? "Authorization" "Bearer sk-live-abcdefgh")))
 
+;; ---------------------------------------------------------------- claude retention
+
+(deftest claude-cleanup-period-days-applies-and-round-trips
+  (let [f (str (temp-dir) "/settings.json")
+        cfg (config/normalize
+             {:settings [{:cleanup-period-days 3650 :acli [:claude] :in :all}]} nil)]
+    (u/write-json! f {:model "sonnet"})
+    (with-redefs [claude/settings-file f]
+      (let [ops (vec (claude/settings-ops cfg))
+            retention (first (filter #(= :cleanup-period-days (:id %)) ops))]
+        (is (= {:model "sonnet"} (u/read-json f)) "planning does not write")
+        (is (not-any? :warn ops) "retention is supported")
+        (is (= :create (:action retention)))
+        (is (= ["cleanupPeriodDays"] (:path retention)))
+        (is (= [{:key :cleanupPeriodDays :before nil :after 3650}] (:diffs retention)))
+        (doseq [op ops :when (plan/mutating? op)] ((:exec! op))))
+      (is (= 3650 (:cleanupPeriodDays (u/read-json f))))
+      (is (= "sonnet" (:model (u/read-json f))) "unmanaged settings survive")
+      (is (every? #(and (= :noop (:action %)) (not (:warn %)))
+                  (claude/settings-ops cfg)) "second plan is converged")
+      (let [settings (select-keys (imports/scan-settings) [:claude])
+            imported (config/normalize
+                      (imports/entity-config {:executors settings}) nil)]
+        (is (= 3650 (get-in settings [:claude :cleanup-period-days])))
+        (is (every? #(and (= :noop (:action %)) (not (:warn %)))
+                    (claude/settings-ops imported)) "import round-trips without drift")))))
+
 ;; ---------------------------------------------------------------- codex keymap
 
 (deftest codex-keymap-preserves-unmanaged-settings-and-converges
@@ -480,6 +507,34 @@
   (is (seq (validate-value {} {:pattern "^a.*"} "bbc" [])))
   (is (seq (validate-value {} {:minLength 3} "ab" [])))
   (is (empty? (validate-value {} {:minLength 3} "abc" []))))
+
+(deftest schema-minimum
+  (doseq [minimum [0 1 2.5]]
+    (let [schema {:minimum minimum}]
+      (is (empty? (validate-value {} schema minimum [])) "minimum is inclusive")
+      (is (empty? (validate-value {} schema (+ minimum 1) [])))
+      (is (= [{:path ["value"] :message (str "less than minimum " minimum)}]
+             (validate-value {} schema (- minimum 1) ["value"])))
+      (is (empty? (validate-value {} schema "text" [])) "minimum only applies to numbers"))))
+
+(deftest claude-cleanup-period-days-schema-validation
+  (let [f (str (temp-dir) "/settings.json")
+        cfg (config/normalize
+             {:settings [{:cleanup-period-days 3650 :acli [:claude] :in :all}]} nil)
+        ;; Shape published by SchemaStore; validation follows the schema's bound.
+        schema {:properties {:cleanupPeriodDays {:type "integer" :minimum 1}}}]
+    (with-redefs [claude/settings-file f
+                  validate/settings-schema (constantly schema)]
+      (doseq [days [1 3650]]
+        (u/write-json! f {:cleanupPeriodDays days})
+        (is (= [:ok] (mapv :level (validate/check-claude-settings cfg {})))))
+      (doseq [days [-1 0 1.5 "3650"]]
+        (u/write-json! f {:cleanupPeriodDays days})
+        (let [[finding] (validate/check-claude-settings cfg {})]
+          (is (= :error (:level finding)) (pr-str days))
+          (is (= ["cleanupPeriodDays"] (get-in finding [:data :paths])))))
+      (is (= [:warn] (mapv :level (validate/check-claude-settings (config/normalize {} nil) {})))
+          "unmanaged violations remain warnings"))))
 
 (deftest schema-required-and-additional-properties
   (let [schema {:properties {:a {:type "string"}} :required ["a"] :additionalProperties false}]

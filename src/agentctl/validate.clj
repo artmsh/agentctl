@@ -204,8 +204,8 @@
     schema))
 
 (defn- validate-value
-  "Minimal JSON Schema subset: type, enum, const, pattern, minLength, required,
-   properties/additionalProperties, items, $ref, anyOf/oneOf. Every other
+  "Minimal JSON Schema subset: type, enum, const, pattern, minLength, minimum,
+   required, properties/additionalProperties, items, $ref, anyOf/oneOf. Every other
    keyword is ignored, not failed — a schema update must never start emitting
    false positives here. Returns a seq of {:path :message}."
   [root schema value path]
@@ -237,6 +237,8 @@
              [{:path path :message (str "does not match pattern " (trunc (:pattern schema)))}])
            (when (and (:minLength schema) (string? value) (< (count value) (:minLength schema)))
              [{:path path :message (str "shorter than minLength " (:minLength schema))}])
+           (when (and (number? (:minimum schema)) (number? value) (< value (:minimum schema)))
+             [{:path path :message (str "less than minimum " (:minimum schema))}])
            (when (map? value)
              (concat
               (mapcat (fn [rq]

@@ -30,6 +30,7 @@
    :theme :theme
    :effort :effortLevel
    :thinking :effortLevel
+   :cleanup-period-days :cleanupPeriodDays
    :auto-compact :autoCompactEnabled
    :ultracode :ultracode
    :enable-workflows :enableWorkflows
