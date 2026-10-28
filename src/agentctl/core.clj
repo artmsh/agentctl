@@ -356,9 +356,11 @@
                     cfg (:managed st))
         tool-ops (mapcat (fn [t]
                            (let [tcfg (tool-cfg cfg t)]
-                             ((get-in registry [t :plan])
-                              (if (and (:entity-dsl? cfg) (not (common/project-skill-tools t)))
-                                (update tcfg :skills #(into {} (filter (fn [[_ s]] (= :global (:scope s)))) %)) tcfg) st))) selected)
+                             (concat
+                              ((get-in registry [t :plan])
+                               (if (and (:entity-dsl? cfg) (not (common/project-skill-tools t)))
+                                 (update tcfg :skills #(into {} (filter (fn [[_ s]] (= :global (:scope s)))) %)) tcfg) st)
+                              (map plan/op (common/caps-not-written-ops tcfg t))))) selected)
         dups (skills-cli/global-duplicate-ops cfg tool-cfg selected
                                               {:claude claude/skills-dir :codex codex/skills-dir
                                                :antigravity antigravity/skills-dir})
