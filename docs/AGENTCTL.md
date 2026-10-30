@@ -595,6 +595,31 @@ agentctl checks shapes, not what an upstream route really offers.
 A provider's `:overrides` is written as pi's `modelOverrides` (and omp's), for
 changing built-in models in place.
 
+### `:hosts`
+
+```clojure
+{:hosts {:win {:ssh "user@example.com" ; ssh destination; options belong in ~/.ssh/config
+               :os :windows           ; :windows, :linux or :macos
+               :home "C:\\scratch"     ; optional: pins the remote home, ignoring CODEX_HOME
+               :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex]}}
+               :skills {[:gh "owner/skill"] {:acli [:codex]}}}}}
+```
+
+A host holds its own declarations instead of selecting from the top level. A source
+is a map key, so a pack placed in a local project for one tool could not otherwise
+also be placed user-wide on a host for another. Top-level declarations stay local and
+host ones never reach a local plan.
+
+A host has no projects: `:in` is `:all` (or `:none` on a pack that a `[pack "skill"]`
+key names), and anything else is a config error, as is a non-keyed section. Host
+keys other than the ones above, and any tool but codex, are reported as not provisioned.
+
+The transport is one generated script per operation, sent on stdin. Nothing is spliced
+into the ssh command line, because Windows OpenSSH's `DefaultShell` may be cmd, PowerShell
+or WSL's bash. Hence `powershell.exe` with an `-EncodedCommand` bootstrap that reads
+stdin. Scripts are ASCII, with paths and contents in base64, since PowerShell 5.1 reads
+stdin in the OEM codepage. An operation that does not end with a final `OK` line failed.
+
 ### Secret references
 
 | Form | Meaning |
@@ -770,6 +795,10 @@ that cache and reports `unknown` if none exists yet. A violation in a key
 agentctl itself manages is an `error`; anything else in the file (it is
 otherwise hand-curated) is a `warn` and never fails the exit code.
 
+`HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
+case this machine's checks are skipped. A host that does not answer, or answers
+only in part, is `unknown`, and its drift is not reported as clean.
+
 ## Import is lossy w.r.t. sugar
 
 `import!` writes the canonical shape: `:command` + `:args`, explicit booleans,
@@ -809,8 +838,13 @@ rather than text or sugar spelling.
 ## Tests
 
 ```
-tests/run.sh                       # unit, e2e and extensions, in a scratch home
+tests/run.sh                       # unit, e2e, extensions and hosts, in a scratch home
 ```
+
+`tests/test-hosts.sh` runs the real POSIX scripts through a stub ssh
+(`AGENTCTL_SSH_CMD`). No runner has PowerShell, so the Windows scripts are unit-tested
+as text only and need a live pass against a Windows host, under a scratch `:home`,
+whenever they change.
 
 Use this runner even for local verification. It sets `AGENTCTL_HOME` before
 loading the code and supplies all six CLI stubs; running the unit file directly

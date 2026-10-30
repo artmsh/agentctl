@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stands in for ssh: `ssh-stub DEST COMMAND` runs COMMAND here, stdin attached.
+# The destination `unreachable` fails the way ssh does when it cannot connect.
+if [ "$1" = unreachable ]; then
+  echo "ssh: connect to host unreachable port 22: Connection refused" >&2
+  exit 255
+fi
+exec sh -c "$2"

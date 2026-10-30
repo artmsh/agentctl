@@ -17,6 +17,18 @@
 (defn save! [state]
   (u/write-text! path (with-out-str (pp/pprint (assoc state :version 2)))))
 
+(defn host-path
+  "A host's manifest. Kept apart from `path`: a local run reads every entry in
+   its manifest as something it put on this machine."
+  [host-id]
+  (str u/home "/.config/agentctl/hosts/" (name host-id) ".edn"))
+
+(defn load-host-state [host-id]
+  (or (u/read-edn (host-path host-id)) empty-state))
+
+(defn save-host! [host-id state]
+  (u/write-text! (host-path host-id) (with-out-str (pp/pprint (assoc state :version 2)))))
+
 (defn key-for [tool kind id] [tool kind (u/id->str id)])
 
 (defn managed? [state tool kind id]

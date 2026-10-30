@@ -589,10 +589,45 @@
 
 (declare normalize-resources)
 
+(def ^:private host-settings #{:ssh :os :home})
+(def host-sections
+  "What a host can declare so far; `validate` names anything else."
+  #{:skills :skill-packs})
+
+(defn- keyed-section? [v] (or (nil? v) (and (map? v) (every? vector? (keys v)))))
+
+(defn- norm-host
+  "A host's own declarations, in the keyed shape of the top-level sections. They
+   sit inside the host rather than selecting from the top level because a source
+   is a map key: a pack placed in a local project for one tool could not also be
+   placed user-wide on a host for another. Nothing here reaches a local plan.
+
+   A pack on a host defaults to `:in :all` — the top-level default of `:none`
+   exists for packs that projects then name, and a host has no projects."
+  [id decl source]
+  (let [places-only-all? (fn [section allowed]
+                           (every? #(contains? allowed (get (val %) :in :all)) (get decl section)))
+        sections? (and (keyed-section? (:skills decl)) (keyed-section? (:skill-packs decl))
+                       (places-only-all? :skills #{:all})
+                       (places-only-all? :skill-packs #{:all :none}))
+        body (when sections?
+               (-> (select-keys decl host-sections)
+                   (update :skill-packs #(into {} (map (fn [[k v]] [k (merge {:in :all} v)])) %))))]
+    (u/prune-nils
+     {:id id
+      :ssh (:ssh decl)
+      :os (:os decl)
+      :home (:home decl)
+      :sections-ok? sections?
+      :unsupported (vec (sort (remove (into host-settings host-sections) (keys decl))))
+      :cfg (normalize-resources (or body {}) source)})))
+
 (defn normalize [raw path & [load-findings]]
   ;; read off the file as written: extensions are placed for a whole machine,
   ;; so they take no part in the entity lowering below
-  (assoc (normalize-resources raw path load-findings) :extensions (norm-extensions (:extensions raw))))
+  (assoc (normalize-resources raw path load-findings)
+         :extensions (norm-extensions (:extensions raw))
+         :hosts (into {} (map (fn [[id decl]] [id (norm-host id decl path)])) (:hosts raw))))
 
 (defn- normalize-resources [raw path & [load-findings]]
   (if-not (scope/dsl? raw)
@@ -675,12 +710,37 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :settings :permissions :trust :hooks :extensions :#def})
+    :settings :permissions :trust :hooks :extensions :hosts :#def})
+
+(defn- host-findings
+  "A host's `:ssh` goes on an ssh command line and its name into a file name, so
+   neither is taken on trust."
+  [cfg]
+  (mapcat
+   (fn [[id {:keys [ssh os home sections-ok? unsupported]}]]
+     (let [where [:hosts id]]
+       (concat
+        (when-not (and (keyword? id) (re-matches #"[A-Za-z0-9][A-Za-z0-9_-]*" (name id)))
+          [(finding :error where "host name must be letters, digits, - and _")])
+        (when-not (and (string? ssh) (re-matches #"[^\s-][^\s]*" ssh))
+          [(finding :error (conj where :ssh) ":ssh must be an ssh destination, such as \"user@host\"")])
+        (when-not (#{:windows :linux :macos} os)
+          [(finding :error (conj where :os) ":os must be :windows, :linux or :macos")])
+        (when-not (or (nil? home) (string? home))
+          [(finding :error (conj where :home) ":home must be a path on the host")])
+        (when-not sections-ok?
+          [(finding :error where
+                    (str ":skills and :skill-packs on a host are keyed by source and placed :in :all"
+                         " — a host has no projects"))])
+        (for [k unsupported]
+          (finding :warn (conj where k) (str (name k) " is not provisioned on hosts yet — ignored"))))))
+   (:hosts cfg)))
 
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]
     (concat
      (:load-findings cfg)
+     (host-findings cfg)
      (for [{:keys [kind id decl]} (:entities cfg) :when (contains? decl :scope)]
        (finding :warn [kind id :scope] ":scope is deprecated; use :at :machine or :repo"))
      (for [{:keys [kind id in targets]} (:entities cfg)

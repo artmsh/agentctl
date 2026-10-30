@@ -8,6 +8,7 @@
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
             [agentctl.core :as core]
+            [agentctl.hosts :as hosts]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
@@ -372,6 +373,26 @@
 
 ;; ---------------------------------------------------------------- run
 
+(defn check-hosts
+  "Every declared host, or the one `--host` names."
+  [cfg {:keys [host] :as opts}]
+  (for [h (if host [(hosts/lookup cfg host)] (vals (:hosts cfg)))
+        [level where message] (hosts/check-host h (state/load-host-state (:id h)) opts)]
+    (f level where message)))
+
+(defn- summarize [findings]
+  (let [by-level (group-by :level findings)]
+    {:findings (vec findings)
+     :errors (count (:error by-level))
+     :warnings (count (:warn by-level))
+     :unknown (count (:unknown by-level))
+     :ok (count (:ok by-level))}))
+
+(defn run-host
+  "`validate --host`: the config's shape and that one host, not this machine."
+  [cfg opts]
+  (summarize (concat (config/structural-findings cfg) (check-hosts cfg opts))))
+
 (defn run [cfg opts]
   (let [deep? (:deep opts)
         st (state/load-state)
@@ -389,19 +410,15 @@
                          (check-config-secrets cfg)
                          [(if (seq drift)
                             (f :warn [:drift] (str (count drift) " pending change(s) — run `agentctl apply`"))
-                            (f :ok [:drift] "environment matches agents.edn"))])
-        by-level (group-by :level findings)]
-    {:findings (vec findings)
-     :errors (count (:error by-level))
-     :warnings (count (:warn by-level))
-     :unknown (count (:unknown by-level))
-     :ok (count (:ok by-level))}))
+                            (f :ok [:drift] "environment matches agents.edn"))]
+                         (check-hosts cfg opts))]
+    (summarize findings)))
 
 (defn- mark [level]
   (case level :ok "✓" :warn "!" :error "✗" :unknown "?" "·"))
 
 (def section-order
-  [:cli :vault :skill-packs :skills :mcps :providers :settings :projects :memory :hygiene :drift])
+  [:cli :vault :skill-packs :skills :mcps :providers :settings :projects :memory :hygiene :drift :hosts])
 
 (defn print-report [{:keys [findings errors warnings unknown ok]}]
   (doseq [[section fs] (sort-by (fn [[s _]]
