@@ -2174,6 +2174,28 @@
         (core/execute! prunes)
         (is (nil? (get-in (u/read-json runtime) [:projects (keyword repo) :mcpServers :demo])))))))
 
+(deftest awl-is-a-consumer-of-keyed-skill-sections
+  (let [placed (fn [v] (config/normalize {:skill-packs {[:uri "file:///tmp/none"] {:alias 'kit}}
+                                          :skills {['kit "wrap-up"] (assoc v :in :all)}} "test"))
+        tools #(get-in (placed %) [:skills :wrap-up :tools])
+        errors (fn [raw] (filter #(= :error (:level %))
+                                 (config/structural-findings (config/normalize raw "test"))))]
+    (testing "dropped from a selection, however it is spelled"
+      (is (= #{:claude} (tools {:acli [:claude :awl]})))
+      (is (= #{:claude} (tools {:tools [:claude :awl]}))))
+    (testing "a selection of awl alone is nobody, not everybody"
+      (doseq [v [{:acli [:awl]} {:acli :awl} {:tools [:awl]} {:tools :awl}]]
+        (is (= #{} (tools v)) (pr-str v))
+        (is (empty? (errors {:skills {[:uri "file:///tmp/s"] (assoc v :in :all)}})) (pr-str v))))
+    (testing "not part of the default selection"
+      (is (not (contains? (tools {}) :awl)))
+      (is (not-any? #{:awl} (config/tools-for :skills))))
+    (testing "an error on a kind awl does not read"
+      (let [[f :as fs] (errors {:mcps [{:id :m :cmd "x" :in :all :acli [:claude :awl]}]})]
+        (is (= 1 (count fs)))
+        (is (= [:mcps :m :tools] (:where f)))
+        (is (str/includes? (:message f) "awl reads only :skills and :skill-packs"))))))
+
 (deftest entity-settings-memory-and-hooks-prune
   (let [root (temp-dir) repo (str root "/repo") source (str root "/notes.md")
         settings (str root "/settings.json") runtime (str root "/runtime.json")]

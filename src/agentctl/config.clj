@@ -39,6 +39,13 @@
 
 (defn tools-for [kind] (filterv #(supports? % kind) all-tools))
 
+(defn tool-problem
+  "Why `t` is no tool to provision."
+  [t]
+  (if (scope/consumers t)
+    (str (name t) " reads only :skills and :skill-packs, and agentctl does not provision it")
+    (str "unknown tool " t)))
+
 (def default-path (str u/home "/.config/agents.edn"))
 
 ;; ---------------------------------------------------------------- findings
@@ -464,11 +471,15 @@
    A project that names no executors has said nothing about tools, and a config
    with no projects at all is still a config — neither narrows anything. But
    once a project does name its executors, the tools left unnamed are ones
-   nothing asked for, and agentctl has no business writing their files."
+   nothing asked for, and agentctl has no business writing their files. Entries
+   that all select nobody (`:acli [:awl]`) have said no tool, which is not the
+   silence of a config that declares nothing."
   [cfg]
-  (into (or (not-empty (:active-tools cfg)) (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
-                               #{} (:projects cfg)))
-            (set all-tools))
+  (into (if (seq (:entities cfg))
+          (:active-tools cfg)
+          (or (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
+                                 #{} (:projects cfg)))
+              (set all-tools)))
         ;; an extension names its CLI outright, with no project in between
         (mapcat :for-tools (vals (:extensions cfg)))))
 
@@ -755,7 +766,7 @@
      (for [{:keys [kind id decl]} (:entities cfg)
            t (let [ts (:tools decl)] (cond (nil? ts) [] (= ts :all) [] (keyword? ts) [ts] :else ts))
            :when (not (some #{t} all-tools))]
-       (finding :error [kind id :tools] (str "unknown tool " t)))
+       (finding :error [kind id :tools] (tool-problem t)))
      ;; :cli-code was the original spelling; still read, so an old file keeps
      ;; working, but it is not what import writes any more
      (when (contains? raw :cli-code)
@@ -777,12 +788,12 @@
            (finding (if (some #{t} all-tools) :warn :error) [:extensions id :acli]
                     (if (some #{t} all-tools)
                       (str (name t) " has no extensions agentctl can install — ignored")
-                      (str "unknown tool " t))))))
+                      (tool-problem t))))))
       (:extensions cfg))
      (for [k (keys raw) :when (not (known-top-keys k))]
        (finding :warn [k] (str "unknown top-level key " k " — ignored")))
      (for [t (keys (:tools cfg)) :when (not (some #{t} all-tools))]
-       (finding :error [:executors t] (str "unknown tool " t)))
+       (finding :error [:executors t] (tool-problem t)))
      ;; a project naming its executors is what puts a tool to work; settings for
      ;; a tool no project names are read, planned for nothing, and easy to
      ;; mistake for applied config

@@ -286,13 +286,15 @@
 
 (defn cloned-for-user?
   "A pack agentctl itself links from: placed user-wide, or the source of a
-   user-wide skill. A pack only projects use is fetched by the `skills` CLI.
-   An old-format config keeps every pack — a project's bare skill name is
-   resolved by scanning them."
+   user-wide skill, for some tool. A pack only projects use is fetched by the
+   `skills` CLI. An old-format config keeps every pack — a project's bare skill
+   name is resolved by scanning them."
   [cfg id]
   (or (not (:entity-dsl? cfg))
-      (some #(and (= :skill-packs (:kind %)) (= id (:id %)) (= :all (:in %))) (:entities cfg))
-      (some #(and (= id (:from %)) (= :global (:scope %))) (vals (:skills cfg)))))
+      (some #(and (= :skill-packs (:kind %)) (= id (:id %)) (= :all (:in %))
+                  (not= [] (get-in % [:decl :tools])))
+            (:entities cfg))
+      (some #(and (= id (:from %)) (= :global (:scope %)) (seq (:tools %))) (vals (:skills cfg)))))
 
 (defn pack-ops
   "Ops that fetch or update git-backed skill packs."
