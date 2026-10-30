@@ -60,7 +60,11 @@ selector and is unique by construction; the value holds placement and options.
   `SKILL.md`, or `skills/<id>`. A declared pack with the same URI is reused.
 - **`:acli`** selects agent CLIs: `:claude`/`:cc`, `:codex`, `:pi`, `:omp`,
   `:llm`, `:antigravity`/`:agy`. It is `:tools` with short names; the other
-  entity kinds accept it too.
+  entity kinds accept it too. `:awl` is valid on `:skills` and `:skill-packs`
+  only: awl reads `agents.edn` itself, so agentctl does not provision it, leaves
+  it out of the default tool set and of `-a`, and rejects `-t awl`. An entry
+  naming `:awl` alone plans nothing, not even a clone of its git pack; awl needs
+  another CLI's placement, or its own checkout under `~/.agents/skill-packs`.
 - **`:in`** is unchanged. Packs default to `:none`, skills to `:all`. A placed
   pack installs every skill it contains.
 - **Installs.** `:in :all` links into each tool's user directory. A

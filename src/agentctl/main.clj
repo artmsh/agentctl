@@ -293,12 +293,21 @@
                      :path (or (:file opts) config/default-path)
                      :open? (not (:no-open opts))))))
 
+(defn- check-tools!
+  "`-t` selects adapters by name, and a name without one has nothing to plan."
+  [{:keys [tools]}]
+  (doseq [t tools :when (not (some #{t} config/all-tools))]
+    (throw (ex-info (str "-t " (name t) ": " (config/tool-problem t)
+                         " (tools: " (str/join ", " (map name config/all-tools)) ")")
+                    {}))))
+
 (defn -main [& args]
   (let [{:keys [command help] :as opts} (parse-args args)]
     (cond
       (or help (nil? command)) (println usage)
       :else
       (try
+        (check-tools! opts)
         (when (and (:host opts) (not (#{"apply" "plan" "apply!" "validate" "state"} command)))
           (throw (ex-info (str command " does not take --host") {})))
         (case command

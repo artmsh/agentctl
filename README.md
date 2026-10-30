@@ -24,7 +24,11 @@ under `$HOME/projects` on each apply. Most sections are vectors; for example:
 
 `:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
 `[:uri "…"]`, or `[pack "skill"]` where `pack` is a pack's `:alias`. `:acli`
-selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`).
+selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`, `:awl`). `:awl`
+is valid on these two sections only: [awl](https://fg.jo/art/awl) reads this file
+itself, so agentctl does not provision it and the value only decides what awl
+takes. An entry naming `:awl` alone plans nothing, and a git pack is not cloned
+for it.
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in

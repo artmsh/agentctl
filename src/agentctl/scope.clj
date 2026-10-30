@@ -24,6 +24,19 @@
         (= :all v) :all
         :else (mapv #(get acli-aliases % %) (if (keyword? v) [v] v))))
 
+(def consumers
+  "CLIs that read `:skills` and `:skill-packs` out of agents.edn themselves. They
+   are valid `:acli` values there, but agentctl has nothing to write for them, so
+   `row` drops them and the tool model below it never sees one."
+  #{:awl})
+
+(defn- provisioned
+  "A row's tool selection without its consumers. A selection of consumers alone
+   comes out as `[]`, not nil, which would mean every tool."
+  [ts]
+  (let [xs (if (keyword? ts) [ts] ts)]
+    (if (and (coll? xs) (some consumers xs)) (vec (remove consumers xs)) ts)))
+
 (defn basename [s] (keyword (str (fs/file-name (str/replace (str s) #"/+$" "")))))
 (defn local-uri? [uri] (or (str/starts-with? uri "file://") (not (re-find #"^[a-z+]+://|^[^/]+@[^:/]+:" uri))))
 
@@ -51,7 +64,8 @@
   (when-not (or (nil? v) (map? v)) (throw (ex-info "keyed entry value must be a map" {:id id})))
   (let [v (or v {})]
     (cond-> (-> (dissoc v :acli) (assoc :id (if-let [a (:alias v)] (keyword (name a)) id)))
-      (contains? v :acli) (assoc :tools (acli (:acli v))))))
+      (contains? v :tools) (update :tools provisioned)
+      (contains? v :acli) (assoc :tools (provisioned (acli (:acli v)))))))
 
 (defn- pack-rows [packs]
   (vec (for [[k v] packs
@@ -264,4 +278,5 @@
                                         (ordered (filter #(some #{p} (:targets %)) es) p))) cfg paths)
         cfg (reduce (fn [c e] (if (= :skill-packs (:kind e))
                                 (assoc-in c [:skill-packs (:id e)] (apply dissoc (:decl e) metadata-keys)) c)) cfg es)]
-    {:raw cfg :entities es :active-tools (set (mapcat selected es))}))
+    ;; `:in :none` declares a source and places nothing, so it puts no tool to work
+    {:raw cfg :entities es :active-tools (set (mapcat selected (remove #(= :none (:in %)) es)))}))
