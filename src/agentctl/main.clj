@@ -3,8 +3,10 @@
   (:require [agentctl.config :as config]
             [agentctl.core :as core]
             [agentctl.gui :as gui]
+            [agentctl.hosts :as hosts]
             [agentctl.imports :as imports]
             [agentctl.plan :as plan]
+            [agentctl.remote :as remote]
             [agentctl.state :as state]
             [agentctl.util :as u]
             [agentctl.validate :as validate]
@@ -39,6 +41,8 @@
     "                       everything that project owns, whatever its kind"
     "  -A, --all            apply/apply!: ignore the working directory and plan the"
     "                       whole config (see SCOPE)"
+    "      --host NAME      apply/apply!/validate/state: act on a host declared under"
+    "                       :hosts, over SSH, instead of on this machine"
     "      --json           Machine-readable output"
     "  -v, --verbose        Show per-field diffs and target paths"
     "      --show-noop      Include unchanged / informational entries"
@@ -70,6 +74,7 @@
         "--replace" (recur (rest args) (assoc opts :replace true))
         ("-y" "--yes") (recur (rest args) (assoc opts :yes true))
         ("-A" "--all") (recur (rest args) (assoc opts :all true))
+        "--host" (recur (drop 2 args) (assoc opts :host (keyword (second args))))
         "--port" (recur (drop 2 args) (assoc opts :port (str (second args))))
         "--no-open" (recur (rest args) (assoc opts :no-open true))
         ("-h" "--help") (recur (rest args) (assoc opts :help true))
@@ -101,17 +106,88 @@
                     " — the projects under " (u/tilde path)))
        " (--all for the whole config)")))
 
-(defn cmd-apply [opts mutate?]
-  (let [cfg (load! opts)
-        st (state/load-state)
-        findings (config/structural-findings cfg)
+(defn- check-config!
+  "Refuse a config with errors; say what is merely odd about one without."
+  [cfg]
+  (let [findings (config/structural-findings cfg)
         errors (filter #(= :error (:level %)) findings)]
     (when (seq errors)
       (println "config errors — refusing to plan:")
       (doseq [f errors] (println "  ✗" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))
       (System/exit 1))
     (doseq [f findings :when (= :warn (:level f))]
-      (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))
+      (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))))
+
+(defn- confirm!
+  "Ask before a mutating run, unless told not to. Declining exits."
+  [opts changes]
+  (let [secretive (filter #(= :secret (:risk %)) changes)]
+    (when (seq secretive)
+      (println (format "\n⚠ %d change(s) write resolved secrets into tool config files."
+                       (count secretive))))
+    (when-not (:yes opts)
+      (print (format "\napply %d change(s)? [y/N] " (count changes)))
+      (flush)
+      (let [answer (str/lower-case (str/trim (or (read-line) "")))]
+        (when-not (contains? #{"y" "yes"} answer)
+          (println "aborted")
+          (System/exit 1))))))
+
+(defn cmd-apply-host
+  "`apply`/`apply!` for one declared host. The working directory says nothing
+   about another machine and `-p` has no project there to select, so neither
+   scopes this. An unreachable host raises out of here and exits 1: it can be
+   neither of the answers 0 (no drift) and 2 (drift) would give."
+  [opts mutate?]
+  (when (seq (:projects opts))
+    (throw (ex-info "--project does not apply with --host: hosts have no projects yet" {})))
+  (let [cfg (load! opts)
+        _ (check-config! cfg)
+        host (hosts/lookup cfg (:host opts))
+        st (state/load-host-state (:id host))
+        planned (hosts/plan-host host st opts)
+        ops (:ops planned)
+        changes (filter plan/mutating? ops)]
+    (if (:json opts)
+      (println (json/generate-string {:host (name (:id host))
+                                      :ops (map op->data ops)
+                                      :skipped (map name (:skipped planned))
+                                      :summary (plan/summary-line ops)}
+                                     {:pretty true}))
+      (do
+        (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
+        (when-let [missing (seq (:skipped planned))]
+          (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
+        (if (or (seq changes) (:show-noop opts) (some :warn ops))
+          (println (plan/render-plan ops opts))
+          (println "\nno changes — host matches agents.edn"))
+        (println)
+        (println (plan/summary-line ops))))
+    (cond
+      (not mutate?)
+      (System/exit (if (seq changes) 2 0))
+
+      (empty? changes)
+      (do (state/save-host! (:id host) (hosts/sync-host-state st planned [] []))
+          (System/exit 0))
+
+      :else
+      (do
+        (confirm! opts changes)
+        (let [{:keys [plan done failed]} (hosts/converge! cfg host st opts planned)]
+          (state/save-host! (:id host) (hosts/sync-host-state st plan done failed))
+          (println (format "\napplied %d change(s)%s"
+                           (count done)
+                           (if (seq failed) (str ", " (count failed) " failed") "")))
+          (doseq [f failed]
+            (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+          (println (str "backups on host: " (remote/backup-dir host (get-in plan [:inventory :home]))))
+          (System/exit (if (seq failed) 1 0)))))))
+
+(defn cmd-apply [opts mutate?]
+  (let [cfg (load! opts)
+        st (state/load-state)]
+    (check-config! cfg)
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
@@ -150,17 +226,8 @@
             (System/exit 0))
 
         :else
-        (let [secretive (filter #(= :secret (:risk %)) changes)]
-          (when (seq secretive)
-            (println (format "\n⚠ %d change(s) write resolved secrets into tool config files."
-                             (count secretive))))
-          (when-not (:yes opts)
-            (print (format "\napply %d change(s)? [y/N] " (count changes)))
-            (flush)
-            (let [answer (str/lower-case (str/trim (or (read-line) "")))]
-              (when-not (contains? #{"y" "yes"} answer)
-                (println "aborted")
-                (System/exit 1))))
+        (do
+          (confirm! opts changes)
           (let [{:keys [done failed]} (core/converge! cfg st opts ops)]
             ;; never claim ownership of a resource whose creation failed; on a
             ;; scoped run (-t/-k/-p) a data-carrying id (hooks) only gets its
@@ -180,7 +247,7 @@
 
 (defn cmd-validate [opts]
   (let [cfg (load! opts)
-        report (validate/run cfg opts)]
+        report (if (:host opts) (validate/run-host cfg opts) (validate/run cfg opts))]
     (if (:json opts)
       (println (json/generate-string report {:pretty true}))
       (validate/print-report report))
@@ -206,11 +273,11 @@
     (System/exit 0)))
 
 (defn cmd-state [opts]
-  (let [st (state/load-state)]
+  (let [st (if-let [h (:host opts)] (state/load-host-state h) (state/load-state))]
     (if (:json opts)
       (println (json/generate-string (u/norm (:managed st)) {:pretty true}))
       (do
-        (println (str "state: " (u/tilde state/path)))
+        (println (str "state: " (u/tilde (if-let [h (:host opts)] (state/host-path h) state/path))))
         (doseq [[[tool kind id] _] (sort-by (comp str key) (:managed st))]
           (println (format "  %-8s %-11s %s" (name tool) (name kind) id)))
         (println (format "\n%d managed resource(s)" (count (:managed st))))))
@@ -232,10 +299,12 @@
       (or help (nil? command)) (println usage)
       :else
       (try
+        (when (and (:host opts) (not (#{"apply" "plan" "apply!" "validate" "state"} command)))
+          (throw (ex-info (str command " does not take --host") {})))
         (case command
-          "apply" (cmd-apply opts false)
-          "plan" (cmd-apply opts false)
-          "apply!" (cmd-apply opts true)
+          "apply" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
+          "plan" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
+          "apply!" (if (:host opts) (cmd-apply-host opts true) (cmd-apply opts true))
           "validate" (cmd-validate opts)
           "import" (cmd-import opts false)
           "import!" (cmd-import opts true)

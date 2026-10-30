@@ -123,6 +123,8 @@ agentctl gui         Edit the config in a browser beside its live dry run
 
 Use `--tool`, `--kind`, or `--project` to narrow an operation. Set
 `AGENTCTL_HOME` to point all managed paths at a scratch home for testing.
+`--host NAME` runs `apply`, `apply!`, `validate` or `state` against a remote
+machine — see [Remote hosts](#remote-hosts).
 
 Claude Code session retention can be declared in days:
 
@@ -388,6 +390,44 @@ what the clone brought — one run, not two.
 Only Claude Code has a project-level skills directory. For Codex, Pi and OMP a
 project's declared skills are installed user-wide instead — that is the only
 place those tools read skills from — and are owned there.
+
+## Remote hosts
+
+A host is declared under `:hosts` with its own placements, and is only ever
+touched by a run that names it with `--host`. The far side needs OpenSSH and
+PowerShell (Windows) or `sh`, `base64` and `sha256sum`/`shasum` (Linux, macOS):
+no agentctl, Python or git.
+
+```clojure
+{:hosts {:win {:ssh "windows.example.com" :os :windows
+               :skill-packs {[:uri "file://$HOME/packs/shared"] {:acli [:codex]}}}}}
+```
+
+```text
+agentctl apply  --host win -t codex -k skills    # read-only; exit 0 clean, 2 drift
+agentctl apply! --host win                       # copy, back up, record ownership
+agentctl validate --host win                     # unreachable is reported as unknown
+agentctl state  --host win
+```
+
+`:os` picks the interpreter, and with it the home. On a Windows machine whose OpenSSH
+login shell is WSL, one destination reaches two separate codex installs: `:os :linux`
+provisions WSL's `~/.codex` and `:os :windows` the Windows `%USERPROFILE%\.codex`.
+Declare one host for each side you want provisioned; neither sees the other's skills.
+
+Host sections take the keyed `:skills` and `:skill-packs` forms, and a pack there
+defaults to `:in :all`. A source already placed at the top level can be placed
+again on a host, for different tools. Only codex's user-wide skills are provisioned
+so far: other tools and kinds are reported in the plan and by `validate`, never
+dropped silently. `:home` overrides the remote home, for a scratch tree.
+
+Skills are copied, not linked: sources are read on this machine (a git pack is
+fetched here) and sent over SSH. Drift is a per-file comparison of byte hashes,
+ignoring `.git`, `__pycache__` and `.DS_Store`; a file mode change alone is not
+drift. An identical copy already on the host is adopted without a write. What a run
+replaces or prunes moves to `.config/agentctl/backups/<stamp>` in the remote home,
+and ownership is kept per host in `~/.config/agentctl/hosts/<name>.edn`, apart from
+local state. An unreachable host exits 1 from `apply` and `apply!`.
 
 ## Reading a plan
 

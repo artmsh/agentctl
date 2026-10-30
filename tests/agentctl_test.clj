@@ -10,9 +10,11 @@
             [agentctl.edit :as edit]
             [agentctl.form :as form]
             [agentctl.gui :as gui]
+            [agentctl.hosts :as hosts]
             [agentctl.imports :as imports]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
+            [agentctl.remote :as remote]
             [agentctl.sources :as sources]
             [agentctl.scope :as scope]
             [agentctl.skills-cli :as skills-cli]
@@ -2451,6 +2453,135 @@
       (is (:entity-dsl? back) "the emitted shape reads back as the DSL")
       (is (= :mine (get-in back [:skills :wrap-up :from])))
       (is (= #{:codex} (get-in back [:skills :wrap-up :tools]))))))
+
+
+;; ---------------------------------------------------------------- hosts
+
+(defn- host-errors [decl]
+  (->> (config/structural-findings (config/normalize {:hosts {:win decl}} "/x"))
+       (filter #(= :error (:level %)))
+       (map :where)
+       set))
+
+(deftest a-host-declaration-is-checked-before-it-reaches-ssh
+  (is (empty? (host-errors {:ssh "user@example.com" :os :windows})))
+  (is ((host-errors {:os :windows}) [:hosts :win :ssh]))
+  (testing "an :ssh value that ssh would read as an option"
+    (is ((host-errors {:ssh "-oProxyCommand=x" :os :windows}) [:hosts :win :ssh]))
+    (is ((host-errors {:ssh "win lan" :os :windows}) [:hosts :win :ssh])))
+  (is ((host-errors {:ssh "example.com"}) [:hosts :win :os]))
+  (testing "a host has no projects to place anything in"
+    (is ((host-errors {:ssh "h" :os :linux
+                       :skill-packs {[:uri "file:///p"] {:in ["projects/x"]}}}) [:hosts :win]))
+    (is ((host-errors {:ssh "h" :os :linux :skills {:legacy {:path "/p"}}}) [:hosts :win]))))
+
+(deftest a-kind-a-host-cannot-take-is-named-not-dropped
+  (let [fs (config/structural-findings
+            (config/normalize {:hosts {:win {:ssh "h" :os :linux :mcps {:x {:url "http://x"}}}}} "/x"))]
+    (is (some #(and (= :warn (:level %)) (= [:hosts :win :mcps] (:where %))) fs))))
+
+(deftest host-declarations-stay-out-of-the-local-config
+  (let [pack [:uri "file:///p"]
+        local {:skill-packs {pack {:in ["projects/x"] :acli [:claude]}}}
+        with-host (assoc local :hosts {:win {:ssh "h" :os :windows
+                                             :skill-packs {pack {:acli [:codex]}}}})
+        a (config/normalize local "/x")
+        b (config/normalize with-host "/x")]
+    (testing "one source can be placed locally and on a host"
+      (is (= (dissoc a :raw :entity-raw :hosts) (dissoc b :raw :entity-raw :hosts))))
+    (testing "a pack on a host is placed without saying so"
+      (is (= :all (-> (get-in b [:hosts :win :cfg :entities]) first :in))))
+    (testing "and carries the host's tool selection, not the local one"
+      (is (= #{:codex} (get-in b [:hosts :win :cfg :skill-packs :p :tools]))))))
+
+(deftest an-unknown-host-is-an-error-that-names-the-declared-ones
+  (let [cfg (config/normalize {:hosts {:win {:ssh "h" :os :linux}}} "/x")]
+    (is (= :win (:id (hosts/lookup cfg :win))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"declared: win" (hosts/lookup cfg :nope)))))
+
+(deftest the-windows-bootstrap-survives-any-login-shell
+  (let [cmd (remote/remote-command {:os :windows})
+        encoded (last (str/split cmd #" "))
+        decoded (String. (.decode (java.util.Base64/getDecoder) ^String encoded) "UTF-16LE")]
+    (testing "powershell.exe, because WSL interop does not resolve the bare name"
+      (is (str/starts-with? cmd "powershell.exe ")))
+    (is (str/includes? decoded "[Console]::In.ReadToEnd()"))
+    (testing "no character bash or cmd would interpret"
+      (is (re-matches #"[A-Za-z0-9+/=]+" encoded))))
+  (is (= "sh -s" (remote/remote-command {:os :linux}))))
+
+(deftest a-windows-script-is-pure-ascii
+  ;; PowerShell 5.1 reads stdin in the OEM codepage, so one literal non-ASCII
+  ;; byte would write a differently named file
+  (let [script (atom nil)
+        host {:id :w :ssh "h" :os :windows}
+        ascii? #(every? (fn [c] (< (int c) 128)) %)]
+    (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
+      (remote/write-tree! host "skill" [{:rel "dïr/fïle ünï.md" :bytes (.getBytes "ünï" "UTF-8") :sha "00"}])
+      (is (ascii? @script))
+      (is (not (str/includes? @script "fïle")))
+      (is (str/includes? @script (remote/b64-str "dïr/fïle ünï.md"))))))
+
+(deftest a-file-name-cannot-climb-out-of-a-windows-skill
+  (doseq [bad ["..\\..\\x.bat" "C:x.bat" "a:b.txt" "dir/CON" "dir/nul.txt" "trail." "trail " "q?.md"]]
+    (testing bad (is (not (remote/windows-safe-rel? bad)))))
+  (doseq [good ["SKILL.md" "scripts/run it.sh" ".hidden" "a/b/blob [1].bin" "console.txt"]]
+    (testing good (is (remote/windows-safe-rel? good))))
+  (testing "write-tree! refuses before anything leaves this machine"
+    (with-redefs [remote/exec (fn [& _] (throw (Exception. "must not be reached")))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot exist on Windows"
+                            (remote/write-tree! {:os :windows :id :w} "s"
+                                                [{:rel "..\\x" :bytes (.getBytes "") :sha ""}]))))))
+
+(deftest an-inventory-tolerates-a-chatty-login-shell
+  (let [e #(remote/b64-str %)
+        inv (remote/parse-inventory
+             ["Welcome to Ubuntu" (str "H\t" (e "C:\\Users\\a")) (str "R\t" (e "C:\\Users\\a\\.codex\\skills"))
+              "T\tcodex\t1" "T\tpi\t0"
+              "S\talpha\tD" (str "M\talpha\t" (e "sub dir/ünï.md") "\tabc")
+              "S\tgone\tA" "S\tjn\tL" "OK"])]
+    (is (= "C:\\Users\\a" (:home inv)))
+    (is (= #{:codex} (:tools inv)))
+    (is (= {:state :dir :files {"sub dir/ünï.md" "abc"}} (get-in inv [:entries "alpha"])))
+    (is (= :absent (get-in inv [:entries "gone" :state])))
+    (is (= :link (get-in inv [:entries "jn" :state])))))
+
+(deftest a-skills-build-output-is-not-drift
+  (let [d (temp-dir)]
+    (fs/create-dirs (str d "/__pycache__"))
+    (fs/create-dirs (str d "/.git"))
+    (spit (str d "/SKILL.md") "x")
+    (spit (str d "/.hidden") "y")
+    (spit (str d "/__pycache__/a.pyc") "z")
+    (spit (str d "/.git/config") "z")
+    (spit (str d "/.DS_Store") "z")
+    (is (= [".hidden" "SKILL.md"] (mapv :rel (hosts/source-files d))))))
+
+(deftest hashes-are-of-bytes-not-of-decoded-text
+  ;; `path-sha256` hashes `slurp`ed text; a host hashes bytes, and a file that is
+  ;; not valid UTF-8 would make the two disagree forever
+  (let [d (temp-dir)]
+    (fs/write-bytes (str d "/b.bin") (byte-array [-1]))
+    (is (= "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89"
+           (:sha (first (hosts/source-files d)))))))
+
+(deftest a-failed-host-write-is-not-owned
+  (let [st (state/record {:managed {}} :codex :skills :old {})
+        planned {:desired {:a {:source "/a" :target "T\\a"} :b {:source "/b" :target "T\\b"}}
+                 :gone #{:vanished}}
+        failed [{:tool :codex :kind :skills :id :b}]
+        done [{:tool :codex :kind :skills :id :old :action :delete}]
+        out (hosts/sync-host-state (state/record st :codex :skills :vanished {}) planned done failed)]
+    (is (state/managed? out :codex :skills :a))
+    (is (not (state/managed? out :codex :skills :b)))
+    (is (not (state/managed? out :codex :skills :old)))
+    (is (not (state/managed? out :codex :skills :vanished)))))
+
+(deftest a-host-section-survives-import
+  (let [decl {:ssh "example.com" :os :windows :skill-packs {[:uri "file:///p"] {:acli [:codex]}}}
+        {:keys [config]} (imports/scan {:existing {:hosts {:win decl}}})]
+    (is (= decl (get-in config [:hosts :win])))
+    (is (str/includes? (imports/render config) ":hosts"))))
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))
