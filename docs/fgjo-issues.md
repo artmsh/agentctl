@@ -2,7 +2,7 @@
 
 Generated 2026-11-01 · instance `https://fg.jo` · account `art`
 
-**447 open issues** across 29 repositories (1575 total issues; 1128 closed).
+**445 open issues** across 29 repositories (1575 total issues; 1130 closed).
 
 ## By repository
 
@@ -14,11 +14,11 @@ Generated 2026-11-01 · instance `https://fg.jo` · account `art`
 | [art/house](https://fg.jo/art/house/issues) | 33 |
 | [art/clz](https://fg.jo/art/clz/issues) | 28 |
 | [art/screeps](https://fg.jo/art/screeps/issues) | 20 |
-| [art/agentctl](https://fg.jo/art/agentctl/issues) | 19 |
+| [art/agentctl](https://fg.jo/art/agentctl/issues) | 18 |
 | [art/infra](https://fg.jo/art/infra/issues) | 10 |
 | [art/polden](https://fg.jo/art/polden/issues) | 10 |
-| [art/switchyard](https://fg.jo/art/switchyard/issues) | 10 |
 | [art/awl](https://fg.jo/art/awl/issues) | 9 |
+| [art/switchyard](https://fg.jo/art/switchyard/issues) | 9 |
 | [art/income](https://fg.jo/art/income/issues) | 7 |
 | [art/tournament-arena](https://fg.jo/art/tournament-arena/issues) | 7 |
 | [art/experiments](https://fg.jo/art/experiments/issues) | 6 |
@@ -799,10 +799,8 @@ Generated 2026-11-01 · instance `https://fg.jo` · account `art`
 - [#53](https://fg.jo/art/screeps/issues/53) Open-issue audit 2026-09-20 — findings and burn-down plan
   · updated 2026-09-21
 
-### art/agentctl (19)
+### art/agentctl (18)
 
-- [#1](https://fg.jo/art/agentctl/issues/1) chore: commit the scope DSL / skills-CLI work, including the untracked files
-  · `kind/infra` `priority/high` `size/M` · updated 2026-09-21
 - [#2](https://fg.jo/art/agentctl/issues/2) fix: deleting a project from agents.edn leaks its project-scoped MCP entries
   · `area/claude` `kind/bug` `size/S` · updated 2026-09-21
 - [#3](https://fg.jo/art/agentctl/issues/3) fix: import drops Codex http_headers
@@ -886,29 +884,6 @@ Generated 2026-11-01 · instance `https://fg.jo` · account `art`
 - [#95](https://fg.jo/art/polden/issues/95) epic: migrate to Zig 0.17
   · updated 2026-10-08
 
-### art/switchyard (10)
-
-- [#87](https://fg.jo/art/switchyard/issues/87) Codex vault crossed-reply stall: identify what put the vault socket one reply behind
-  · `size/S` `status/blocked` · updated 2026-10-31
-- [#105](https://fg.jo/art/switchyard/issues/105) Add a gemini provider for an isolated paid Gemini API project
-  · `size/L` `status/blocked` · updated 2026-10-31
-- [#107](https://fg.jo/art/switchyard/issues/107) Verify gemini /models discovery, exact model IDs and native pagination
-  · `size/M` `status/blocked` · updated 2026-10-31
-- [#108](https://fg.jo/art/switchyard/issues/108) Add a native Antigravity Agent door through Gemini Interactions API
-  · `size/L` `status/blocked` · updated 2026-10-31
-- [#109](https://fg.jo/art/switchyard/issues/109) Verify artm.ua Pro quotas across AI Studio, Antigravity OAuth and Gemini API projects
-  · `size/M` `status/blocked` · updated 2026-10-31
-- [#110](https://fg.jo/art/switchyard/issues/110) Add multi-instance fault tolerance: compare storage designs and validate failover
-  · `size/L` · updated 2026-10-31
-- [#123](https://fg.jo/art/switchyard/issues/123) As a user I want to use claude code via anthropic provider
-  · `size/S` `status/blocked` · updated 2026-10-31
-- [#140](https://fg.jo/art/switchyard/issues/140) As a developer I want to brainstorm a no-disk mode in order to run on ax3
-  · `size/M` · updated 2026-10-31
-- [#151](https://fg.jo/art/switchyard/issues/151) test-log-ui: big-capture Lightpanda check fails (jtree null)
-  · updated 2026-11-01
-- [#152](https://fg.jo/art/switchyard/issues/152) Upstream openai-responses dialect (zenmux deepseek-v4.1-flash via /api/v1/responses)
-  · updated 2026-11-01
-
 ### art/awl (9)
 
 - [#4](https://fg.jo/art/awl/issues/4) Enter does not send after answer
@@ -929,6 +904,27 @@ Generated 2026-11-01 · instance `https://fg.jo` · account `art`
   · `size/S` · updated 2026-10-30
 - [#13](https://fg.jo/art/awl/issues/13) Split run() in main.zig further; one UTC stamp and one control-byte check
   · `size/M` · updated 2026-10-30
+
+### art/switchyard (9)
+
+- [#87](https://fg.jo/art/switchyard/issues/87) Codex vault crossed-reply stall: identify what put the vault socket one reply behind
+  · `size/S` `status/blocked` · updated 2026-10-31
+- [#105](https://fg.jo/art/switchyard/issues/105) Add a gemini provider for an isolated paid Gemini API project
+  · `size/L` `status/blocked` · updated 2026-10-31
+- [#107](https://fg.jo/art/switchyard/issues/107) Verify gemini /models discovery, exact model IDs and native pagination
+  · `size/M` `status/blocked` · updated 2026-10-31
+- [#108](https://fg.jo/art/switchyard/issues/108) Add a native Antigravity Agent door through Gemini Interactions API
+  · `size/L` `status/blocked` · updated 2026-10-31
+- [#109](https://fg.jo/art/switchyard/issues/109) Verify artm.ua Pro quotas across AI Studio, Antigravity OAuth and Gemini API projects
+  · `size/M` `status/blocked` · updated 2026-10-31
+- [#110](https://fg.jo/art/switchyard/issues/110) Add multi-instance fault tolerance: compare storage designs and validate failover
+  · `size/L` · updated 2026-10-31
+- [#123](https://fg.jo/art/switchyard/issues/123) As a user I want to use claude code via anthropic provider
+  · `size/S` `status/blocked` · updated 2026-10-31
+- [#140](https://fg.jo/art/switchyard/issues/140) As a developer I want to brainstorm a no-disk mode in order to run on ax3
+  · `size/M` · updated 2026-10-31
+- [#151](https://fg.jo/art/switchyard/issues/151) test-log-ui: big-capture Lightpanda check fails (jtree null)
+  · updated 2026-11-01
 
 ### art/income (7)
 

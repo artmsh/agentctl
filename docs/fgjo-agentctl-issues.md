@@ -2,7 +2,7 @@
 
 Generated 2026-11-01 · <https://fg.jo/art/agentctl> · mirror of `github.com/artmsh/agentctl`
 
-**19 open**, 3 closed, 22 total.** Pull requests are disabled on this mirror (`has_pull_requests: false`), and GitHub reports 0 open issues for `artmsh/agentctl` — fg.jo is the only issue tracker.
+**18 open**, 4 closed, 22 total.** Pull requests are disabled on this mirror (`has_pull_requests: false`), and GitHub reports 0 open issues for `artmsh/agentctl` — fg.jo is the only issue tracker.
 
 ## By label
 
@@ -13,67 +13,16 @@ Generated 2026-11-01 · <https://fg.jo/art/agentctl> · mirror of `github.com/ar
 | `size/S` | 6 |
 | `kind/bug` | 6 |
 | `size/XS` | 4 |
-| `size/M` | 4 |
 | `area/codex` | 4 |
-| `priority/high` | 2 |
+| `size/M` | 3 |
 | `status/blocked` | 2 |
 | `area/import` | 2 |
-| `kind/infra` | 2 |
+| `priority/high` | 1 |
 | `kind/docs` | 1 |
+| `kind/infra` | 1 |
 | `size/L` | 1 |
 
 ## Open issues
-
-### #1 — chore: commit the scope DSL / skills-CLI work, including the untracked files
-
-https://fg.jo/art/agentctl/issues/1  
-created 2026-09-19 · updated 2026-09-21 · 0 comment(s)
-labels: `kind/infra` `priority/high` `size/M` · assignees: —
-
-> Audited 2026-09-20. Still actual at `main` `0382de3` (2026-09-09) plus the dirty working tree of the same date: nothing described below has been committed.
-
-**Context.** The entity-first scope DSL, the selector-keyed `:skills` / `:skill-packs` maps and project-skill installs through `npx -y skills` exist only in the working tree of `~/projects/agentctl`. Verified 2026-09-20 with `git status --porcelain`: 22 tracked files modified (`git diff HEAD --stat` = 1343 insertions / 230 deletions), `src/agentctl/scope.clj` (232 ln) and `src/agentctl/ownership.clj` (110 ln) staged as `A`, and three files still untracked:
-
-- `src/agentctl/skills_cli.clj` — 324 ln, required by `src/agentctl/core.clj:14` (`[agentctl.skills-cli :as skills-cli]`) and called at `core.clj:326`, `:340`, `:399`
-- `tests/skills-stub` — 2.9 K, mode `-rwxr-xr-x`; `tests/run.sh` wires it in via `AGENTCTL_SKILLS_CMD`
-- `docs/SCOPE-DSL.md` — 348 ln, the confirmed DSL decisions
-
-`git check-ignore -v` on all three exits 1 with no output — they are **not** gitignored, so a plain `git add` suffices (no `-f` needed). The risk is the usual one: a `git stash`, a `git diff > patch` or a clean checkout drops untracked files, and a patch transfer that loses the exec bit on `tests/skills-stub` breaks the suite with no visible cause.
-
-**The code half is already proven.** `bash tests/run.sh` on the dirty tree, 2026-09-20: `Ran 124 tests containing 599 assertions. 0 failures, 0 errors.` plus all 20 e2e checks (`all agentctl e2e checks passed`), exit 0. The run is sandboxed — `run.sh` exports `AGENTCTL_HOME` to a `mktemp -d` before `bb` loads `util.clj`, so `*backup-root*` (`util.clj:104`, derived from `util.clj:16-19`) lands inside the sandbox; `~/.config/agentctl/backups` held 88 entries before and 88 after.
-
-**What is left is the doc half, and it is measured.** `docs/AGENTCTL.md` (699 ln total) contains **zero** occurrences of `:in` and 12 of `:tools` — it still documents only the legacy model. The part that actually has to change is **~280 lines across 8 sections**, counted from the heading map: `## Entities` 46-83 (the placement table, incl. the `:projects` and `:skills`/`:skill-packs` rows), `## DSL` 84-171 (the canonical example config, which becomes kind-keyed vectors plus selector-keyed maps), `### Project location` 287-296, `### Project executors` 297-324, `### MCP scope` 325-375 (its `:scope` table, now a deprecated alias for `:at`), `### Project skills` 376-409, `### \`:tools\`` 426-432, `### \`:per-tool\` overrides` 433-457. The source spec to reconcile against is `docs/SCOPE-DSL.md` (348 ln), which keeps the legacy sections readable for compatibility — so the doc must describe both models, not simply swap one for the other. That pass, plus reviewing a 1343/230 diff over 25 paths into a commit (or a split), is what puts this at **size S → M**; it is not the commit itself, which is minutes.
-
-**Target.** The scope-DSL / skills-CLI slice is on `main` at `github.com/artmsh/agentctl`, with `docs/AGENTCTL.md` describing the entity-first format as current and the legacy map format as a compatibility note.
-
-**Done when.**
-1. All 25 paths committed, including the three untracked files, and `git ls-files -s tests/skills-stub` reports mode `100755`.
-2. `bash tests/run.sh` green after the commit (never `bb tests/agentctl_test.clj` directly — `core/build-plan` silently skips a tool whose CLI is off `PATH`, so a direct run plans nothing and still passes).
-3. Pushed to `github.com/artmsh/agentctl` (fg.jo git is a read-only pull mirror — nothing is pushed there). `origin/main` is currently identical to local `HEAD` `0382de3`, so the push is strictly new work.
-4. `docs/AGENTCTL.md` reconciled with `docs/SCOPE-DSL.md`.
-
-**Open questions.**
-- One commit or a split (scope DSL / skills-CLI / ownership / GUI)? 1343/230 across 25 paths is large for one.
-- Does `docs/AGENTCTL.md` get rewritten around `:in` with a legacy appendix, or does `docs/SCOPE-DSL.md` get folded into it and deleted? `SCOPE-DSL.md:3-5` keeps legacy readable, so the doc must still describe both.
-- The staged `.gitignore` adds `.worktrees` — carry it in the same commit or separate it?
-
-**First step.** `git add docs/SCOPE-DSL.md src/agentctl/skills_cli.clj tests/skills-stub`, then `git ls-files -s tests/skills-stub` and confirm `100755`.
-
-<details><summary>Original description</summary>
-
-The entity-first scope DSL, the selector-keyed `:skills` / `:skill-packs` maps and project-skill installs through `npx -y skills` are implemented in `~/projects/agentctl` on `main` but not committed (checked 2026-09-19): `scope.clj` and `ownership.clj` are staged, many sources are modified, and three required files are **untracked**:
-
-- `src/agentctl/skills_cli.clj` — `core.clj` requires it
-- `tests/skills-stub` — `tests/run.sh` uses it via `AGENTCTL_SKILLS_CMD`; it must stay executable (a patch transfer that drops the mode bit breaks the suite with no obvious cause)
-- `docs/SCOPE-DSL.md` — the confirmed decisions; `docs/AGENTCTL.md` still describes the older map format
-
-A `git stash`, a plain `git diff > patch` or a clean checkout silently loses the untracked files.
-
-**Done when:** the work is committed with all three files (mode bit intact), `tests/run.sh` is green, it is pushed to GitHub, and `docs/AGENTCTL.md` is reconciled with `docs/SCOPE-DSL.md`.
-
-Wiki: [Why project MCPs and skills land where they do](https://fg.jo/art/agentctl/wiki/mcp-and-skill-scoping)
-
-</details>
 
 ### #2 — fix: deleting a project from agents.edn leaks its project-scoped MCP entries
 
@@ -699,6 +648,7 @@ labels: `kind/feature` `size/S` · assignees: —
 
 ## Closed issues
 
+- [#1](https://fg.jo/art/agentctl/issues/1) chore: commit the scope DSL / skills-CLI work, including the untracked files — closed 2026-11-01
 - [#19](https://fg.jo/art/agentctl/issues/19) Provision remote hosts over SSH, including Windows — closed 2026-10-30
 - [#20](https://fg.jo/art/agentctl/issues/20) feat: accept :awl as an :acli value for :skills and :skill-packs (a consumer, nothing to provision) — closed 2026-10-30
 - [#22](https://fg.jo/art/agentctl/issues/22) feat: support for Kimi Code — closed 2026-11-01
