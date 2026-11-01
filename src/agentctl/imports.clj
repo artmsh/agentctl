@@ -8,6 +8,7 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.config :as config]
+            [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
@@ -70,6 +71,12 @@
                    (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
                                                            (when (or (string? v) (boolean? v)) [dk v]))))
                                     s)))
+    :kimi (let [t (try (toml/read-toml kimi/config-file) (catch Exception _ nil))
+                inv (invert kimi/setting-keys)]
+            (not-empty
+             (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
+                                             (when (or (string? v) (boolean? v)) [dk v]))))
+                   t)))
     :llm (let [d (some-> (u/slurp-safe (llm/default-model-file)) str/trim)
                aliases (u/read-json (llm/aliases-file))]
            (not-empty (u/prune-nils {:model d :aliases (not-empty aliases)})))}))
@@ -106,7 +113,9 @@
   #{:command :args :url :env :headers :enabled :type :transport :name :disabled_reason
     :auth_status :startup_timeout_sec :tool_timeout_sec :cwd
     ;; antigravity's spelling of :url / :enabled
-    :serverUrl :disabled})
+    :serverUrl :disabled
+    ;; the token's env name, under codex's spelling and the translated one
+    :bearer_token_env_var})
 
 (defn- normalize-entry [tool nm entry]
   (let [t (or (:transport entry) entry)
@@ -129,20 +138,35 @@
       ;; keys agentctl does not model are round-tripped verbatim
       :extra extra})))
 
+(defn- antigravity-mcp-entry
+  "Antigravity spells the endpoint `serverUrl` and inverts the flag; translated
+   here so one server declared for several tools still collapses into a single
+   entry instead of a :per-tool split."
+  [nm v]
+  (normalize-entry :antigravity nm
+                   (cond-> (dissoc v :serverUrl :disabled)
+                     (:serverUrl v) (assoc :url (:serverUrl v))
+                     (true? (:disabled v)) (assoc :enabled false))))
+
+(defn- kimi-mcp-entry
+  "Kimi spells the token's env name `bearerTokenEnvVar`; translated into the
+   DSL's `bearer-token-env` so an imported server keeps its credential without
+   agentctl having to know Kimi's spelling of it."
+  [nm v]
+  (normalize-entry :kimi nm
+                   (cond-> (dissoc v :bearerTokenEnvVar)
+                     (:bearerTokenEnvVar v) (assoc :bearer_token_env_var (:bearerTokenEnvVar v)))))
+
 (defn scan-mcps []
   (let [named (concat
                (for [[k v] (claude/current-mcps)] [(name k) (normalize-entry :claude (name k) v)])
                (for [[nm v] (codex/mcp-list)] [(name nm) (normalize-entry :codex (name nm) v)])
                (for [[k v] (:mcpServers (u/read-json pi/mcp-file))] [(name k) (normalize-entry :pi (name k) v)])
                (for [[k v] (:mcpServers (u/read-json omp/mcp-file))] [(name k) (normalize-entry :omp (name k) v)])
-               ;; antigravity spells the endpoint `serverUrl` and inverts the
-               ;; flag; translated here so one server declared for several tools
-               ;; still collapses into a single entry instead of a :per-tool split
                (for [[k v] (:mcpServers (u/read-json antigravity/mcp-file))]
-                 [(name k) (normalize-entry :antigravity (name k)
-                                            (cond-> (dissoc v :serverUrl :disabled)
-                                              (:serverUrl v) (assoc :url (:serverUrl v))
-                                              (true? (:disabled v)) (assoc :enabled false)))]))]
+                 [(name k) (antigravity-mcp-entry (name k) v)])
+               (for [[k v] (:mcpServers (u/read-json kimi/mcp-file))]
+                 [(name k) (kimi-mcp-entry (name k) v)]))]
     (into (sorted-map)
           (for [[nm entries] (group-by first named)]
             [(keyword nm) (with-overrides nm (map second entries))]))))
@@ -158,8 +182,41 @@
 
 (defn- derived-id? [id] (boolean (re-find #"\d" (name id))))
 
+(defn- kimi-provider-models
+  "Kimi's model aliases, grouped by the provider they point at.
+
+   A Kimi model is a table of its own: it names its provider, the upstream
+   model id, and the capabilities Kimi needs to price and route it. The DSL
+   keeps a provider's models beside it, so the alias becomes the model's id
+   and its capabilities become the declared ones."
+  [cfg]
+  (let [models (get cfg "models")]
+    (when (map? models)
+      (reduce
+       (fn [acc [alias m]]
+         (if-not (map? m)
+           acc
+           (if-let [pid (get m "provider")]
+             (do
+               ;; the DSL keeps one id per model, where Kimi has an alias and
+               ;; an upstream id; a difference between them cannot survive the
+               ;; round trip, and saying so beats changing the route silently
+               (when-let [upstream (get m "model")]
+                 (when (not= upstream alias)
+                   (note! (str "kimi model " alias " points at upstream model " upstream
+                               " — agents.edn keeps one id per model, so it carries "
+                               alias))))
+               (update acc pid (fnil conj [])
+                       {:id alias
+                        :caps (kimi/import-caps m)}))
+             acc)))
+       {}
+       models))))
+
 (defn scan-providers []
   (let [codex-cfg (try (toml/read-toml codex/config-file) (catch Exception _ nil))
+        kimi-cfg (try (toml/read-toml kimi/config-file) (catch Exception _ nil))
+        kimi-models (kimi-provider-models kimi-cfg)
         entries (concat
                  (for [[nm p] (get codex-cfg "model_providers")]
                    {:id (keyword nm) :tool :codex
@@ -182,6 +239,18 @@
                                            " has a plaintext apiKey — emitted as !bw:// placeholder"))
                                (refs/redact (str "provider-" (name nm)) :apiKey)))
                     :api (:api p)})
+                 (for [[nm p] (get kimi-cfg "providers")]
+                   {:id (keyword (name nm)) :tool :kimi
+                    :url (get p "baseUrl")
+                    ;; an apiKeyEnv is the env var's name, never the token
+                    :key (cond
+                           (get p "apiKeyEnv") (symbol (str "$" (get p "apiKeyEnv")))
+                           (get p "apiKey")
+                           (do (note! (str "kimi provider " (name nm)
+                                           " has a plaintext apiKey — emitted as !bw:// placeholder"))
+                               (refs/redact (str "provider-" (name nm)) :apiKey)))
+                    :api (kimi/import-api (get p "type"))
+                    :models (get kimi-models nm)})
                  (for [[base es] (group-by :api_base (or (u/read-yaml (llm/models-file)) []))
                        :when base]
                    {:id (provider-id base nil) :tool :llm
@@ -218,7 +287,8 @@
    :codex codex/skills-dir
    :pi pi/skills-dir
    :omp omp/skills-dir
-   :antigravity antigravity/skills-dir})
+   :antigravity antigravity/skills-dir
+   :kimi kimi/skills-dir})
 
 (defn- real-path [p]
   (try (str (fs/real-path p)) (catch Exception _ (u/abs-path p))))
@@ -278,7 +348,8 @@
    :codex codex/memory-file
    :pi pi/memory-file
    :omp omp/memory-file
-   :antigravity antigravity/memory-file})
+   :antigravity antigravity/memory-file
+   :kimi kimi/memory-file})
 
 (defn scan-memory []
   (let [entries (for [[tool path] memory-files

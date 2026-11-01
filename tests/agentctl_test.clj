@@ -3,6 +3,7 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
@@ -445,7 +446,21 @@
   (is (not (config/supports? :antigravity :providers)))
   (is (= "agy" (config/cli-name :antigravity)))
   (is (= "codex" (config/cli-name :codex)))
-  (is (= [:claude :codex :pi :omp :antigravity] (config/tools-for :skills))))
+  (is (= "kimi" (config/cli-name :kimi)))
+  (is (= [:claude :codex :pi :omp :antigravity :kimi] (config/tools-for :skills)))
+  (testing "kimi has providers, and takes part in a project through its skills"
+    (is (config/supports? :kimi :providers))
+    (is (config/supports? :kimi :mcps))
+    (is (config/supports? :kimi :projects))
+    (is (not (config/supports? :llm :projects)))))
+
+(deftest a-project-names-the-tools-it-is-for
+  ;; a project's executors decide which tools it is for, and only the tools
+  ;; that can be configured per project count — kimi reads the project's
+  ;; `.agents/skills`, so a project that names it gets its skills there
+  (let [cfg (config/normalize
+             {:projects {:p {:path "/tmp/p" :executors {:kimi {} :omp {}}}}} "x")]
+    (is (= #{:kimi} (get-in cfg [:projects :p :for-tools])))))
 
 (deftest antigravity-speaks-its-own-mcp-dialect
   (let [entry #'antigravity/mcp-entry
@@ -472,6 +487,157 @@
 (deftest an-authorization-header-is-masked-in-the-plan
   ;; the value is the whole credential while the key name says nothing about it
   (is (refs/credential? "Authorization" "Bearer sk-live-abcdefgh")))
+
+(deftest a-key-that-names-a-variable-is-not-a-credential
+  ;; kimi's `apiKeyEnv` holds the *name* of an environment variable. Masking it
+  ;; would hide which variable to set — the one thing the plan is there to say.
+  (testing "a variable name is shown as it is"
+    (is (not (refs/credential? "apiKeyEnv" "SW_KEY")))
+    (is (not (refs/credential? "env_key" "SW_KEY")))
+    (is (not (refs/credential? "bearer_token_env" "DOCS_TOKEN"))))
+  (testing "a real credential under the same key is still masked"
+    (is (refs/credential? "apiKeyEnv" "sk-live-abcdefghijkl")))
+  (testing "a key that does hold a credential is still masked"
+    (is (refs/credential? "apiKey" "sk-live-abcdefghijkl"))
+    (is (refs/credential? "api_key" "sk-live-abcdefghijkl"))))
+
+;; ---------------------------------------------------------------- kimi
+
+(deftest kimi-speaks-its-own-mcp-dialect
+  (let [entry #'kimi/mcp-entry
+        {:keys [local remote off]} (:mcps (config/normalize
+                                           {:mcps {:local "/bin/echo hi"
+                                                   :remote {:url "https://example.com/mcp"
+                                                            :headers {"Authorization" "Bearer y"}}
+                                                   :off {:cmd "/bin/echo" :enabled false}}}
+                                           "x"))]
+    (testing "a stdio server carries its transport explicitly"
+      (let [e (entry local nil)]
+        (is (= "stdio" (:transport e)))
+        (is (= "/bin/echo" (:command e)))
+        (is (= ["hi"] (:args e)))))
+    (testing "an http server names the endpoint `url` and the token's env name"
+      (let [e (entry remote nil)]
+        (is (= "http" (:transport e)))
+        (is (= "https://example.com/mcp" (:url e)))
+        (is (= {"Authorization" "Bearer y"} (:headers e)))))
+    (testing ":enabled false is written as enabled false"
+      (let [e (entry off nil)]
+        (is (false? (:enabled e)))))
+    (testing "keys kimi already stores survive a rewrite"
+      (is (= "keep" (:someNativeKey (entry local {:someNativeKey "keep"})))))
+    (testing "a transport change leaves no stdio keys behind"
+      ;; the bug agentctl already fixed for claude (#18): merging onto the old
+      ;; entry would keep `command` next to `url`, and both transports would
+      ;; then be on record at once
+      (let [e (entry remote {:command "/bin/echo" :args ["hi"] :transport "stdio"})]
+        (is (nil? (:command e)))
+        (is (nil? (:args e)))
+        (is (= "http" (:transport e)))))))
+
+(deftest kimi-writes-its-config-and-converges
+  (let [dir (temp-dir)
+        cfg-file (str dir "/config.toml")
+        mcp-file (str dir "/mcp.json")
+        cfg (config/normalize
+             {:settings [{:model "kimi-k3" :acli [:kimi] :in :all}]
+              :mcps [{:id :docs :cmd "/bin/docs-mcp --stdio" :acli [:kimi] :in :all}]
+              :providers [{:id :sw :url "https://switch.yard/v1"
+                           :key "$SW_KEY"
+                           :api "openai-completions"
+                           :acli [:kimi] :in :all
+                           :models [{:id "kimi-k3" :reasoning true
+                                     :context-window 1000000
+                                     :max-tokens 131072
+                                     :input [:text :image]}]}]}
+             "x")]
+    (with-redefs [kimi/config-file cfg-file
+                  kimi/mcp-file mcp-file]
+      (let [ops (vec (kimi/plan cfg state/empty-state))]
+        (doseq [op ops :when (plan/mutating? op)] ((:exec! op)))
+        (let [written (toml/read-toml cfg-file)]
+          (testing "the default model lands under kimi's own spelling"
+            (is (= "kimi-k3" (get written "default_model"))))
+          (testing "the provider keeps the endpoint and names the env var, not the key"
+            (let [p (get-in written ["providers" "sw"])]
+              (is (= "openai" (get p "type")))
+              (is (= "https://switch.yard/v1" (get p "baseUrl")))
+              (is (= "SW_KEY" (get p "apiKeyEnv")))
+              (is (not (contains? p "apiKey")) "the secret stays out of the file")))
+          (testing "the model is a table of its own, with its capabilities"
+            (let [m (get-in written ["models" "kimi-k3"])]
+              (is (= "sw" (get m "provider")))
+              (is (= "kimi-k3" (get m "model")))
+              (is (= 1000000 (get m "maxContextSize")))
+              (is (= 131072 (get m "maxOutputSize")))
+              (is (= ["thinking" "image_in"] (get m "capabilities")))))
+          (testing "the MCP server lands in mcp.json with its transport"
+            (let [e (get-in (u/read-json mcp-file) [:mcpServers :docs])]
+              (is (= "stdio" (get e :transport)))
+              (is (= "/bin/docs-mcp" (get e :command)))
+              (is (= ["--stdio"] (get e :args))))))
+        (testing "a second plan has nothing to do"
+          (is (empty? (filter plan/mutating? (kimi/plan cfg state/empty-state)))))))))
+
+(deftest kimi-refuses-a-model-without-a-context-window
+  ;; kimi's schema requires maxContextSize: writing a model without one
+  ;; leaves kimi unable to load its own config at all
+  (let [dir (temp-dir) cfg-file (str dir "/config.toml")
+        cfg (config/normalize
+             {:providers [{:id :sw :url "https://switch.yard/v1"
+                           :api "openai-completions"
+                           :acli [:kimi] :in :all
+                           :models [{:id "kimi-k3" :reasoning true}]}]}
+             "x")]
+    (with-redefs [kimi/config-file cfg-file]
+      (let [ops (vec (kimi/plan cfg state/empty-state))
+            model-ops (filter #(str/includes? (str (:id %)) "kimi-k3") ops)]
+        (is (empty? (filter plan/mutating? model-ops)) "no model table is written")
+        (is (some #(and (:warn %) (str/includes? (str (:summary %)) "context window"))
+                  model-ops)
+            "and the reason is reported")
+        (is (nil? (get-in (toml/read-toml cfg-file) ["models" "kimi-k3"])))))))
+
+(deftest kimi-imports-back-what-it-writes
+  (let [dir (temp-dir) cfg-file (str dir "/config.toml") mcp-file (str dir "/mcp.json")]
+    (u/write-json! mcp-file {:mcpServers {:docs {:transport "stdio"
+                                                  :command "/bin/docs-mcp"
+                                                  :args ["--stdio"]
+                                                  :bearerTokenEnvVar "DOCS_TOKEN"}}})
+    (spit cfg-file (str "default_model = \"kimi-k3\"\n"
+                        "\n"
+                        "[providers.sw]\n"
+                        "type = \"openai\"\n"
+                        "baseUrl = \"https://switch.yard/v1\"\n"
+                        "apiKeyEnv = \"SW_KEY\"\n"
+                        "\n"
+                        "[models.kimi-k3]\n"
+                        "provider = \"sw\"\n"
+                        "model = \"kimi-k3\"\n"
+                        "maxContextSize = 1000000\n"
+                        "maxOutputSize = 131072\n"
+                        "capabilities = [\"thinking\", \"image_in\"]\n"))
+    (with-redefs [kimi/config-file cfg-file
+                  kimi/mcp-file mcp-file]
+      (testing "settings come back under the DSL's names"
+        (is (= {:model "kimi-k3"} (get (imports/scan-settings) :kimi))))
+      (testing "the provider comes back with its env var and dialect"
+        (let [p (first (vals (imports/scan-providers)))]
+          (is (= "https://switch.yard/v1" (:url p)))
+          (is (= '$SW_KEY (:key p)))
+          (is (= "openai-completions" (:api p)))))
+      (testing "the model's capabilities come back declared"
+        (let [p (first (vals (imports/scan-providers)))
+              m (first (:models p))]
+          (is (= "kimi-k3" (:id m)))
+          (is (= 1000000 (get-in m [:caps :context-window])))
+          (is (= 131072 (get-in m [:caps :max-tokens])))
+          (is (true? (get-in m [:caps :reasoning])))
+          (is (= ["text" "image"] (get-in m [:caps :input])))))
+      (testing "the MCP server comes back with its command"
+        (let [m (get (imports/scan-mcps) :docs)]
+          (is (= "/bin/docs-mcp" (:command m)))
+          (is (= ["--stdio"] (:args m))))))))
 
 ;; ---------------------------------------------------------------- claude retention
 

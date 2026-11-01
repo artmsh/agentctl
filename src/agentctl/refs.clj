@@ -157,6 +157,13 @@
    the warning that matters."
   #"(?i)(^key-name$|[-_]env$|[-_]env[-_]var$|[-_]key[-_]name$)")
 
+(def names-a-variable-pattern
+  "A key that names the *place* a credential lives rather than holding it.
+   Kimi spells this `apiKeyEnv`: its value is the name of an environment
+   variable, and masking it in the plan would hide which variable to set.
+   The vendor-prefix test below still masks a real credential under it."
+  #"(?i)[a-z]env$")
+
 (def credential-value-patterns
   "Vendor prefixes nothing but a credential carries."
   [#"^sk-[A-Za-z0-9\-_]{10,}"
@@ -180,10 +187,16 @@
 
 (defn credential?
   "The display-side test, deliberately narrower than `secret-shaped?`: masked
-   only when the key names a credential or the value carries a vendor prefix."
+   only when the key names a credential or the value carries a vendor prefix.
+   A key that names *where* the credential lives — kimi's `apiKeyEnv`, codex's
+   `bearer_token_env_var` — is not one: its value is an identifier, and
+   masking it would hide which variable to set. A value that looks like a
+   credential is still masked under it."
   [k v]
   (boolean
-   (or (and k (re-find secret-key-pattern (u/kw->str k)))
+   (or (and k (re-find secret-key-pattern (u/kw->str k))
+            (not (re-find indirection-key-pattern (u/kw->str k)))
+            (not (re-find names-a-variable-pattern (u/kw->str k))))
        (and (string? v) (some #(re-find % v) credential-value-patterns)))))
 
 (defn redact

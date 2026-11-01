@@ -4,6 +4,7 @@
   (:require [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
@@ -325,7 +326,9 @@
    [:pi (str u/home "/.pi/agent/mcp.json")]
    [:omp (str u/home "/.omp/agent/models.yml")]
    [:claude (str u/home "/.claude.json")]
-   [:antigravity (str u/home "/.gemini/config/mcp_config.json")]])
+   [:antigravity (str u/home "/.gemini/config/mcp_config.json")]
+   [:kimi kimi/config-file]
+   [:kimi kimi/mcp-file]])
 
 (defn check-config-secrets
   "agents.edn is the one file agentctl owns outright, so a secret typed straight

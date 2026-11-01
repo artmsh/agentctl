@@ -59,7 +59,7 @@ selector and is unique by construction; the value holds placement and options.
   fetched as an implicit pack (`:in :none`) and resolves to the repository's
   `SKILL.md`, or `skills/<id>`. A declared pack with the same URI is reused.
 - **`:acli`** selects agent CLIs: `:claude`/`:cc`, `:codex`, `:pi`, `:omp`,
-  `:llm`, `:antigravity`/`:agy`. It is `:tools` with short names; the other
+  `:llm`, `:antigravity`/`:agy`, `:kimi`. It is `:tools` with short names; the other
   entity kinds accept it too. `:awl` is valid on `:skills` and `:skill-packs`
   only: awl reads `agents.edn` itself, so agentctl does not provision it, leaves
   it out of the default tool set and of `-a`, and rejects `-t awl`. An entry

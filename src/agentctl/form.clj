@@ -13,6 +13,7 @@
   (:require [agentctl.adapters.antigravity :as antigravity]
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
+            [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
@@ -34,6 +35,7 @@
    :pi (vec (sort (keys pi/setting-keys)))
    :omp (vec (sort (conj (keys omp/setting-paths) :model-roles)))
    :antigravity (vec (sort (keys antigravity/setting-keys)))
+   :kimi (vec (sort (keys kimi/setting-keys)))
    ;; llm reads two settings directly rather than through a key map
    :llm [:aliases :model]})
 

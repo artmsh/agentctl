@@ -18,7 +18,7 @@ run() { "$ROOT/agentctl" "$@"; }
 # is every CI runner. The adapters exercised here write files directly; the
 # stubs only have to exist and succeed.
 mkdir -p "$SB/bin"
-for cli in claude codex pi omp llm agy; do
+for cli in claude codex pi omp llm agy kimi; do
   printf '#!/bin/sh\nexit 0\n' > "$SB/bin/$cli"
   chmod +x "$SB/bin/$cli"
 done
@@ -344,6 +344,57 @@ set +e
 run apply -f "$SB/imported15.edn" -t antigravity -k settings -k mcps -k memory > "$SB/plan15b.txt"; code=$?
 set -e
 [ "$code" = 0 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config should already be converged"; }
+
+echo "15b. kimi converges, and its own spellings are written the way kimi reads them"
+mkdir -p "$SB/kproj" "$SB/packs/demo/skills/local-skill"
+printf -- '---\nname: local-skill\ndescription: Local.\n---\n' > "$SB/packs/demo/skills/local-skill/SKILL.md"
+cat > "$SB/kimi.edn" <<EDN
+{:executors {:kimi {:model "kimi-k3"}}
+ :mcps {:kdocs {:command "/bin/echo" :args ["hi"] :tools [:kimi]}
+        :khttp {:url "https://example.com/mcp" :headers {"Authorization" "Bearer y"}
+                 :tools [:kimi]}}
+ :extra-providers {:sw {:url "https://switch.yard/v1" :key "\$SW_KEY"
+                        :api "openai-completions" :tools [:kimi]
+                        :models [{:id "kimi-k3" :reasoning true :context-window 1000000
+                                  :max-tokens 131072 :input [:text :image]}]}}
+ :skill-packs {:demo15b {:uri "file://$SB/packs/demo" :dir "skills"}}
+ :skills {:demo-skill {:from :demo15b :tools [:kimi] :scope :global}}
+ :memory {:shared {:from "$SB/brain/AGENTS.md" :tools [:kimi]}}
+ :projects {:kproj {:path "$SB/kproj" :executors {:kimi {}} :skills [:demo15b]}}}
+EDN
+run apply! -f "$SB/kimi.edn" -t kimi -y > "$SB/apply15c.txt"
+[ -L "$SB/.kimi-code/skills/demo-skill" ] || { cat "$SB/apply15c.txt"; fail "kimi skill not linked"; }
+[ -L "$SB/.kimi-code/AGENTS.md" ] || { cat "$SB/apply15c.txt"; fail "kimi memory not linked"; }
+[ -f "$SB/kproj/.agents/skills/local-skill/SKILL.md" ] \
+  || { cat "$SB/apply15c.txt"; fail "project skill not installed into .agents"; }
+python3 - "$SB/.kimi-code/config.toml" <<'PY' || fail "kimi config.toml wrong"
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+assert d["default_model"] == "kimi-k3", d
+p = d["providers"]["sw"]
+assert p["type"] == "openai", p
+assert p["baseUrl"] == "https://switch.yard/v1", p
+# the key is an environment variable: kimi gets its name, never its value
+assert p["apiKeyEnv"] == "SW_KEY", p
+assert "apiKey" not in p, p
+m = d["models"]["kimi-k3"]
+assert m["provider"] == "sw" and m["model"] == "kimi-k3", m
+assert m["maxContextSize"] == 1000000 and m["maxOutputSize"] == 131072, m
+assert m["capabilities"] == ["thinking", "image_in"], m
+PY
+python3 - "$SB/.kimi-code/mcp.json" <<'PY' || fail "kimi mcp.json wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))["mcpServers"]
+assert d["kdocs"]["transport"] == "stdio", d
+assert d["kdocs"]["command"] == "/bin/echo" and d["kdocs"]["args"] == ["hi"], d
+assert d["khttp"]["transport"] == "http", d
+assert d["khttp"]["url"] == "https://example.com/mcp", d
+assert d["khttp"]["headers"] == {"Authorization": "Bearer y"}, d
+PY
+set +e
+run apply -f "$SB/kimi.edn" -t kimi > "$SB/plan15c.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/plan15c.txt"; fail "kimi left drift behind"; }
 
 echo "16. gui plans a buffer live and applies only when confirmed"
 mkdir -p "$SB/gproj" "$SB/gsecret"
