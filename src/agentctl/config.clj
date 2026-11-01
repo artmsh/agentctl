@@ -12,7 +12,7 @@
             [clojure.string :as str]
             [clojure.walk :as walk]))
 
-(def all-tools [:claude :codex :pi :omp :llm :antigravity])
+(def all-tools [:claude :codex :pi :omp :llm :antigravity :kimi])
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
@@ -21,7 +21,12 @@
    :pi          #{:settings :mcps :skills :memory :providers :projects :extensions}
    :omp         #{:settings :mcps :skills :memory :providers}
    :llm         #{:providers :settings}
-   :antigravity #{:settings :mcps :skills :memory :projects}})
+   :antigravity #{:settings :mcps :skills :memory :projects}
+   ;; Kimi has no project-level MCP config of its own: it reads the project's
+   ;; `.mcp.json` and its own `<cwd>/.kimi-code/mcp.json`, neither of which is
+   ;; a place agentctl writes a project's servers. It does take part in a
+   ;; project, though: its skills are that project's `.agents/skills`.
+   :kimi        #{:settings :mcps :skills :memory :providers :projects}})
 
 (def cli-names
   "The binary each tool is invoked as, where it differs from the tool key."
@@ -31,7 +36,8 @@
 
 (def agent-names
   "How the plan names each tool: the `skills` CLI's agent ids where it has one."
-  {:claude "claude-code" :codex "codex" :pi "pi" :omp "omp" :llm "llm" :antigravity "antigravity"})
+  {:claude "claude-code" :codex "codex" :pi "pi" :omp "omp" :llm "llm"
+   :antigravity "antigravity" :kimi "kimi-code-cli"})
 
 (defn agent-name [tool] (get agent-names tool (name tool)))
 
@@ -296,8 +302,11 @@
    :compat :compat})
 
 (def model-caps-tools
-  "Tools that write `model-caps`; every other provider tool says it does not."
-  #{:pi})
+  "Tools that write `model-caps`; every other provider tool says it does not.
+   Kimi writes them under its own names — `maxContextSize`, `maxOutputSize`
+   and a `capabilities` list — and says so itself for the few it has no
+   field for."
+  #{:pi :kimi})
 
 (def ^:private known-model-keys
   (into #{:id :name :api :url :headers} cat model-caps))

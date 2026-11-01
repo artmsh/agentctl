@@ -4,8 +4,8 @@ The reference for the DSL and the decisions behind it. `README.md` is the short
 version: install, safety model, MCP scope, project skills, reading a plan.
 
 Declarative provisioning for coding agents — Terraform/Ansible shaped, but the
-managed infrastructure is `claude`, `codex`, `pi`, `omp`, `llm` and
-`antigravity` (the `agy` CLI) on one
+managed infrastructure is `claude`, `codex`, `pi`, `omp`, `llm`,
+`antigravity` (the `agy` CLI) and `kimi` (the Kimi Code CLI) on one
 machine.
 
 One file (`~/.config/agents.edn`) declares the desired state. `agentctl`
@@ -45,15 +45,15 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 
 ## Entities
 
-| Entity | claude | codex | pi | omp | llm | antigravity |
-|---|---|---|---|---|---|---|
-| `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` |
-| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` |
-| `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` |
-| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` |
-| `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` |
-| `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | |
+| Entity | claude | codex | pi | omp | llm | antigravity | kimi |
+|---|---|---|---|---|---|---|---|
+| `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` | `config.toml` |
+| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` |
+| `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` |
+| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` |
+| `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — |
+| `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | |
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
 instructions file. Omp's context-file provider loads `AGENTS.md` from its
@@ -80,6 +80,25 @@ leaves trust alone. Apply without `-p` to grant it.
 
 `:model` for antigravity is a display name (`"Gemini 3.7 Flash (Medium)"`), not
 a slug — a value copied from another tool's stanza fails silently.
+
+The Kimi Code CLI resolves its data directory from `$KIMI_CODE_HOME`, falling
+back to `~/.kimi-code`; agentctl resolves it the same way, so the two always
+read and write the same files. Three of its tables need translating:
+
+- A provider's `type` is the wire format, and Kimi names them differently from
+  the DSL: `anthropic`, `openai`, `openai_responses`. A provider that names a
+  dialect the DSL does not know is reported and skipped.
+- A model is a table of its own, `[models.<alias>]`, naming the provider it
+  routes through. The DSL carries one id per model, so an existing entry keeps
+  the upstream id it already had.
+- Kimi's schema *requires* `maxContextSize` on a model. A model that declares
+  no context window is reported and left out rather than written, because a
+  model without one leaves Kimi unable to load its own configuration.
+
+A credential naming an environment variable is written as `apiKeyEnv` — the
+variable's name, not its value — so the secret stays out of the file and Kimi
+reads the variable when it starts. That also means an unset variable is not a
+failure at apply time, unlike a `!bw://` ref that cannot be resolved.
 
 ## DSL
 

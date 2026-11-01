@@ -5,6 +5,7 @@
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.pi :as pi]
             [agentctl.adapters.omp :as omp]
+            [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.antigravity :as antigravity]
             [agentctl.scope :as scope]
             [agentctl.plan :as plan]
@@ -33,7 +34,8 @@
   (let [settings (if (:project o) (get-in cfg [:projects (:project o) :tools (:tool o)])
                      (get-in cfg [:tools (:tool o)]))
         mapping (case (:tool o) :claude claude/setting-keys :codex codex/setting-keys
-                      :pi pi/setting-keys :antigravity antigravity/setting-keys :omp omp/setting-paths {})]
+                      :pi pi/setting-keys :antigravity antigravity/setting-keys
+                      :kimi kimi/setting-keys :omp omp/setting-paths {})]
     (set (keep (fn [k] (when-let [native (get mapping k)]
                         (u/kw->str (if (vector? native) (last native) native)))) (keys settings)))))
 

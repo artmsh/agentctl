@@ -2,7 +2,7 @@
 
 `agentctl` declaratively provisions coding-agent configuration across Claude
 Code, Codex, Pi, OpenCode-compatible OMP installations, Google's Antigravity
-CLI (`agy`), and Simon Willison's `llm` CLI.
+CLI (`agy`), Kimi Code CLI, and Simon Willison's `llm` CLI.
 
 One EDN file describes settings, MCP servers, skills, shared memory, model
 providers, and project-specific configuration. `agentctl` compares that desired
@@ -24,15 +24,15 @@ under `$HOME/projects` on each apply. Most sections are vectors; for example:
 
 `:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
 `[:uri "…"]`, or `[pack "skill"]` where `pack` is a pack's `:alias`. `:acli`
-selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`, `:awl`). `:awl`
-is valid on these two sections only: [awl](https://fg.jo/art/awl) reads this file
-itself, so agentctl does not provision it and the value only decides what awl
-takes. An entry naming `:awl` alone plans nothing, and a git pack is not cloned
-for it.
+selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`, `:kimi`,
+`:awl`). `:awl` is valid on these two sections only:
+[awl](https://fg.jo/art/awl) reads this file itself, so agentctl does not
+provision it and the value only decides what awl takes. An entry naming `:awl`
+alone plans nothing, and a git pack is not cloned for it.
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
-`.agents/skills` (read by codex and antigravity), claude gets a link in
+`.agents/skills` (read by codex, antigravity and kimi), claude gets a link in
 `.claude/skills`, and the install is recorded in `skills-lock.json`. A dropped
 skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
 into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
@@ -276,6 +276,45 @@ Claude Code still offers the `.mcp.json` definition.
 
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
+
+## Kimi Code
+
+Kimi Code CLI keeps its configuration in `$KIMI_CODE_HOME`, or `~/.kimi-code`
+when that is unset — the same resolution Kimi itself does, so agentctl and
+Kimi always read and write the same directory.
+
+| section | file |
+| --- | --- |
+| `:settings` | `config.toml` |
+| `:providers` | `config.toml`, `[providers.<id>]` |
+| `:mcps` | `mcp.json`, under `mcpServers` |
+| `:skills` | `skills/` |
+| `:memory` | `AGENTS.md` |
+
+A provider names the wire format in its `type`, and agentctl translates the
+DSL's dialect into Kimi's spelling — `anthropic`, `openai`, `openai_responses`.
+A provider whose credential is an environment variable is written as
+`apiKeyEnv`, the variable's *name*, so the secret stays out of the file and
+Kimi reads the variable when it starts:
+
+```clojure
+{:providers [{:id :sw :url "https://switch.yard/v1" :key "$SW_KEY"
+              :api "openai-completions" :acli [:kimi] :in :all
+              :models [{:id "kimi-k3" :reasoning true
+                        :context-window 1000000 :max-tokens 131072
+                        :input [:text :image]}]}]}
+```
+
+A model is a table of its own — `[models.kimi-k3]` — naming the provider it
+routes through and the capabilities Kimi needs to price and route it. Kimi's
+schema *requires* `maxContextSize`, so a model that declares no context window
+is reported and left out rather than written: a model without one would leave
+Kimi unable to load its own configuration at all.
+
+Kimi has no project-level MCP configuration of its own, so a server scoped to
+a project is reported and skipped for it. Its skills are the shared
+`<project>/.agents/skills` directory, so a project skill installed for codex
+or antigravity is read by Kimi too.
 
 ## Hooks
 
