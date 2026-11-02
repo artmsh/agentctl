@@ -18,7 +18,8 @@
 (def acli-aliases
   "Short agent-CLI names accepted by `:acli`, mapped onto the internal tool key."
   {:cc :claude :claude-code :claude :agy :antigravity
-   :kimi-code :kimi :kimi-code-cli :kimi})
+   :kimi-code :kimi :kimi-code-cli :kimi
+   :deepseek :dsh :deepseek-harness :dsh})
 
 (defn acli [v]
   (cond (nil? v) nil

@@ -3,6 +3,7 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.dsh :as dsh]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
             [agentctl.adapters.pi :as pi]
@@ -447,12 +448,23 @@
   (is (= "agy" (config/cli-name :antigravity)))
   (is (= "codex" (config/cli-name :codex)))
   (is (= "kimi" (config/cli-name :kimi)))
-  (is (= [:claude :codex :pi :omp :antigravity :kimi] (config/tools-for :skills)))
+  (is (= [:claude :codex :pi :omp :antigravity :kimi :dsh] (config/tools-for :skills)))
   (testing "kimi has providers, and takes part in a project through its skills"
     (is (config/supports? :kimi :providers))
     (is (config/supports? :kimi :mcps))
     (is (config/supports? :kimi :projects))
-    (is (not (config/supports? :llm :projects)))))
+    (is (not (config/supports? :llm :projects))))
+  (testing "the DeepSeek Harness reads skills, memory and projects — nothing else"
+    (is (config/supports? :dsh :skills))
+    (is (config/supports? :dsh :memory))
+    (is (config/supports? :dsh :projects))
+    (is (not (config/supports? :dsh :settings)))
+    (is (not (config/supports? :dsh :mcps)))
+    (is (not (config/supports? :dsh :providers)))
+    (is (= "deepseek-harness" (config/agent-name :dsh)))
+    (is (= "dsh" (config/cli-name :dsh)))
+    (is (= #{:dsh} (set (scope/acli [:deepseek]))))
+    (is (= #{:dsh} (set (scope/acli [:deepseek-harness]))))))
 
 (deftest a-project-names-the-tools-it-is-for
   ;; a project's executors decide which tools it is for, and only the tools
@@ -638,6 +650,162 @@
         (let [m (get (imports/scan-mcps) :docs)]
           (is (= "/bin/docs-mcp" (:command m)))
           (is (= ["--stdio"] (:args m))))))))
+
+;; ---------------------------------------------------------------- dsh
+
+(deftest dsh-home-resolution
+  (is (= (str u/home "/.dsh") (dsh/resolve-home nil)) "no DSH_HOME falls back to ~/.dsh")
+  (is (= (str u/home "/.dsh") (dsh/resolve-home "   ")) "a blank DSH_HOME is unset")
+  (is (= (u/abs-path "/tmp/dsh-home") (dsh/resolve-home "/tmp/dsh-home")))
+  (testing "a home, or the CLI, is enough to say the Harness is installed"
+    (let [root (temp-dir)]
+      (fs/create-dirs (str root "/home"))
+      (with-redefs [dsh/home (str root "/home") u/which (fn [_] nil)]
+        (is (true? (dsh/present?))))
+      (with-redefs [dsh/home (str root "/absent") u/which (fn [_] "/usr/local/bin/dsh")]
+        (is (true? (dsh/present?)))))))
+
+(deftest dsh-links-user-wide-skills-and-memory
+  (let [root (temp-dir) home (str root "/.dsh") src (str root "/wrap-up")
+        mem (str root "/AGENTS.md")
+        cfg (config/normalize {:skills {[:uri src] {:in :all :acli [:dsh]}}
+                               :memory [{:from mem :in :all :acli [:dsh]}]} root)
+        plan-for #(core/build-plan cfg state/empty-state {:tools #{:dsh}})]
+    (fs/create-dirs src)
+    (fs/create-dirs home)
+    (spit (str src "/SKILL.md") "---\nname: wrap-up\ndescription: w\n---\n")
+    (spit mem "# memory\n")
+    (with-redefs [dsh/home home
+                  dsh/skills-dir (str home "/skills")
+                  dsh/memory-file (str home "/AGENTS.md")]
+      (let [ops (plan-for)]
+        (is (= 1 (count (filter #(= :skills (:kind %)) ops))) "one link for the declared skill")
+        (is (empty? (:failed (core/execute! ops))))
+        (is (fs/sym-link? (str home "/skills/wrap-up")))
+        (is (= (u/real-path src) (u/real-path (str home "/skills/wrap-up"))))
+        (is (fs/sym-link? (str home "/AGENTS.md")) "AGENTS.md is the Harness's user-wide memory file")
+        (is (empty? (filter plan/mutating? (plan-for))) "converged")
+        (testing "an owned skill is pruned when it leaves agents.edn"
+          (let [st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+                gone (config/normalize {:skills {} :memory []} root)
+                prune (core/build-plan gone st {:tools #{:dsh}})]
+            (is (state/managed? st :dsh :skills :wrap-up))
+            (is (empty? (:failed (core/execute! prune))))
+            (is (not (u/exists? (str home "/skills/wrap-up"))))))))))
+
+(deftest dsh-shares-project-agents-skills
+  (let [root (temp-dir) repo (str root "/repo") skill (str root "/review")
+        dest (str repo "/.agents/skills/review")
+        raw (fn [acli] {:skills {[:uri skill] {:in repo :acli acli}}})
+        plan-for (fn [cfg st] (core/build-plan cfg st {:tools #{:codex :dsh}}))]
+    (fs/create-dirs (str root "/.dsh"))
+    (fs/create-dirs (str repo "/.git"))
+    (fs/create-dirs skill)
+    (spit (str skill "/SKILL.md") "---\nname: review\ndescription: r\n---\n")
+    (with-redefs [dsh/home (str root "/.dsh")
+                  dsh/skills-dir (str root "/.dsh/skills")]
+      (let [cfg (config/normalize (raw [:dsh :codex]) "test")
+            ops (plan-for cfg state/empty-state)
+            adds (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops)]
+        (is (= 1 (count adds)) "one link for the directory both tools read")
+        (is (= [["ln" "-sfn" (u/abs-path skill) dest]] (:cmds (first adds))))
+        (is (= ["codex" "deepseek-harness"]
+               (sort (mapcat (comp :agents :display) ops)))
+            "the plan names the Harness, not the CLI's \"universal\" placeholder")
+        (is (empty? (:failed (core/execute! ops))))
+        (is (fs/sym-link? dest))
+        (is (empty? (filter plan/mutating? (plan-for cfg state/empty-state))) "converged")
+        (testing "dropping the Harness keeps the copy codex still reads"
+          (let [st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+                only-codex (config/normalize (raw [:codex]) "test")
+                prune (plan-for only-codex st)]
+            (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) prune))))))))
+
+(deftest a-dsh-only-remote-project-skill-uses-the-universal-agent
+  ;; the skills CLI has no DeepSeek Harness agent id. `universal` writes the
+  ;; shared .agents/skills directory, which is one of the project roots the
+  ;; Harness scans, so a dsh-only project install still reaches it.
+  (let [root (temp-dir) home (str root "/.dsh") repo (str root "/repo")]
+    (fs/create-dirs home)
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [dsh/home home
+                  dsh/skills-dir (str home "/skills")]
+      (let [cfg (config/normalize {:skill-packs {[:gh "o/kit"] {}}
+                                   :skills {['kit "kit"] {:in repo :acli [:dsh]}}}
+                                  "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:dsh}})
+            add (first (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops))
+            argv (first (:cmds add))]
+        (is (= (str repo "/.agents/skills") (:target add)))
+        (is (= ["universal"] (some->> argv (partition 2 1) (keep (fn [[a b]] (when (= a "-a") b))) vec)))
+        (is (= ["deepseek-harness"] (:agents (:display add))))))))
+
+(deftest dsh-reports-kinds-it-cannot-hold
+  (let [root (temp-dir) home (str root "/.dsh")
+        cfg (config/normalize {:settings [{:id :dsh-model :model "x" :acli [:dsh] :in :all}]
+                               :mcps [{:id :docs :cmd "/bin/echo hi" :acli [:dsh] :in :all}]
+                               :providers [{:id :gw :url "https://example.com/v1"
+                                            :acli [:dsh] :in :all}]}
+                              root)]
+    (fs/create-dirs home)
+    (testing "a section the Harness cannot hold is named by validation, not silently dropped"
+      (let [msgs (map :message (config/structural-findings cfg))]
+        (is (some #(str/includes? % "dsh has no settings") msgs))
+        (is (some #(str/includes? % "dsh has no mcps") msgs))
+        (is (some #(str/includes? % "dsh has no providers") msgs))))
+    (with-redefs [dsh/home home
+                  dsh/skills-dir (str home "/skills")
+                  dsh/memory-file (str home "/AGENTS.md")]
+      (let [ops (core/build-plan cfg state/empty-state {:tools #{:dsh}})
+            warnings (filter :warn ops)]
+        (testing "…and the plan carries a no-op per declaration, so it cannot read as converged"
+          (is (= #{[:settings :model] [:mcps :docs] [:providers :gw]}
+                 (set (map (juxt :kind :id) warnings))))
+          (is (every? #(str/includes? (:summary %) "cordis.patch.yml") warnings))
+          (is (not-any? plan/mutating? warnings) "nothing is written"))))))
+
+(deftest legacy-sections-that-name-dsh-are-reported
+  (let [root (temp-dir) home (str root "/.dsh")
+        cfg (config/normalize {:executors {:dsh {:model "x"}}
+                               :mcps {:docs {:command "/bin/echo" :tools [:dsh]}}
+                               :providers {:gw {:url "https://example.com/v1" :tools [:dsh]}}
+                               :projects {:dshproj {:path (str root "/proj")
+                                                    :executors {:dsh {:model "y"}}}}}
+                              root)]
+    (fs/create-dirs home)
+    (testing "validation reports the legacy map form too"
+      (let [msgs (map :message (config/structural-findings cfg))]
+        (is (some #(str/includes? % "dsh has no settings") msgs))
+        (is (some #(str/includes? % "dsh has no mcps") msgs))
+        (is (some #(str/includes? % "dsh has no providers") msgs))
+        (is (some #(= [:projects :dshproj :executors :dsh] (:where %))
+                  (config/structural-findings cfg)))))
+    (with-redefs [dsh/home home dsh/skills-dir (str home "/skills")]
+      (let [ops (core/build-plan cfg state/empty-state {:tools #{:dsh}})
+            warnings (filter :warn ops)]
+        (is (= #{[:settings :model] [:settings :dshproj/model]
+                 [:mcps :docs] [:providers :gw]}
+               (set (map (juxt :kind :id) warnings))))
+        (is (not-any? plan/mutating? warnings) "nothing is written")))))
+
+(deftest dsh-imports-back-its-skills-and-memory
+  (let [root (temp-dir) home (str root "/.dsh") src (str root "/src/wrap-up")
+        mem (str root "/brain/AGENTS.md")]
+    (fs/create-dirs (str home "/skills"))
+    (fs/create-dirs src)
+    (fs/create-dirs (str root "/brain"))
+    (spit (str src "/SKILL.md") "---\nname: wrap-up\ndescription: w\n---\n")
+    (fs/create-sym-link (str home "/skills/wrap-up") src)
+    (spit mem "# memory\n")
+    (fs/create-sym-link (str home "/AGENTS.md") mem)
+    (with-redefs [imports/skill-dirs (assoc imports/skill-dirs :dsh (str home "/skills"))
+                  imports/memory-files (assoc imports/memory-files :dsh (str home "/AGENTS.md"))]
+      (testing "a user-wide skill in the Harness home comes back with its agent"
+        (is (= [:dsh] (:tools (get-in (imports/scan-skills) [:skills :wrap-up])))))
+      (testing "the Harness's AGENTS.md comes back as a linked memory file"
+        (let [m (first (vals (imports/scan-memory)))]
+          (is (some #{:dsh} (:tools m)))
+          (is (= :symlink (:mode m))))))))
 
 ;; ---------------------------------------------------------------- claude retention
 

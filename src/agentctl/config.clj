@@ -12,7 +12,7 @@
             [clojure.string :as str]
             [clojure.walk :as walk]))
 
-(def all-tools [:claude :codex :pi :omp :llm :antigravity :kimi])
+(def all-tools [:claude :codex :pi :omp :llm :antigravity :kimi :dsh])
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
@@ -26,7 +26,13 @@
    ;; `.mcp.json` and its own `<cwd>/.kimi-code/mcp.json`, neither of which is
    ;; a place agentctl writes a project's servers. It does take part in a
    ;; project, though: its skills are that project's `.agents/skills`.
-   :kimi        #{:settings :mcps :skills :memory :providers :projects}})
+   :kimi        #{:settings :mcps :skills :memory :providers :projects}
+   ;; The DeepSeek Harness reads a user's skills from `$DSH_HOME/skills`, a
+   ;; user's instructions from `$DSH_HOME/AGENTS.md`, and a project's skills
+   ;; from the shared `.agents/skills`. Its settings, MCP servers and model
+   ;; providers are composed from Cordis patch layers — the user's own live
+   ;; profile configuration — so agentctl provisions none of those for it.
+   :dsh         #{:skills :memory :projects}})
 
 (def cli-names
   "The binary each tool is invoked as, where it differs from the tool key."
@@ -37,7 +43,11 @@
 (def agent-names
   "How the plan names each tool: the `skills` CLI's agent ids where it has one."
   {:claude "claude-code" :codex "codex" :pi "pi" :omp "omp" :llm "llm"
-   :antigravity "antigravity" :kimi "kimi-code-cli"})
+   :antigravity "antigravity" :kimi "kimi-code-cli"
+   ;; the Harness ships as `dsh` (and as a desktop app); there is no `skills`
+   ;; CLI agent id for it, so a project install goes to the shared
+   ;; `.agents/skills` through that CLI's `universal` agent — see skills-cli
+   :dsh "deepseek-harness"})
 
 (defn agent-name [tool] (get agent-names tool (name tool)))
 
@@ -776,6 +786,43 @@
            t (let [ts (:tools decl)] (cond (nil? ts) [] (= ts :all) [] (keyword? ts) [ts] :else ts))
            :when (not (some #{t} all-tools))]
        (finding :error [kind id :tools] (tool-problem t)))
+     ;; a tool a section names explicitly but cannot hold: normalization keeps
+     ;; only the tools that support the kind, so an unsupported name would
+     ;; otherwise vanish without a word — and an entry like
+     ;; {:mcps [{:id :docs … :acli [:dsh]}]} would look applied when it was not
+     (for [{:keys [kind id decl]} (:entities cfg)
+           t (let [ts (:tools decl)] (cond (nil? ts) [] (= ts :all) [] (keyword? ts) [ts] :else ts))
+           :when (and (some #{t} all-tools)
+                      (not (supports? t (case kind :trust :projects :skill-packs :skills kind))))]
+       (finding :warn [kind id :tools]
+                (str (name t) " has no " (name kind) " agentctl can write — ignored")))
+     ;; the legacy map form has the same problem: its sections select tools with
+     ;; :tools, and normalization keeps only those that support the kind
+     (when-not (:entity-dsl? cfg)
+       (for [[section kind] [[:mcps :mcps] [:extra-providers :providers]
+                             [:providers :providers] [:skills :skills] [:memory :memory]]
+             [id decl] (get raw section)
+             :when (map? decl)
+             t (or (let [ts (or (:tools decl) (:for decl) (:acli decl))]
+                     (when (and ts (not= :all ts)) (set (scope/acli ts))))
+                   #{})
+             :when (and (some #{t} all-tools) (not (supports? t kind)))]
+         (finding :warn [section id :tools]
+                  (str (name t) " has no " (name kind) " agentctl can write — ignored"))))
+     ;; executors are keyed by tool, so an unsupported one never goes through
+     ;; tool-selection at all. The entity form reports its own rows above; this
+     ;; is the legacy map form, global and per project.
+     (when-not (:entity-dsl? cfg)
+       (concat
+        (for [[t s] (:tools cfg)
+              :when (and (seq s) (some #{t} all-tools) (not (supports? t :settings)))]
+          (finding :warn [:executors t]
+                   (str (name t) " has no settings agentctl can write — ignored")))
+        (for [[pid proj] (:projects cfg)
+              [t s] (:tools proj)
+              :when (and (seq s) (some #{t} all-tools) (not (supports? t :settings)))]
+          (finding :warn [:projects pid :executors t]
+                   (str (name t) " has no settings agentctl can write — ignored")))))
      ;; :cli-code was the original spelling; still read, so an old file keeps
      ;; working, but it is not what import writes any more
      (when (contains? raw :cli-code)

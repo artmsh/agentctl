@@ -9,6 +9,11 @@ trap 'rm -rf "$SB"' EXIT
 SB=$(cd "$SB" && pwd -P)
 
 export AGENTCTL_HOME="$SB"
+
+# The harness exports DSH_HOME/DSH_AGENTS_HOME into every child process, which
+# would point the DeepSeek Harness adapter at the developer's real home instead
+# of the scratch one. Unset them; the dsh tests set what they need themselves.
+unset DSH_HOME DSH_AGENTS_HOME
 run() { "$ROOT/agentctl" "$@"; }
 fail() { echo "FAIL: $*"; exit 1; }
 

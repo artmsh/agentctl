@@ -7,6 +7,7 @@
   (:require [agentctl.adapters.antigravity :as antigravity]
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
+            [agentctl.adapters.dsh :as dsh]
             [agentctl.config :as config]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
@@ -288,7 +289,8 @@
    :pi pi/skills-dir
    :omp omp/skills-dir
    :antigravity antigravity/skills-dir
-   :kimi kimi/skills-dir})
+   :kimi kimi/skills-dir
+   :dsh dsh/skills-dir})
 
 (defn- real-path [p]
   (try (str (fs/real-path p)) (catch Exception _ (u/abs-path p))))
@@ -349,7 +351,8 @@
    :pi pi/memory-file
    :omp omp/memory-file
    :antigravity antigravity/memory-file
-   :kimi kimi/memory-file})
+   :kimi kimi/memory-file
+   :dsh dsh/memory-file})
 
 (defn scan-memory []
   (let [entries (for [[tool path] memory-files
