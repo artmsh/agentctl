@@ -2,7 +2,8 @@
 
 `agentctl` declaratively provisions coding-agent configuration across Claude
 Code, Codex, Pi, OpenCode-compatible OMP installations, Google's Antigravity
-CLI (`agy`), Kimi Code CLI, and Simon Willison's `llm` CLI.
+CLI (`agy`), Kimi Code CLI, the DeepSeek Harness (`dsh`), and Simon Willison's
+`llm` CLI.
 
 One EDN file describes settings, MCP servers, skills, shared memory, model
 providers, and project-specific configuration. `agentctl` compares that desired
@@ -25,15 +26,17 @@ under `$HOME/projects` on each apply. Most sections are vectors; for example:
 `:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
 `[:uri "…"]`, or `[pack "skill"]` where `pack` is a pack's `:alias`. `:acli`
 selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`, `:kimi`,
-`:awl`). `:awl` is valid on these two sections only:
+`:dsh`, `:awl`). `:deepseek` and `:deepseek-harness` are accepted spellings of
+`:dsh`. `:awl` is valid on these two sections only:
 awl reads this file itself, so agentctl does not
 provision it and the value only decides what awl takes. An entry naming `:awl`
 alone plans nothing, and a git pack is not cloned for it.
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
-`.agents/skills` (read by codex, antigravity and kimi), claude gets a link in
-`.claude/skills`, and the install is recorded in `skills-lock.json`. A dropped
+`.agents/skills` (read by codex, antigravity, kimi and the DeepSeek Harness),
+claude gets a link in `.claude/skills`, and the install is recorded in
+`skills-lock.json`. A dropped
 skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
 into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
 
@@ -316,6 +319,41 @@ a project is reported and skipped for it. Its skills are the shared
 `<project>/.agents/skills` directory, so a project skill installed for codex
 or antigravity is read by Kimi too.
 
+## DeepSeek Harness
+
+The DeepSeek Harness keeps its user data in `$DSH_HOME`, or `~/.dsh` when
+that is unset — the same resolution the Harness itself does, so agentctl and
+the Harness read and write one directory. It ships as a desktop app, so `dsh`
+is not necessarily on `PATH`; an existing home — or an explicit
+`$DSH_HOME` — counts as installed.
+
+| section | file |
+| --- | --- |
+| `:skills` | `$DSH_HOME/skills`, one link per user-wide skill |
+| `:memory` | `$DSH_HOME/AGENTS.md` |
+| `:projects` | the project's shared `.agents/skills`, and its `AGENTS.md` |
+
+The Harness scans its own `skills/` directory, the shared
+`~/.agents/skills` (`$DSH_AGENTS_HOME/skills` when that is set), and inside a
+project `<repo>/.dsh/skills` and the shared `<repo>/.agents/skills`. agentctl
+uses the tool's own home for user-wide skills and the shared directory for a
+project's, so one install serves codex, antigravity, kimi and the Harness; a
+hand-authored `<repo>/.dsh/skills` is left alone. The `skills` CLI has no Harness agent id, so a project install it
+has to copy goes through that CLI's `universal` agent — the shared
+`.agents/skills` directory the Harness reads.
+
+Instructions are `AGENTS.md`: the user-global `$DSH_HOME/AGENTS.md`, then the
+shared `~/.agents/AGENTS.md` (which agentctl does not write), then a
+project's own chain.
+
+The Harness composes its settings, MCP servers and model providers from Cordis
+patch layers — `$DSH_HOME/profiles/<profile>/cordis.patch.yml` and the
+outranking `$DSH_HOME/cordis.patch.yml` — which are the user's own live
+configuration, are edited by the Harness's settings UI, and may carry `!!js`
+expressions. agentctl does not write them. A `:settings`, `:mcps` or
+`:providers` entry naming `:dsh` is reported by `validate` and by the plan
+instead of being silently dropped.
+
 ## Hooks
 
 Claude Code hooks, global scope, declared under `:executors :claude :hooks`:
@@ -430,9 +468,11 @@ A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
-Only Claude Code has a project-level skills directory. For Codex, Pi and OMP a
-project's declared skills are installed user-wide instead — that is the only
-place those tools read skills from — and are owned there.
+Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi and the
+DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
+declared skills live there. For Pi and OMP a project's declared skills are
+installed user-wide instead — that is the only place those tools read skills
+from — and are owned there.
 
 ## Remote hosts
 

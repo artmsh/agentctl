@@ -5,8 +5,8 @@ version: install, safety model, MCP scope, project skills, reading a plan.
 
 Declarative provisioning for coding agents — Terraform/Ansible shaped, but the
 managed infrastructure is `claude`, `codex`, `pi`, `omp`, `llm`,
-`antigravity` (the `agy` CLI) and `kimi` (the Kimi Code CLI) on one
-machine.
+`antigravity` (the `agy` CLI), `kimi` (the Kimi Code CLI) and `dsh` (the
+DeepSeek Harness) on one machine.
 
 One file (`~/.config/agents.edn`) declares the desired state. `agentctl`
 computes the difference against what is actually on disk and converges it.
@@ -45,15 +45,15 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 
 ## Entities
 
-| Entity | claude | codex | pi | omp | llm | antigravity | kimi |
-|---|---|---|---|---|---|---|---|
-| `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` | `config.toml` |
-| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` |
-| `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` |
-| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` |
-| `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — |
-| `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | |
+| Entity | claude | codex | pi | omp | llm | antigravity | kimi | dsh |
+|---|---|---|---|---|---|---|---|---|
+| `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` | `config.toml` | — (Cordis patch layers) |
+| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` | — (Cordis patch layers) |
+| `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` | `$DSH_HOME/skills` |
+| `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` | `$DSH_HOME/AGENTS.md` |
+| `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
+| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
+| `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
 instructions file. Omp's context-file provider loads `AGENTS.md` from its
@@ -99,6 +99,28 @@ A credential naming an environment variable is written as `apiKeyEnv` — the
 variable's name, not its value — so the secret stays out of the file and Kimi
 reads the variable when it starts. That also means an unset variable is not a
 failure at apply time, unlike a `!bw://` ref that cannot be resolved.
+
+The DeepSeek Harness resolves its home from `$DSH_HOME`, falling back to
+`~/.dsh` (its `dsh-home-paths` package), and agentctl resolves it the same
+way. Its local skill provider scans roots by rank: a project's `.dsh/skills`
+(100) and `.agents/skills` (200), then the user's `$DSH_HOME/skills` (400)
+and the shared `$DSH_AGENTS_HOME`/`~/.agents/skills` (500). agentctl links
+user-wide skills into the Harness home and uses the shared `.agents/skills`
+for a project's, so one project install serves codex, antigravity, kimi and
+the Harness; a hand-authored `<repo>/.dsh/skills` is left alone. Instructions
+come from `$DSH_HOME/AGENTS.md`, then the shared `$DSH_AGENTS_HOME`/
+`~/.agents/AGENTS.md`, then the project `AGENTS.md` chain, so `:memory` is
+one link at the Harness home.
+
+Settings, MCP servers and model providers are **not** written: the Harness
+composes them from Cordis patch layers — `$DSH_HOME/profiles/<profile>/cordis.patch.yml`
+and the home-level `$DSH_HOME/cordis.patch.yml` that outranks every profile —
+which are the user's own live configuration, are the settings UI's write
+target, and may carry `!!js` expressions. A `:settings`, `:mcps` or
+`:providers` entry naming `:dsh` is reported by validation and by the plan
+rather than silently dropped. The `skills` CLI has no Harness agent id, so a
+project install it must copy goes through that CLI's `universal` agent, which
+writes `.agents/skills`.
 
 ## DSL
 

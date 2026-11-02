@@ -4,6 +4,7 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.dsh :as dsh]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
             [agentctl.adapters.omp :as omp]
@@ -27,6 +28,7 @@
    :omp    {:plan omp/plan    :present? omp/present?}
    :llm    {:plan llm/plan    :present? llm/present?}
    :kimi   {:plan kimi/plan   :present? kimi/present?}
+   :dsh    {:plan dsh/plan    :present? dsh/present?}
    :antigravity {:plan antigravity/plan :present? antigravity/present?}})
 
 (defn- selected-tools
@@ -196,7 +198,8 @@
                :let [pid (scope/target-id p)
                      oid (keyword (name pid) (name id))
                      filename (get {:claude "CLAUDE.md" :codex "AGENTS.md" :pi "AGENTS.md"
-                                    :omp "AGENTS.md" :antigravity "GEMINI.md" :kimi "AGENTS.md"} t)
+                                    :omp "AGENTS.md" :antigravity "GEMINI.md" :kimi "AGENTS.md"
+                                    :dsh "AGENTS.md"} t)
                      o (if (and (= kind :memory) filename)
                          (plan/link-op {:tool t :kind kind :id oid :project pid
                                         :src (u/abs-path (str/replace (u/expand (or (:from decl) (:path decl))) #"^file://" ""))
@@ -228,11 +231,13 @@
 
 (def project-skill-dirs
   {:claude claude/project-skills-dir :codex codex/project-skills-dir
-   :antigravity antigravity/project-skills-dir :kimi kimi/project-skills-dir})
+   :antigravity antigravity/project-skills-dir :kimi kimi/project-skills-dir
+   :dsh dsh/project-skills-dir})
 
 (defn- share-project-skill-links
-  "Codex, antigravity and kimi read one `<repo>/.agents/skills`. A link either
-   tool wants is planned once, and never removed on behalf of the other."
+  "Codex, antigravity, kimi and the DeepSeek Harness read one
+   `<repo>/.agents/skills`. A link any of them wants is planned once, and
+   never removed on behalf of another."
   [cfg ops]
   (let [wanted (set (for [[t dir-of] project-skill-dirs
                           [_ proj] (:projects (tool-cfg cfg t))
@@ -367,7 +372,7 @@
         dups (skills-cli/global-duplicate-ops cfg tool-cfg selected
                                               {:claude claude/skills-dir :codex codex/skills-dir
                                                :antigravity antigravity/skills-dir
-                                               :kimi kimi/skills-dir})
+                                               :kimi kimi/skills-dir :dsh dsh/skills-dir})
         tool-ops (if (:entity-dsl? cfg)
                    (map (fn [o]
                           (cond-> o

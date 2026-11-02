@@ -4,6 +4,7 @@
   (:require [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
+            [agentctl.adapters.dsh :as dsh]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
@@ -25,13 +26,21 @@
 
 ;; ---------------------------------------------------------------- checks
 
+(defn- tool-location
+  "Where a tool lives. The binary is not always the tool's own name —
+   antigravity ships `agy` — and the DeepSeek Harness ships as a desktop app
+   whose CLI is not necessarily on PATH, so an existing home counts as
+   installed."
+  [t]
+  (or (u/which (config/cli-name t))
+      (when (and (= t dsh/tool) (dsh/present?)) (u/tilde dsh/home))))
+
 (defn check-clis [cfg]
   (let [needed (set (concat (keys (:tools cfg))
                             (mapcat :tools (vals (:mcps cfg)))
                             (mapcat :tools (vals (:providers cfg)))))]
     (for [t (sort-by name needed)]
-      ;; the binary is not always the tool's own name — antigravity ships `agy`
-      (if-let [path (u/which (config/cli-name t))]
+      (if-let [path (tool-location t)]
         (f :ok [:cli t] (u/tilde path))
         (f :error [:cli t] "CLI not found on PATH")))))
 

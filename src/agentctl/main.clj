@@ -17,7 +17,7 @@
 (def usage
   (str/join
    "\n"
-   ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp, llm, antigravity, kimi)"
+   ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp, llm, antigravity, kimi, dsh)"
     ""
     "USAGE"
     "  agentctl <command> [options]"
@@ -33,7 +33,7 @@
     ""
     "OPTIONS"
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
-    "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi"
+    "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi dsh"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"
     "                       settings permissions hooks mcps skills providers memory trust skill-packs"
     "                       extensions"

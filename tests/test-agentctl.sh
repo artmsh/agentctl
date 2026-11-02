@@ -11,6 +11,11 @@ trap 'rm -rf "$SB"' EXIT
 SB=$(cd "$SB" && pwd -P)
 
 export AGENTCTL_HOME="$SB"
+
+# The harness exports DSH_HOME/DSH_AGENTS_HOME into every child process, which
+# would point the DeepSeek Harness adapter at the developer's real home instead
+# of the scratch one. Unset them; the dsh tests set what they need themselves.
+unset DSH_HOME DSH_AGENTS_HOME
 run() { "$ROOT/agentctl" "$@"; }
 
 # agentctl skips a tool whose CLI is not installed, so without these the suite
@@ -395,6 +400,47 @@ set +e
 run apply -f "$SB/kimi.edn" -t kimi > "$SB/plan15c.txt"; code=$?
 set -e
 [ "$code" = 0 ] || { cat "$SB/plan15c.txt"; fail "kimi left drift behind"; }
+
+echo "15c. deepseek harness converges: user-wide skills and memory, project skills in the shared directory"
+mkdir -p "$SB/dshproj/.git" "$SB/.dsh" "$SB/dshpacks/skills/dsh-skill" "$SB/dshpacks/skills/proj-skill"
+printf -- '---\nname: dsh-skill\ndescription: D.\n---\n' > "$SB/dshpacks/skills/dsh-skill/SKILL.md"
+printf -- '---\nname: proj-skill\ndescription: P.\n---\n' > "$SB/dshpacks/skills/proj-skill/SKILL.md"
+cat > "$SB/dsh.edn" <<EDN
+{:skill-packs {:dshpack {:uri "file://$SB/dshpacks" :dir "skills"}}
+ :skills {:dsh-skill {:from :dshpack :tools [:dsh] :scope :global}
+          :proj-skill {:from :dshpack :tools [:dsh]}}
+ :memory {:shared {:from "$SB/brain/AGENTS.md" :tools [:dsh]}}
+ :projects {:dshproj {:path "$SB/dshproj" :executors {:dsh {}} :skills [:proj-skill]}}}
+EDN
+run apply! -f "$SB/dsh.edn" -t dsh -y > "$SB/apply15d.txt"
+[ -L "$SB/.dsh/skills/dsh-skill" ] || { cat "$SB/apply15d.txt"; fail "dsh skill not linked"; }
+[ -L "$SB/.dsh/AGENTS.md" ] || { cat "$SB/apply15d.txt"; fail "dsh memory not linked"; }
+[ -L "$SB/dshproj/.agents/skills/proj-skill" ] \
+  || { cat "$SB/apply15d.txt"; fail "dsh project skill not linked into the shared .agents/skills"; }
+[ -e "$SB/dshproj/.dsh/skills" ] && fail "dsh's own project skills directory must be left alone"
+set +e
+run apply -f "$SB/dsh.edn" -t dsh > "$SB/plan15d.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/plan15d.txt"; fail "dsh left drift behind"; }
+run validate -f "$SB/dsh.edn" > "$SB/validate15d.txt" || { cat "$SB/validate15d.txt"; fail "validate rejected the dsh config"; }
+
+echo "15d. DSH_HOME moves the Harness home; a dropped skill is pruned"
+set +e
+DSH_HOME="$SB/alt-dsh" run apply -f "$SB/dsh.edn" -t dsh -k skills --json > "$SB/plan15e.json"; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SB/plan15e.json"; fail "expected drift for a fresh DSH_HOME"; }
+grep -qF "$SB/alt-dsh/skills/dsh-skill" "$SB/plan15e.json" \
+  || { cat "$SB/plan15e.json"; fail "DSH_HOME was not honored"; }
+[ -e "$SB/alt-dsh" ] && fail "a dry apply must not create the Harness home"
+cat > "$SB/dsh-prune.edn" <<EDN
+{:skill-packs {:dshpack {:uri "file://$SB/dshpacks" :dir "skills"}}
+ :skills {:proj-skill {:from :dshpack :tools [:dsh]}}
+ :memory {:shared {:from "$SB/brain/AGENTS.md" :tools [:dsh]}}
+ :projects {:dshproj {:path "$SB/dshproj" :executors {:dsh {}} :skills [:proj-skill]}}}
+EDN
+run apply! -f "$SB/dsh-prune.edn" -t dsh -y > "$SB/apply15e.txt"
+[ -e "$SB/.dsh/skills/dsh-skill" ] && { cat "$SB/apply15e.txt"; fail "pruned dsh skill still linked"; }
+[ -L "$SB/dshproj/.agents/skills/proj-skill" ] || { cat "$SB/apply15e.txt"; fail "dropping a global skill removed the project's own"; }
 
 echo "16. gui plans a buffer live and applies only when confirmed"
 mkdir -p "$SB/gproj" "$SB/gsecret"

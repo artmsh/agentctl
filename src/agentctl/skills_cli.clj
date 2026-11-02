@@ -1,7 +1,8 @@
 (ns agentctl.skills-cli
   "Project skills are installed by the `skills` CLI (`npx -y skills add`), run
    inside the repository. It copies each skill into `<repo>/.agents/skills` —
-   the directory codex, antigravity and kimi read — links claude's
+   the directory codex, antigravity, kimi and the DeepSeek Harness read —
+   links claude's
    `.claude/skills/<name>` to that copy, and records the install in
    `<repo>/skills-lock.json`. Installed for claude alone, the copy goes
    straight into `.claude/skills/<name>` and `.agents/skills` is not touched.
@@ -9,9 +10,9 @@
    The CLI only copies, so a skill whose source is already on disk — a path,
    a local pack, a git pack agentctl clones — is not handed to it: agentctl
    links each agent's directory straight to the source, `.claude/skills/<name>`
-   for claude and `.agents/skills/<name>` only when codex, antigravity or kimi
-   read it. A name the CLI installed earlier is removed with it first, so the
-   lock stays true.
+   for claude and `.agents/skills/<name>` when codex, antigravity, kimi or the
+   DeepSeek Harness read it. A name the CLI installed earlier is removed with
+   it first, so the lock stays true.
 
    The CLI has no dry run, so drift is read from disk: the lock entry, the
    copy, and claude's link. User-wide skills stay agentctl's own symlinks."
@@ -24,8 +25,24 @@
             [clojure.string :as str]))
 
 (def agents
-  "Tools with a project skills directory, as the CLI names them."
-  {:claude "claude-code" :codex "codex" :antigravity "antigravity" :kimi "kimi-code-cli"})
+  "Tools with a project skills directory, as the CLI names them. The DeepSeek
+   Harness has no agent id of its own; `universal` is the CLI's name for the
+   shared `.agents/skills` directory, which is exactly the project root the
+   Harness scans, so an install for it lands where the Harness reads."
+  {:claude "claude-code" :codex "codex" :antigravity "antigravity" :kimi "kimi-code-cli"
+   :dsh "universal"})
+
+(def agent-labels
+  "How the plan names each tool in a `[agents: …]` line, where the CLI's own
+   id would read poorly."
+  {:dsh "deepseek-harness"})
+
+(defn- agent-label [t] (get agent-labels t (agents t)))
+
+(def shared-tools
+  "Tools that read the CLI's shared `.agents/skills` copy rather than a
+   directory of their own."
+  #{:codex :antigravity :kimi :dsh})
 
 (defn command
   "The CLI invocation. `AGENTCTL_SKILLS_CMD` replaces it (tests run offline)."
@@ -36,7 +53,7 @@
 (defn- canonical [dir n] (str dir "/.agents/skills/" n))
 (defn- claude-link [dir n] (str dir "/.claude/skills/" n))
 
-(defn- shared? [tools] (some #{:codex :antigravity :kimi} tools))
+(defn- shared? [tools] (some shared-tools tools))
 
 (defn- copy-path
   "Where the CLI keeps a name's copy for these tools: the shared directory
@@ -191,12 +208,13 @@
      :source (if (:local u) (u/tilde (:source u)) (:source u))
      :skills (when whole? (:names u))
      :alias (when whole? (:alias p))
-     :agents (sort (map agents tools))}))
+     :agents (sort (map agent-label tools))}))
 
 (defn- link-op
   "Links a local unit's skills to their source, after the CLI drops any it
-   installed. `shared-wanted?`: codex, antigravity or kimi read this project's
-   `.agents/skills`, whether or not this run selects them."
+   installed. `shared-wanted?`: codex, antigravity, kimi or the DeepSeek
+   Harness read this project's `.agents/skills`, whether or not this run
+   selects them."
   [cfg pid dir u tools shared-wanted?]
   (when-not (linked? dir u tools shared-wanted?)
     (let [lock (read-lock dir)
@@ -296,7 +314,7 @@
                          :summary (str "skills remove " (str/join " " names))
                          :cmds [argv]
                          :display {:kind "skill" :entity entity :source (or (some-> src u/tilde) (name entity))
-                                   :agents (sort (map agents dropped))}
+                                   :agents (sort (map agent-label dropped))}
                          :exec! #(run! dir argv "skills remove")})]
               ;; agentctl's own links to a local source
               (when (empty? names)
@@ -306,10 +324,10 @@
                          (for [n linked]
                            (plan/unlink-op {:tool :claude :kind :skills :project pid :id oid
                                             :dest (claude-link dir n)})))
-                       (when (and (some #{:codex :antigravity :kimi} dropped)
-                                  (not-any? #{:codex :antigravity :kimi} staying))
+                       (when (and (some shared-tools dropped)
+                                  (not-any? shared-tools staying))
                          (for [n linked]
-                           (plan/unlink-op {:tool (first (filter #{:codex :antigravity :kimi} (sort dropped)))
+                           (plan/unlink-op {:tool (first (filter shared-tools (sort dropped)))
                                             :kind :skills :project pid :id oid
                                             :dest (canonical dir n)})))))))
           :when o]
@@ -334,11 +352,11 @@
                           :project pid :project-path dir :id (keyword (name pid) (name id))
                           :summary (:warn u)
                           :display {:kind "skill" :entity id :source (name id)
-                                    :agents (sort (map agents ts))}})]
+                                    :agents (sort (map agent-label ts))}})]
                (keep identity
                      [(if (:local u)
                         (link-op cfg pid dir u ts
-                                 (some #(contains? (get desired [pid %]) id) [:codex :antigravity :kimi]))
+                                 (some #(contains? (get desired [pid %]) id) shared-tools))
                         (add-op cfg pid dir u ts))]))]
        o))))
 
@@ -382,7 +400,7 @@
                       :owns [] :summary (str "skills remove " n " — installed user-wide")
                       :requires (mapv #(str (global-dirs %) "/" (name sid)) ts)
                       :cmds [argv]
-                      :display {:kind "skill" :entity sid :source (u/tilde src) :agents (sort (map agents ts))}
+                      :display {:kind "skill" :entity sid :source (u/tilde src) :agents (sort (map agent-label ts))}
                       :exec! (fn []
                                (doseq [t ts :let [g (str (global-dirs t) "/" (name sid))]]
                                  (when-not (u/exists? (str g "/SKILL.md"))
