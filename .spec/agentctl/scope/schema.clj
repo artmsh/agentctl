@@ -18,3 +18,6 @@
     [:raw :map]
     [:entities [:vector Entity]]
     [:active-tools [:set :keyword]]]])
+
+(def entities
+  [:=> [:cat :map] [:vector Entity]])
