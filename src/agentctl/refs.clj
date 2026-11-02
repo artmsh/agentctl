@@ -23,6 +23,26 @@
   [v]
   (and (map? v) (boolean (some #{:ref/kind} (keys v)))))
 
+(defn- ref-error
+  "Validate marked maps without including their potentially secret contents."
+  [r]
+  (when (ref? r)
+    (let [text? #(and (string? %) (not (str/blank? %)))]
+      (case (:ref/kind r)
+        :env (when-not (and (text? (:ref/var r))
+                           (not (re-find #"[=\u0000]" (:ref/var r))))
+               "invalid reference: :env requires a nonblank variable name without = or NUL")
+        :bw (when-not (and (text? (:ref/item r)) (text? (:ref/field r))
+                          (or (nil? (:ref/folder r)) (text? (:ref/folder r))))
+              "invalid reference: :bw requires an item and field, and an optional nonblank folder")
+        :file (when-not (text? (:ref/path r))
+                "invalid reference: :file requires a nonblank path")
+        :cmd (when-not (text? (:ref/cmd r))
+               "invalid reference: :cmd requires a nonblank command")
+        :literal (when-not (contains? r :ref/value)
+                   "invalid reference: :literal requires :ref/value")
+        "invalid reference: unsupported kind"))))
+
 (defn- dollar
   "A value spelled with a leading `$`. Only a whole `$NAME` is a reference to
    that variable. Anything longer — `$HOME/bin/x` — is a string with a variable
@@ -34,35 +54,39 @@
     {:ref/kind :literal :ref/value (u/expand s) :ref/raw s}))
 
 (defn parse
-  "Normalize a declared value into a ref map. Non-secret scalars become :literal."
+  "Normalize a declared value into a ref map. Non-secret scalars become :literal.
+   Malformed references throw ExceptionInfo without exposing their contents."
   [v]
-  (cond
-    (ref? v) v
+  (let [r (cond
+            (ref? v) v
 
-    (symbol? v)
-    (let [s (str v)]
-      (if (str/starts-with? s "$")
-        (dollar s)
-        {:ref/kind :literal :ref/value s :ref/raw s}))
+            (symbol? v)
+            (let [s (str v)]
+              (if (str/starts-with? s "$")
+                (dollar s)
+                {:ref/kind :literal :ref/value s :ref/raw s}))
 
-    (string? v)
-    (cond
-      (str/starts-with? v "!bw://")
-      (let [segs (str/split (subs v 6) #"/")]
-        {:ref/kind :bw
-         :ref/raw v
-         :ref/folder (when (= 3 (count segs)) (first segs))
-         :ref/item (if (= 3 (count segs)) (second segs) (first segs))
-         :ref/field (last segs)})
+            (string? v)
+            (cond
+              (str/starts-with? v "!bw://")
+              (let [segs (str/split (subs v 6) #"/")]
+                {:ref/kind :bw
+                 :ref/raw v
+                 :ref/folder (when (= 3 (count segs)) (first segs))
+                 :ref/item (if (= 3 (count segs)) (second segs) (first segs))
+                 :ref/field (last segs)})
 
-      (str/starts-with? v "!env://") {:ref/kind :env :ref/var (subs v 7) :ref/raw v}
-      (str/starts-with? v "!file://") {:ref/kind :file :ref/path (subs v 8) :ref/raw v}
-      (str/starts-with? v "!cmd://") {:ref/kind :cmd :ref/cmd (subs v 7) :ref/raw v}
-      (str/starts-with? v "$") (dollar v)
-      :else {:ref/kind :literal :ref/value v :ref/raw v})
+              (str/starts-with? v "!env://") {:ref/kind :env :ref/var (subs v 7) :ref/raw v}
+              (str/starts-with? v "!file://") {:ref/kind :file :ref/path (subs v 8) :ref/raw v}
+              (str/starts-with? v "!cmd://") {:ref/kind :cmd :ref/cmd (subs v 7) :ref/raw v}
+              (str/starts-with? v "$") (dollar v)
+              :else {:ref/kind :literal :ref/value v :ref/raw v})
 
-    (nil? v) nil
-    :else {:ref/kind :literal :ref/value v :ref/raw v}))
+            (nil? v) nil
+            :else {:ref/kind :literal :ref/value v :ref/raw v})]
+    (when-let [error (ref-error r)]
+      (throw (ex-info error {:type ::invalid-ref})))
+    r))
 
 (defn secret-ref? [r] (and (ref? r) (contains? #{:bw :env :file :cmd} (:ref/kind r))))
 
@@ -72,6 +96,7 @@
   (cond
     (nil? r) "<nil>"
     (not (ref? r)) (pr-str r)
+    (ref-error r) "<invalid reference>"
     :else (case (:ref/kind r)
             :env (str "env:" (:ref/var r))
             :bw (str "bw:" (str/join "/" (remove nil? [(:ref/folder r) (:ref/item r) (:ref/field r)])))
@@ -121,8 +146,9 @@
   (cond
     (nil? r) {:status :ok :value nil}
     (not (ref? r)) {:status :ok :value r}
+    (ref-error r) {:status :error :message (ref-error r)}
     :else
-    (or (get @cache (:ref/raw r))
+    (or (get @cache r)
         (let [res (case (:ref/kind r)
                     :literal {:status :ok :value (:ref/value r)}
                     :env (if-let [v (System/getenv (:ref/var r))]
@@ -136,7 +162,7 @@
                              {:status :ok :value (str/trim out)}
                              {:status :error :message (str "command failed: " err)}))
                     :bw (bw-fetch r))]
-          (swap! cache assoc (:ref/raw r) res)
+          (swap! cache assoc r res)
           res))))
 
 (defn resolved-value [r]

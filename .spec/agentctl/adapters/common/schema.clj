@@ -6,7 +6,7 @@
          [:transport {:optional true} :keyword]
          [:url {:optional true} :string]
          [:command {:optional true} :string]
-         [:args {:optional true} [:vector :string]]
+         [:args {:optional true} [:sequential :string]]
          [:cwd {:optional true} :string]
          [:enabled {:optional true} :boolean]]]
    :string])
