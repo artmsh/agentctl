@@ -860,4 +860,23 @@ EDN
 claude_has split && { cat "$SB/split.txt"; fail "per-tool placement: dropped project placement was not pruned"; }
 grep -q '"split"' "$SB/.pi/agent/mcp.json" || { cat "$SB/split.txt"; fail "per-tool placement: pruning claude took pi's server"; }
 
+# malformed refs must fail before apply! changes any owned files, and the
+# diagnostic must not echo the ref's potentially secret raw spelling
+cp "$SB/.config/agentctl/state.edn" "$SB/state-before-invalid-ref.edn"
+cp "$SB/.pi/agent/mcp.json" "$SB/mcp-before-invalid-ref.json"
+for ref_kind in env unsupported; do
+  cat > "$SB/invalid-ref.edn" <<EDN
+{:mcps {:broken {:command "/bin/echo" :tools [:pi]
+                 :env {"TOKEN" {:ref/kind :$ref_kind :ref/raw "private-ref-fixture"}}}}}
+EDN
+  set +e
+  run apply! -f "$SB/invalid-ref.edn" --all -y > "$SB/invalid-ref.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || fail "malformed reference was not rejected"
+  grep -q 'invalid reference' "$SB/invalid-ref.txt" || fail "malformed reference diagnostic missing"
+  grep -q 'private-ref-fixture' "$SB/invalid-ref.txt" && fail "malformed reference diagnostic leaked its raw value"
+  cmp -s "$SB/state-before-invalid-ref.edn" "$SB/.config/agentctl/state.edn" || fail "invalid reference changed ownership"
+  cmp -s "$SB/mcp-before-invalid-ref.json" "$SB/.pi/agent/mcp.json" || fail "invalid reference changed MCPs"
+done
+
 echo "all agentctl e2e checks passed"

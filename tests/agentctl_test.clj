@@ -105,6 +105,47 @@
     (is (= "bw:dev/item/field" (refs/describe r)))
     (is (not (str/includes? (refs/describe r) "password")))))
 
+(deftest malformed-reference-maps-are-rejected-without-exposing-secrets
+  (let [secret "private-fixture-value"
+        invalid [{:ref/kind :unsupported}
+                 {:ref/kind nil}
+                 {:ref/kind :env}
+                 {:ref/kind :env :ref/var 42}
+                 {:ref/kind :env :ref/var ""}
+                 {:ref/kind :env :ref/var "BAD=NAME"}
+                 {:ref/kind :env :ref/var (str "BAD" (char 0) "NAME")}
+                 {:ref/kind :bw :ref/item "item"}
+                 {:ref/kind :bw :ref/item "item" :ref/field "field" :ref/folder []}
+                 {:ref/kind :file :ref/path nil}
+                 {:ref/kind :cmd :ref/cmd " "}
+                 {:ref/kind :literal}]]
+    (with-redefs [u/sh (fn [& _] (throw (Exception. "invalid refs must not execute commands")))
+                  u/slurp-safe (fn [& _] (throw (Exception. "invalid refs must not read files")))]
+      (doseq [r invalid
+              :let [r (assoc r :ref/raw secret :payload secret)]]
+        (let [error (try (refs/parse r) nil (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? error))
+          (is (= {:type :agentctl.refs/invalid-ref} (ex-data error)))
+          (is (not (str/includes? (str error) secret))))
+        (is (= "<invalid reference>" (refs/describe r)))
+        (let [resolution (refs/resolve-ref r)]
+          (is (= :error (:status resolution)))
+          (is (not (str/includes? (pr-str resolution) secret))))))))
+
+(deftest empty-reference-strings-are-rejected-at-parse-time
+  (doseq [s ["!env://" "!file://" "!cmd://" "!bw://"]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid reference" (refs/parse s)))))
+
+(deftest reference-cache-keeps-structured-refs-distinct
+  (doseq [raw [{} {:ref/raw "same-spelling"}]
+          :let [a (merge raw {:ref/kind :literal :ref/value "first-fixture"})
+                b (merge raw {:ref/kind :literal :ref/value "second-fixture"})]]
+    (is (= a (refs/parse a)))
+    (is (= {:status :ok :value "first-fixture"} (refs/resolve-ref a)))
+    (is (= {:status :ok :value "second-fixture"} (refs/resolve-ref b)))
+    (is (= "first-fixture" (refs/resolved-value a))))
+  (is (= {:status :ok :value nil} (refs/resolve-ref {:ref/kind :literal :ref/value nil}))))
+
 (deftest secret-shape-detection
   (is (refs/secret-shaped? :api_key "whatever"))
   (is (refs/secret-shaped? :harmless (str "sk" "-0123456789abcdef")))

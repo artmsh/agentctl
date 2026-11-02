@@ -1,11 +1,31 @@
-(ns agentctl.refs.schema)
+(ns agentctl.refs.schema
+  (:require [clojure.string :as str]))
 
 (def EdnValue
   [:or :nil :boolean number? :string :keyword :symbol :map sequential? set?])
 
-(def Ref
+(def NonBlankText
+  [:and :string [:fn #(not (str/blank? %))]])
+
+(def EnvRef
   [:map
-   [:ref/kind [:enum :env :bw :file :cmd :literal]]])
+   [:ref/kind [:= :env]]
+   [:ref/var [:and NonBlankText [:fn #(not (re-find #"[=\u0000]" %))]]]])
+
+(def BwRef
+  [:map
+   [:ref/kind [:= :bw]]
+   [:ref/item NonBlankText]
+   [:ref/field NonBlankText]
+   [:ref/folder {:optional true} [:maybe NonBlankText]]])
+
+(def Ref
+  [:multi {:dispatch :ref/kind}
+   [:env EnvRef]
+   [:bw BwRef]
+   [:file [:map [:ref/kind [:= :file]] [:ref/path NonBlankText]]]
+   [:cmd [:map [:ref/kind [:= :cmd]] [:ref/cmd NonBlankText]]]
+   [:literal [:map [:ref/kind [:= :literal]] [:ref/value EdnValue]]]])
 
 (def Resolution
   [:map
@@ -32,7 +52,7 @@
   [:=> [:cat] :boolean])
 
 (def bw-fetch
-  [:=> [:cat Ref] Resolution])
+  [:=> [:cat BwRef] Resolution])
 
 (def resolve-ref
   [:=> [:cat EdnValue] Resolution])
