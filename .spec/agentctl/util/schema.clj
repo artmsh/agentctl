@@ -10,3 +10,7 @@
   [:=> [:cat [:maybe :string]]
    [:maybe :string]
    [:fn expand-fn-check]])
+
+(def path-sha256
+  [:=> [:cat [:maybe :string]]
+   [:maybe [:re #"^[0-9a-f]{64}$"]]])
