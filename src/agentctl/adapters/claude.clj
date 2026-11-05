@@ -24,6 +24,11 @@
   [& args]
   (u/sh-env {:HOME u/home} args))
 
+(defn claude-sh-in
+  "Run the claude CLI with a project as its cwd and the managed HOME."
+  [dir & args]
+  (u/sh-env-in dir {:HOME u/home} args))
+
 (def setting-keys
   {:model :model
    :output-style :outputStyle
@@ -252,6 +257,121 @@
 (defn project-settings-file [proj] (str (:path proj) "/.claude/settings.json"))
 (defn- project-mcp-file [proj] (str (:path proj) "/.mcp.json"))
 
+(defn- plugin-scope [scope]
+  (case scope :global "user" :local "local" :project "project" "user"))
+
+(defn- plugin-settings-file
+  ([scope] (if (= :global scope) settings-file nil))
+  ([proj scope]
+   (case scope
+     :local (str (:path proj) "/.claude/settings.local.json")
+     :project (str (:path proj) "/.claude/settings.json")
+     settings-file)))
+
+(defn- plugin-source [p]
+  (or (when-let [r (:repo p)] r) (:uri p)))
+
+(defn- plugin-key [p]
+  (str (:plugin p) "@" (:marketplace p)))
+
+(defn- plugin-marketplace [p]
+  {:source (cond-> {:source (if (:repo p) "github" "url")}
+             (:repo p) (assoc :repo (:repo p))
+             (and (nil? (:repo p)) (:uri p)) (assoc :url (:uri p)))})
+
+(defn- plugin-entry [id p proj scope]
+  {:id id :plugin p :project proj :scope scope
+   :file (plugin-settings-file proj scope)
+   :cli-scope (plugin-scope scope)
+   :key (plugin-key p)})
+
+(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key]}]
+  (let [current (u/read-json file)
+        marketplaces (or (:extraKnownMarketplaces current) {})
+        enabled (or (:enabledPlugins current) {})
+        mname (:marketplace plugin)
+        want-marketplace (plugin-marketplace plugin)
+        before-m (get marketplaces (keyword mname))
+        before-e (get enabled (keyword key))
+        desired-m (not= (u/norm before-m) (u/norm want-marketplace))
+        desired-e (not= true before-e)
+        source (plugin-source plugin)
+        cwd (:path project)
+        argv-add ["claude" "plugin" "marketplace" "add" "--scope" cli-scope source]
+        argv-install ["claude" "plugin" "install" "--scope" cli-scope "--marketplace" source "-y" key]]
+    (when (or desired-m desired-e)
+      (plan/op
+       {:action (if (nil? current) :create (if (or desired-m desired-e) :update :noop))
+        :tool tool :kind :plugins :id id :project (some-> (:id project) keyword)
+        :project-path (some-> project :path) :target file
+        :path ["enabledPlugins" key] :cmds [argv-add argv-install]
+        :summary (str "Claude marketplace " mname "; enable " key)
+        :diffs [{:key :extraKnownMarketplaces :before before-m :after want-marketplace}
+                {:key :enabledPlugins :before before-e :after true}]
+        :exec! (fn []
+                 (if cwd
+                   (do (claude-sh-in cwd argv-add)
+                       (claude-sh-in cwd argv-install))
+                   (do (claude-sh argv-add)
+                       (claude-sh argv-install)))
+                 ;; Keep the JSON deterministic even when the CLI is stubbed,
+                 ;; unavailable in a test harness, or writes a different
+                 ;; ordering than the settings file expects.
+                 (u/backup! file)
+                 (u/write-json! file
+                                (-> (or (u/read-json file) {})
+                                    (assoc-in [:extraKnownMarketplaces (keyword mname)] want-marketplace)
+                                    (assoc-in [:enabledPlugins (keyword key)] true))))}))))
+
+(defn- plugin-uninstall-op [{:keys [id plugin project scope file cli-scope key]}]
+  (let [current (u/read-json file)
+        before (get-in current [:enabledPlugins (keyword key)])
+        cwd (:path project)
+        argv ["claude" "plugin" "uninstall" "--scope" cli-scope "-y" key]]
+    (when (some? before)
+      (plan/op
+       {:action :delete :tool tool :kind :plugins :id id :project (some-> (:id project) keyword)
+        :project-path (some-> project :path) :target file :path ["enabledPlugins" key]
+        :cmds [argv] :summary "removed from agents.edn" :risk :medium
+        :diffs [{:key :enabledPlugins :before before :after nil}]
+        :exec! (fn []
+                 (if cwd (claude-sh-in cwd argv) (claude-sh argv))
+                 (u/backup! file)
+                 (let [s (or (u/read-json file) {})
+                       eps (dissoc (or (:enabledPlugins s) {}) (keyword key))]
+                   (u/write-json! file (assoc s :enabledPlugins eps))))}))))
+
+(defn plugin-ops
+  "Provision Claude marketplace registrations and enabled plugins. The CLI is
+   used for its own installation lifecycle; the settings write makes previews,
+   tests, and ownership deterministic and preserves unrelated settings."
+  [cfg st]
+  (let [global (for [[id p] (:plugins cfg)
+                     :when (and (= :global (:scope p)) (contains? (:tools p) tool))]
+                 (plugin-entry id p nil :global))
+        project (mapcat
+                 (fn [[pid proj]]
+                   (when (contains? (:for-tools proj) tool)
+                     (for [id (:plugins proj)
+                           :let [p (get-in cfg [:plugins id])]
+                           :when (and p (contains? (:tools p) tool))]
+                       (plugin-entry (keyword (str (name pid) "/" (name id)))
+                                     p (assoc proj :id pid) (:scope p)))))
+                 (:projects cfg))
+        desired (concat global project)
+        desired-ids (set (map :id desired))
+        managed (for [sid (state/managed-ids st tool :plugins)
+                      :let [id (keyword sid)
+                            e (state/entry st tool :plugins id)]
+                      :when (not (contains? desired-ids id))]
+                  (plugin-entry id
+                                {:plugin (or (:plugin e) (name id))
+                                 :marketplace (or (:marketplace e) (name id))}
+                                (when-let [p (:project-path e)] {:path p :id (some-> id namespace keyword)})
+                                (or (:scope e) :global)))]
+    (concat (keep plugin-install-op desired)
+            (keep plugin-uninstall-op managed))))
+
 (defn- mcp-json-entry
   "Merged onto whatever .mcp.json already holds: the file is checked into the
    project and may carry servers agentctl knows nothing about."
@@ -436,6 +556,7 @@
   (concat (settings-ops cfg)
           (hook-ops cfg st)
           (mcp-ops cfg st)
+          (plugin-ops cfg st)
           (skill-ops cfg st)
           (memory-ops cfg)
           (project-ops cfg st)))

@@ -16,7 +16,7 @@
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
-  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks}
+  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks :plugins}
    :codex       #{:settings :mcps :skills :memory :projects :providers}
    :pi          #{:settings :mcps :skills :memory :providers :projects :extensions}
    :omp         #{:settings :mcps :skills :memory :providers}
@@ -207,7 +207,7 @@
 
 ;; ---------------------------------------------------------------- normalize
 
-(declare norm-mcp norm-provider norm-skill)
+(declare norm-mcp norm-provider norm-skill norm-plugin)
 
 (defn- norm-per-tool
   "Normalize the per-tool override map with the same normalizer as the base."
@@ -271,6 +271,20 @@
       :scope (some-> (:scope decl) u/kw->str keyword)
       :per-tool (norm-per-tool id decl norm-skill)
       :tools (tool-selection decl :skills)})))
+
+(defn- norm-plugin [id decl]
+  (let [decl (or decl {})]
+    (u/prune-nils
+     {:id id
+      :kind :plugins
+      :repo (:repo decl)
+      :uri (:uri decl)
+      :plugin (or (:plugin decl) (name id))
+      :marketplace (or (:marketplace decl) (:plugin decl) (name id))
+      :scope (or (:scope decl) :global)
+      :scope-by-tool (:scope-by-tool decl)
+      :used-by (:used-by decl)
+      :tools (tool-selection decl :plugins)})))
 
 (defn norm-pack [id decl]
   (let [decl (or decl {})
@@ -457,6 +471,7 @@
       :tools executors
       :mcp (as-set (:mcp decl))
       :skills (as-set (:skills decl))
+      :plugins (as-set (:plugins decl))
       :permissions (norm-permissions (:permissions decl))
       :agents (vec (:agents decl))
       :memory (:memory decl)})))
@@ -571,6 +586,7 @@
      ;; a declared skill — see bare-project-skills
      :skills (scope-skills (merge bare-skills declared-skills) (:skills raw) projects)
      :skill-packs skill-packs
+     :plugins (into {} (map (fn [[k v]] [k (norm-plugin k v)])) (:plugins raw))
      :providers (into {} (map (fn [[k v]] [k (norm-provider k v)]))
                       (merge (:extra-providers raw) (:providers raw)))
      :memory (into {} (map (fn [[k v]] [k (norm-memory k v)])) (:memory raw))
@@ -740,7 +756,7 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :settings :permissions :trust :hooks :extensions :hosts :#def})
+    :settings :permissions :trust :hooks :plugins :extensions :hosts :#def})
 
 (defn- host-findings
   "A host's `:ssh` goes on an ssh command line and its name into a file name, so
@@ -868,6 +884,11 @@
                 "stdio MCP server needs :command (or :url for http) — an empty map declares nothing"))
      (for [[id p] (:providers cfg) :when (nil? (:url p))]
        (finding :error [:providers id] "provider needs :url"))
+     (for [[id p] (:plugins cfg)
+           :when (or (str/blank? (or (:repo p) (:uri p) ""))
+                     (str/blank? (or (:plugin p) "")))]
+       (finding :error [:plugins id]
+                "plugin needs a marketplace source and plugin name"))
      (provider-model-findings cfg)
      (for [[pid proj] (:projects cfg)
            mid (:mcp proj)
