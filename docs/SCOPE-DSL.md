@@ -50,6 +50,7 @@ selector and is unique by construction; the value holds placement and options.
 | `[:uri "…"]` | both | a git URL, or a local directory (`file://`, `/`, `~`, `$VAR`) |
 | `[pack "name"]` | `:skills` | skill directory `name` inside the pack whose id or `:alias` is `pack` |
 | `[pack ["a" "b"]]` | `:skills` | the same, for several skills at once; they share the value, so `:alias` is not allowed |
+| `[:gh "owner/repo" "plugin"]` / `[:uri "…" "plugin"]` | `:plugins` | Claude Code plugin `plugin` from that marketplace (README, *Claude plugins*) |
 
 - **Id.** `:alias sym` names the entity; without it the id is the last path
   segment of the key (`:superpowers`, `:Uncodixfy`, `:wrap-up`). Two keys with

@@ -9,6 +9,7 @@
             [agentctl.sources :as sources]
             [agentctl.state :as state]
             [agentctl.util :as u]
+            [babashka.fs :as fs]
             [clojure.string :as str]))
 
 (def tool :claude)
@@ -268,16 +269,66 @@
      :project (str (:path proj) "/.claude/settings.json")
      settings-file)))
 
-(defn- plugin-source [p]
-  (or (when-let [r (:repo p)] r) (:uri p)))
+(defn- local-uri?
+  "A `file://` URI or a path, as opposed to a remote URL or scp-style address."
+  [uri]
+  (or (str/starts-with? uri "file://")
+      (not (re-find #"^[a-z+]+://|^[^/]+@[^:/]+:" uri))))
+
+(defn- uri-path [uri] (u/abs-path (str/replace (u/expand uri) #"^file://" "")))
+
+(defn- plugin-source
+  "The source as `claude plugin marketplace add` takes it: owner/repo, a URL,
+   or a path. The CLI rejects `file://`, so a local URI becomes its path."
+  [p]
+  (cond (:repo p) (:repo p)
+        (local-uri? (:uri p)) (uri-path (:uri p))
+        :else (:uri p)))
 
 (defn- plugin-key [p]
   (str (:plugin p) "@" (:marketplace p)))
 
-(defn- plugin-marketplace [p]
-  {:source (cond-> {:source (if (:repo p) "github" "url")}
-             (:repo p) (assoc :repo (:repo p))
-             (and (nil? (:repo p)) (:uri p)) (assoc :url (:uri p)))})
+(defn- plugin-marketplace
+  "The `extraKnownMarketplaces` entry the CLI itself writes for this source:
+   github for owner/repo, directory for a local path, url for a hosted
+   marketplace.json, and git for any other remote."
+  [p]
+  (let [uri (:uri p)]
+    {:source (cond (:repo p) {:source "github" :repo (:repo p)}
+                   (local-uri? uri) {:source "directory" :path (uri-path uri)}
+                   (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
+                   :else {:source "git" :url uri})}))
+
+(defn- ok!
+  "Turn a non-zero CLI exit into a real failure so apply! reports it instead
+   of writing settings for a plugin that was never installed."
+  [{:keys [exit err out]} argv]
+  (when-not (zero? exit)
+    (throw (ex-info (str (str/join " " argv) " failed: "
+                         (first (remove str/blank? [err out])))
+                    {:exit exit :argv argv})))
+  true)
+
+(def installed-plugins-file (str home "/plugins/installed_plugins.json"))
+
+(defn- installed?
+  "Whether the CLI's own install record holds `key` at this scope — for a
+   project or local scope, at this project. Settings alone do not install a
+   plugin; an enabled entry with no install is drift."
+  [key scope project]
+  (let [rows (get-in (u/read-json installed-plugins-file) [:plugins (keyword key)])
+        want (plugin-scope scope)
+        canon #(str (fs/canonicalize (u/abs-path %)))
+        here (some-> project :path canon)]
+    (boolean
+     (some (fn [{s :scope p :projectPath}]
+             (and (= want s)
+                  (or (= "user" want)
+                      (= here (some-> p canon)))))
+           rows))))
+
+(defn- not-installed? [{:keys [exit err out]}]
+  (and (not (zero? exit)) (re-find #"is not installed" (str err " " out))))
 
 (defn- plugin-entry [id p proj scope]
   {:id id :plugin p :project proj :scope scope
@@ -295,25 +346,30 @@
         before-e (get enabled (keyword key))
         desired-m (not= (u/norm before-m) (u/norm want-marketplace))
         desired-e (not= true before-e)
+        missing (not (installed? key scope project))
         source (plugin-source plugin)
         cwd (:path project)
         argv-add ["claude" "plugin" "marketplace" "add" "--scope" cli-scope source]
-        argv-install ["claude" "plugin" "install" "--scope" cli-scope "--marketplace" source "-y" key]]
-    (when (or desired-m desired-e)
+        ;; the marketplace is registered by argv-add, so the install names it
+        ;; once, in the key; the CLI rejects plugin@marketplace with --marketplace
+        argv-install ["claude" "plugin" "install" "--scope" cli-scope "-y" key]
+        run (fn [argv] (ok! (if cwd (claude-sh-in cwd argv) (claude-sh argv)) argv))]
+    (when (or desired-m desired-e missing)
       (plan/op
-       {:action (if (nil? current) :create (if (or desired-m desired-e) :update :noop))
+       {:action (if (nil? current) :create :update)
         :tool tool :kind :plugins :id id :project (some-> (:id project) keyword)
         :project-path (some-> project :path) :target file
         :path ["enabledPlugins" key] :cmds [argv-add argv-install]
-        :summary (str "Claude marketplace " mname "; enable " key)
-        :diffs [{:key :extraKnownMarketplaces :before before-m :after want-marketplace}
-                {:key :enabledPlugins :before before-e :after true}]
+        :summary (str "Claude marketplace " mname "; enable " key
+                      (when (and missing (not desired-m) (not desired-e))
+                        " (enabled in settings but not installed)"))
+        :diffs (cond-> []
+                 desired-m (conj {:key :extraKnownMarketplaces :before before-m :after want-marketplace})
+                 desired-e (conj {:key :enabledPlugins :before before-e :after true})
+                 missing (conj {:key :installed :before false :after true}))
         :exec! (fn []
-                 (if cwd
-                   (do (claude-sh-in cwd argv-add)
-                       (claude-sh-in cwd argv-install))
-                   (do (claude-sh argv-add)
-                       (claude-sh argv-install)))
+                 (run argv-add)
+                 (run argv-install)
                  ;; Keep the JSON deterministic even when the CLI is stubbed,
                  ;; unavailable in a test harness, or writes a different
                  ;; ordering than the settings file expects.
@@ -335,7 +391,10 @@
         :cmds [argv] :summary "removed from agents.edn" :risk :medium
         :diffs [{:key :enabledPlugins :before before :after nil}]
         :exec! (fn []
-                 (if cwd (claude-sh-in cwd argv) (claude-sh argv))
+                 ;; a plugin enabled in settings but never installed is
+                 ;; already gone as far as the CLI is concerned
+                 (let [r (if cwd (claude-sh-in cwd argv) (claude-sh argv))]
+                   (when-not (not-installed? r) (ok! r argv)))
                  (u/backup! file)
                  (let [s (or (u/read-json file) {})
                        eps (dissoc (or (:enabledPlugins s) {}) (keyword key))]

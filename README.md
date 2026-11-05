@@ -425,6 +425,35 @@ moves, `apply` plans a fetch, a hard reset and a rebuild, so local edits in
 the `defaultTools` entries it brought; the checkout stays as a cache.
 Extensions are user-wide, and `:in` does not apply to them.
 
+## Claude plugins
+
+A Claude Code plugin bundles skills, subagents and hooks, and is installed
+from a marketplace. `:plugins` is keyed by `[:gh "owner/repo" "plugin"]` or
+`[:uri "…" "plugin"]`; the marketplace name defaults to the plugin name
+(`:marketplace` overrides it):
+
+```clojure
+{:plugins {[:gh "Egonex-AI/Understand-Anything" "understand-anything"]
+           {:in "projects/barge" :at :repo :acli [:claude]}}}
+```
+
+`apply!` runs `claude plugin marketplace add` and `claude plugin install
+<plugin>@<marketplace>` at the placement's scope, then writes
+`extraKnownMarketplaces` and `enabledPlugins` into that scope's settings file.
+`:in :all` is user scope (`~/.claude/settings.json`); in a project `:at :repo`
+is project scope (`.claude/settings.json`, committed) and the default
+`:at :machine` is local scope (`.claude/settings.local.json`). A plugin enabled
+in settings but missing from Claude's own install record
+(`~/.claude/plugins/installed_plugins.json`) is drift and is reinstalled. A
+failed CLI step fails `apply!`: nothing is written and nothing is owned.
+A `file://` or path source is added by path and declared as a `directory`
+marketplace; other URLs are `git`, or `url` for a hosted `marketplace.json`.
+Dropping a placement uninstalls the plugin there and removes its
+`enabledPlugins` entry; the marketplace declaration stays.
+
+Marketplace names are global to Claude: two declarations whose sources share a
+marketplace name re-register it, and every project follows the last one.
+
 ## Project skills
 
 A project's `:skills` names a whole skill-pack, a skill declared under `:skills`,
