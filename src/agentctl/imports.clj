@@ -371,6 +371,51 @@
 
 ;; ---------------------------------------------------------------- projects
 
+(declare scan-projects)
+
+(defn- marketplace-source [m]
+  (let [source (:source m)]
+    (cond
+      (and (= "github" (:source source)) (:repo source)) [:gh (:repo source)]
+      (and (= "url" (:source source)) (:url source)) [:uri (:url source)]
+      (:repo source) [:gh (:repo source)]
+      (:url source) [:uri (:url source)]
+      :else nil)))
+
+(defn- plugin-declarations [settings placement at]
+  (let [marketplaces (or (:extraKnownMarketplaces settings) {})
+        enabled (or (:enabledPlugins settings) {})]
+    (keep (fn [[raw enabled?]]
+            (when (not= false enabled?)
+              (let [[plugin marketplace] (str/split (u/key-str raw) #"@" 2)
+                    source (marketplace-source (get marketplaces (keyword marketplace)))]
+                (when (and (not (str/blank? plugin)) (not (str/blank? marketplace)) source)
+                  [(conj source plugin)
+                   (cond-> {:acli [:claude] :in placement}
+                     at (assoc :at at))]))))
+          enabled)))
+
+(defn scan-plugins []
+  "Read Claude's marketplace and enabledPlugins settings into keyed DSL rows.
+   Project rows are discovered from the same trusted-project inventory import
+   uses for the rest of Claude's project configuration."
+  (let [global (plugin-declarations (u/read-json claude/settings-file) :all nil)
+        trusted (scan-projects)
+        discovered (for [p (scope/repositories (str u/home "/projects"))]
+                     [(keyword (str (fs/file-name p))) {:path (u/tilde p)}])
+        projects (merge (into {} discovered) trusted)
+        project-rows (mapcat (fn [[_ p]]
+                              (concat
+                               (when (u/exists? (claude/project-settings-file p))
+                                 (plugin-declarations (u/read-json (claude/project-settings-file p))
+                                                      (:path p) :repo))
+                               (let [f (str (:path p) "/.claude/settings.local.json")]
+                                 (when (u/exists? f)
+                                   (plugin-declarations (u/read-json f) (:path p) :machine)))))
+                            projects)]
+    (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+          (concat global project-rows))))
+
 (defn scan-projects []
   (let [codex-cfg (try (toml/read-toml codex/config-file) (catch Exception _ nil))
         codex-projects (for [[path v] (get codex-cfg "projects")]
@@ -422,6 +467,7 @@
         discovered (u/prune-nils
                     {:executors (scan-settings)
                      :mcps (not-empty (scan-mcps))
+                     :plugins (not-empty (scan-plugins))
                      :skills (not-empty skills)
                      :skill-packs (not-empty packs)
                      :extra-providers (not-empty (scan-providers))
@@ -442,6 +488,7 @@
   [[:executors "global per-executor settings"]
    [:extra-providers "model providers; keys are !bw:// / $ENV refs, never literals"]
    [:mcps "MCP servers, fanned out to the listed tools"]
+   [:plugins "Claude Code marketplaces and enabled plugins"]
    [:skill-packs "where skills come from (git or local checkout)"]
    [:skills "installed skills"]
    [:memory "shared memory files linked into each agent"]
@@ -495,6 +542,22 @@
                      [k (-> (keyed-entry k id (dissoc decl :subdir))
                             (assoc :in (placements :skills id decl)))]))))))
 
+(defn- keyed-plugins [config placements]
+  (let [plugins (:plugins config)]
+    (when (seq plugins)
+      {:plugins
+       (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+             (for [[id decl] plugins
+                   :let [src (or (:repo decl) (:uri decl))
+                         base (if (:repo decl) [:gh src] [:uri src])
+                         k (conj base (or (:plugin decl) (name id)))
+                         in (placements :plugins id decl)
+                         at (when (and (vector? in) (seq in))
+                              (if (= :project (:scope decl)) :repo :machine))]]
+               [k (cond-> (dissoc (keyed-entry k id decl) :repo :uri :plugin)
+                    (not= :all in) (assoc :in in)
+                    at (assoc :at at))]))})))
+
 (defn entity-config
   "Import emits literal selectors; it cannot infer a user's intended tree."
   [config]
@@ -523,7 +586,7 @@
                                              (and (seq tools) (not (or (:tools decl) (:for decl))))
                                              (assoc :tools (vec (sort tools))))])))]
         (merge
-         (apply dissoc config [:executors :cli-code :projects :mcps :skills :skill-packs :providers :extra-providers :memory])
+         (apply dissoc config [:executors :cli-code :projects :mcps :plugins :skills :skill-packs :providers :extra-providers :memory])
          {:settings (vec (concat
                           (for [[t s] (or (:executors config) (:cli-code config))]
                             (assoc s :id (keyword (str "user-" (name t))) :tools [t] :in :all))
@@ -533,6 +596,7 @@
                         {:id id :in (:path p) :trusted (:trusted p)
                          :tools (vec (sort (get-in resolved [id :for-tools])))}))}
          (keyed-skills config placements)
+         (keyed-plugins config placements)
          (into {} (for [kind [:mcps :providers :memory]
                         :let [rows (if (= kind :providers) (merge (:extra-providers config) (:providers config)) (get config kind))]
                         :when (seq rows)]

@@ -6,10 +6,10 @@
 
 (def max-depth 32)
 (def ignored #{"node_modules" ".venv" "venv" ".git" ".jj" ".hg" "skill-packs"})
-(def kinds [:settings :permissions :mcps :skills :skill-packs :providers :memory :trust :hooks])
+(def kinds [:settings :permissions :mcps :skills :skill-packs :providers :memory :trust :hooks :plugins])
 (def keyed-kinds
   "Sections that are maps keyed by a source selector rather than vectors of rows."
-  #{:skills :skill-packs})
+  #{:skills :skill-packs :plugins})
 (defn- keyed? [v] (and (map? v) (seq v) (every? vector? (keys v))))
 (defn dsl? [raw] (some #(let [v (get raw %)] (or (vector? v) (keyed? v))) kinds))
 
@@ -45,7 +45,7 @@
 (defn source
   "A `[:gh \"owner/repo\"]` or `[:uri \"…\"]` key as a URI, or nil."
   [[head arg :as k]]
-  (when (and (= 2 (count k)) (string? arg) (not (str/blank? arg)))
+  (when (and (<= 2 (count k)) (string? arg) (not (str/blank? arg)))
     (case head
       :gh (str "https://github.com/" (str/replace arg #"^/+|/+$|\.git$" ""))
       :uri arg
@@ -54,11 +54,15 @@
 (defn- non-blank? [s] (and (string? s) (not (str/blank? s))))
 
 (defn- bad-key [kind k]
-  (throw (ex-info (str "invalid " kind " key " (pr-str k)
-                       (if (= kind :skills)
-                         " — expected [:gh \"owner/repo\"], [:uri \"…\"], [pack \"skill\"] or [pack [\"skill\" …]]"
-                         " — expected [:gh \"owner/repo\"] or [:uri \"…\"]"))
-                  {:kind kind :key k})))
+  (throw
+   (ex-info
+    (str "invalid " kind " key " (pr-str k)
+         (if (= kind :skills)
+           " — expected [:gh \"owner/repo\"], [:uri \"…\"], [pack \"skill\"] or [pack [\"skill\" …]]"
+           (if (= kind :plugins)
+             " — expected [:gh \"owner/repo\" \"plugin\"] or [:uri \"…\" \"plugin\"]"
+             " — expected [:gh \"owner/repo\"] or [:uri \"…\"]")))
+    {:kind kind :key k})))
 
 (defn- row
   "Common row shape: `:alias` names the entity, `:acli` selects the CLIs."
@@ -112,8 +116,29 @@
      {:skills [] :packs packs}
      skills)))
 
+(defn- plugin-rows
+  "Lower plugin marketplace keys. The third key element is the plugin name;
+   the marketplace id defaults to the same name, which is Claude's convention
+   for a marketplace whose manifest contains one plugin."
+  [plugins]
+  (vec
+   (for [[k v] plugins
+         :let [[head repo plugin] k]
+         :when (do
+                 (when-not (and (vector? k) (= 3 (count k))
+                                (#{:gh :uri} head) (non-blank? repo) (non-blank? plugin))
+                   (bad-key :plugins k))
+                 true)
+         :let [uri (source [head repo])]
+         :when uri]
+     (assoc (row (keyword plugin) v)
+            :repo (when (= head :gh) repo)
+            :uri (when (= head :uri) repo)
+            :plugin plugin
+            :marketplace (or (:marketplace v) plugin)))))
+
 (defn lower-keyed
-  "Rewrite the keyed `:skill-packs` / `:skills` maps into entity rows."
+  "Rewrite keyed source maps (`:skill-packs`, `:skills`, and `:plugins`) into entity rows."
   [raw]
   (doseq [k keyed-kinds :let [v (get raw k)]
           :when (and (some? v) (not (map? v)))]
@@ -122,7 +147,8 @@
     (reduce #(cond-> %1 (map? (get %1 %2)) (assoc %2 [])) raw keyed-kinds)
     (let [packs (pack-rows (:skill-packs raw))
           {:keys [skills packs]} (skill-rows (:skills raw) packs)]
-      (assoc raw :skill-packs packs :skills skills))))
+      (cond-> (assoc raw :skill-packs packs :skills skills)
+        (seq (:plugins raw)) (assoc :plugins (plugin-rows (:plugins raw)))))))
 (defn path [p]
   (let [p (u/expand p)]
     (str (fs/normalize (if (fs/absolute? p) p (str u/home "/" p))))))
@@ -267,6 +293,14 @@
                               pid (update-in [:projects pid :skills] (fnil conj []) id))
                     :skill-packs (cond-> (assoc-in cfg [:skill-packs id] body)
                                    pid (update-in [:projects pid :skills] (fnil conj []) id))
+                    :plugins (cond-> (update-in cfg [:plugins id]
+                                                (fn [old]
+                                                  (merge old body
+                                                         {:id id :kind :plugins
+                                                          :tools (set (concat (:tools old) ts))
+                                                          :scope scope
+                                                          :used-by (cond-> (set (:used-by old)) pid (conj pid))})))
+                               pid (update-in [:projects pid :plugins] (fnil conj []) id))
                     :providers (if pid cfg (assoc-in cfg [:providers id] (assoc body :tools ts)))
                     :memory (if pid cfg
                                 (-> cfg
