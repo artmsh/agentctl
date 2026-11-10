@@ -1,7 +1,8 @@
 # agentctl — design
 
 The reference for the DSL and the decisions behind it. `README.md` is the short
-version: install, safety model, MCP scope, project skills, reading a plan.
+version: install, usage, safety model; [GUIDE.md](GUIDE.md) covers MCP scope,
+project skills and reading a plan.
 
 Declarative provisioning for coding agents — Terraform/Ansible shaped, but the
 managed infrastructure is `claude`, `codex`, `pi`, `omp`, `llm`,
