@@ -3,7 +3,9 @@
 <p align="center">
   <b>Stage:</b> alpha · <b>Target:</b> personal, published as-is · <b>License:</b> <a href="LICENSE">Apache-2.0</a>
   <br>
-  <a href="#install">Install</a> · <a href="#usage">Usage</a> · <a href="#limitations">Limitations</a> · <a href="docs/GUIDE.md">Guide</a> · <a href="docs/AGENTCTL.md">Design and DSL</a>
+  <a href="https://github.com/artmsh/agentctl/actions/workflows/test.yml"><img src="https://github.com/artmsh/agentctl/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
+  <br>
+  <a href="#install">Install</a> · <a href="#usage">Usage</a> · <a href="#comparison">Comparison</a> · <a href="#limitations">Limitations</a> · <a href="docs/GUIDE.md">Guide</a> · <a href="docs/AGENTCTL.md">Design and DSL</a>
 </p>
 
 <p align="center"><img src="docs/images/gui.png" width="720" alt="Screenshot of agentctl gui: config controls on the left, the live dry-run plan on the right."></p>
@@ -13,13 +15,53 @@
 > **Alpha.** Config keys change without migration: `:#let` became `:#def` with no alias, and an
 > old file's `$name` references fall back to environment variables. 170 unit tests and five
 > end-to-end suites pass in CI, but no `apply!` over a whole config on a real home has been done
-> yet (#5). Beta when #5 is verified and
-> #16 is fixed.
+> yet. Beta when that run is verified and a locked Bitwarden vault no longer drops an MCP
+> secret silently (see [Limitations](#limitations)).
 
-agentctl reads `~/.config/agents.edn`, compares it with the files each CLI keeps on disk, prints
-a plan and applies only the changes it owns, in the manner of Terraform. It covers Claude Code,
-Codex, Pi, OMP, Antigravity (`agy`), Kimi Code, the DeepSeek Harness (`dsh`) and Simon
-Willison's `llm`; a tool whose CLI is not installed is skipped.
+## Rationale
+
+Each coding-agent CLI keeps its settings, MCP servers, skills and memory in its own files and
+formats, so running several of them means repeating every change by hand in each and watching
+the copies drift. [ruler](https://github.com/intellectronica/ruler) and
+[rulesync](https://github.com/dyoshikawa/rulesync) generate each agent's files from a rules
+directory kept in the project. agentctl treats the machine itself as the infrastructure: one
+`~/.config/agents.edn` declares user-wide and per-project state, `apply` prints a Terraform-style
+plan, and `apply!` edits the files the CLIs also rewrite at runtime in place, by key or TOML
+segment.
+
+## Features
+
+- Covers Claude Code, Codex, Pi, OMP, Antigravity (`agy`), Kimi Code, the DeepSeek Harness
+  (`dsh`) and Simon Willison's `llm`; a tool whose CLI is not installed is skipped.
+- `apply` writes nothing, not even state or directories, and exits 2 on drift, so it can run
+  from cron or CI.
+- `apply!` backs up every file before its first write in a run, under
+  `~/.config/agentctl/backups/<stamp>/`, and removes only resources recorded in
+  `~/.config/agentctl/state.edn`, plus project skill links that a global skill declaration
+  supersedes ([project skills](docs/GUIDE.md#project-skills)).
+- TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
+  each CLI's own subcommand, so keys a CLI writes for itself survive.
+- Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
+  vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
+  values; review its output before sharing a config.
+
+## Comparison
+
+Compared with [ruler](https://github.com/intellectronica/ruler) v0.3.46 and
+[rulesync](https://github.com/dyoshikawa/rulesync) v43.8.2, from their READMEs and the
+[rulesync CLI reference](https://rulesync.dyoshikawa.com/reference/cli-commands).
+
+| | agentctl | ruler | rulesync |
+|---|---|---|---|
+| Targets | 8 agent CLIs | 30, including an `AGENTS.md` pseudo-agent | 65, including plugin and IDE variants |
+| Source of truth | `~/.config/agents.edn`, user and project entries in one file | `.ruler/` per project, `~/.config/ruler` as fallback | `.rulesync/` per project, `--global` mode |
+| Manages | settings, MCP servers, skills, memory, providers, hooks, Claude plugins | rules, MCP servers, skills, subagents | rules, ignore files, MCP servers, commands, subagents, skills, hooks, permissions |
+| Drift check | `apply` exits 2 on drift | `--dry-run` preview | `generate --check` |
+| Removal | only resources recorded in its state file | `revert` restores `.bak` files and deletes generated ones | `generate --delete` sweeps its managed paths; `--retire-targets` for a dropped tool |
+| Runtime | Babashka | Node.js 20.19+, 22.12+ or 23+ | Node.js, or a single binary |
+
+ruler or rulesync is the better fit for rules committed to a team repository, or for an agent
+outside agentctl's eight.
 
 ## Install
 
@@ -87,30 +129,13 @@ drives, at a scratch tree for testing. `agentctl gui` serves the screen above on
 behind a per-run token in the URL it prints, and Apply is its only control that writes
 ([GUI](docs/GUIDE.md#gui)).
 
-## Safety
-
-- **Read-only preview.** `apply` writes nothing, not even state or directories, and exits 2 on
-  drift, so it can run from cron or CI.
-- **Backups.** `apply!` backs up every file before its first write in a run, under
-  `~/.config/agentctl/backups/<stamp>/`.
-- **Ownership.** Only resources agentctl created are removed, plus project skill links that a
-  global skill declaration supersedes ([project skills](docs/GUIDE.md#project-skills)).
-  Ownership is recorded in `~/.config/agentctl/state.edn`.
-- **Tool-owned files.** TOML is edited segment by segment, JSON and YAML by key path, and MCP
-  servers go through each CLI's own subcommand.
-- **Secret references.** Secrets are `$ENV_VAR` or `!bw://folder/item/field` references
-  resolved at apply time, and a locked vault or unreachable endpoint is reported as unknown.
-  `import` redacts credential-shaped values; review its output before sharing a config.
-
 ## Scope
 
-- **For:** one person running several coding-agent CLIs who wants their settings, MCP servers,
-  skills, memory and providers in one reviewed file.
-- **Not for:** agent CLIs other than the eight above (an unknown tool is a config error), or
-  remote hosts beyond codex's user-wide skills, where other kinds are reported, not written.
-- **Support:** one author, no tagged releases. Open issues are tracked at
-  the issue tracker; report vulnerabilities privately as
-  [SECURITY.md](SECURITY.md) describes.
+For one person running several coding-agent CLIs who wants their settings, MCP servers, skills,
+memory and providers in one reviewed file. Not for agent CLIs other than the eight above (an
+unknown tool is a config error; see [Comparison](#comparison)), or for remote hosts beyond
+codex's user-wide skills, where other kinds are reported, not written. One author, no tagged
+releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describes.
 
 ## Limitations
 
@@ -119,10 +144,8 @@ behind a per-run token in the URL it prints, and Apply is its only control that 
 - The DeepSeek Harness keeps settings, MCP servers and providers in Cordis patch files that
   agentctl does not write; `:dsh` entries there are reported by `validate` and the plan.
 - With a locked Bitwarden vault, `apply!` writes an MCP server without the header or env var
-  that carried the secret, and the next `apply` shows no drift
-  (#16).
-- Removing a project from the config leaves its project-scoped MCP entries behind
-  (#2).
+  that carried the secret, and the next `apply` shows no drift.
+- Removing a project from the config leaves its project-scoped MCP entries behind.
 
 ## Development
 
