@@ -197,6 +197,17 @@
                           (throw (ex-info "project skill changed since planning" {:path dest})))
                         ((:exec! o)))))))
 
+(defn packs-for-skill
+  "Pack ids skill `id` could come out of: its declared `:from`, the pack of
+   that name, or, for a bare id, every pack carrying it plus every pack not
+   on disk yet."
+  [cfg id]
+  (cond
+    (get-in cfg [:skills id]) [(:from (get-in cfg [:skills id]))]
+    (get-in cfg [:skill-packs id]) [id]
+    :else (let [{:keys [found not-ready]} (locate-skill (:skill-packs cfg) id)]
+            (concat (map first found) not-ready))))
+
 (defn packs-for
   "Pack ids the given projects could need. A project names a skill by one of
    three routes — a declared skill (whose `:from` is a pack), a whole pack, or
@@ -210,11 +221,7 @@
      (for [[pid proj] (:projects cfg)
            :when (contains? wanted pid)
            id (:skills proj)
-           pack (cond
-                  (get-in cfg [:skills id]) [(:from (get-in cfg [:skills id]))]
-                  (get-in cfg [:skill-packs id]) [id]
-                  :else (let [{:keys [found not-ready]} (locate-skill (:skill-packs cfg) id)]
-                          (concat (map first found) not-ready)))
+           pack (packs-for-skill cfg id)
            :when pack]
        pack))))
 

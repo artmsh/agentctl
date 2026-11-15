@@ -685,10 +685,13 @@ end up writing a resolved secret into a tool's config file are tagged
 ```
 -f, --file PATH    config file (default ~/.config/agents.edn)
 -t, --tool TOOL    restrict to a tool (repeatable)
--k, --kind KIND    restrict to settings|mcps|skills|providers|memory|projects|skill-packs
+-k, --kind KIND    restrict to a kind (repeatable; --help lists them, an unknown
+                   one exits 1)
 -p, --project ID   restrict to one declared project — selects everything that
                    project owns, whatever its kind (its servers and skills are
                    :mcps / :skills ops, so --kind projects would miss them)
+    --only KIND/ID apply/apply!: one entity wherever it is placed (repeatable)
+    --user         apply/apply!: user scope only, no project
     --json         machine-readable output
 -v, --verbose      per-field diffs and target paths
     --show-noop    include unchanged and informational entries

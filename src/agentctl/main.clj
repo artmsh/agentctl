@@ -14,9 +14,21 @@
             [clojure.string :as str])
   (:refer-clojure :exclude [import]))
 
+(defn- wrap-words
+  "`words` as lines of at most `width` characters, each starting with `indent`."
+  [indent width words]
+  (map #(str indent (str/join " " %))
+       (reduce (fn [lines w]
+                 (let [line (peek lines)]
+                   (if (and (seq line) (> (+ (count indent) (count (str/join " " (conj line w)))) width))
+                     (conj lines [w])
+                     (conj (pop lines) (conj line w)))))
+               [[]] words)))
+
 (def usage
   (str/join
    "\n"
+   (concat
    ["agentctl — declarative provisioning for coding agents (claude, codex, pi, omp, llm, antigravity, kimi, dsh)"
     ""
     "USAGE"
@@ -34,11 +46,14 @@
     "OPTIONS"
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi dsh"
-    "  -k, --kind KIND      Restrict to a resource kind (repeatable):"
-    "                       settings permissions hooks mcps skills providers memory trust skill-packs"
-    "                       extensions"
-    "  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
+    "  -k, --kind KIND      Restrict to a resource kind (repeatable):"]
+   (wrap-words "                       " 92 (map name core/kinds))
+   ["  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
+    "      --only KIND/ID   apply/apply!: plan one entity wherever it is placed (repeatable),"
+    "                       e.g. --only skills/review; nothing outside it is pruned"
+    "      --user           apply/apply!: plan user scope only, no project; prunes only"
+    "                       user-scope resources dropped from the config"
     "  -A, --all            apply/apply!: ignore the working directory and plan the"
     "                       whole config (see SCOPE)"
     "      --host NAME      apply/apply!/validate/state: act on a host declared under"
@@ -56,8 +71,10 @@
     "SCOPE"
     "  apply and apply! read the working directory. Inside a resolved project they"
     "  plan only that project; on its workspace directory, only projects beneath it."
-    "  Explicit -p selects a path or tree. --all disables working-directory narrowing."
-    "  Elsewhere the whole config is planned."]))
+    "  Explicit -p selects a path or tree. --all disables working-directory narrowing,"
+    "  and so do --only and --user, which say what to plan by hand. Elsewhere the"
+    "  whole config is planned. A narrowed run (-t -k -p --only --user, or the"
+    "  working directory) forgets ownership only of what it removed itself."])))
 
 (defn parse-args [args]
   (loop [args args opts {:tools #{} :kinds #{} :projects #{}}]
@@ -67,6 +84,8 @@
         ("-t" "--tool") (recur (drop 2 args) (update opts :tools conj (keyword (second args))))
         ("-k" "--kind") (recur (drop 2 args) (update opts :kinds conj (keyword (second args))))
         ("-p" "--project") (recur (drop 2 args) (update opts :projects conj (keyword (second args))))
+        "--only" (recur (drop 2 args) (update opts :only (fnil conj []) (str (second args))))
+        "--user" (recur (rest args) (assoc opts :user true))
         "--json" (recur (rest args) (assoc opts :json true))
         ("-v" "--verbose") (recur (rest args) (assoc opts :verbose true))
         "--show-noop" (recur (rest args) (assoc opts :show-noop true))
@@ -141,6 +160,8 @@
   [opts mutate?]
   (when (seq (:projects opts))
     (throw (ex-info "--project does not apply with --host: hosts have no projects yet" {})))
+  (when (seq (:only opts))
+    (throw (ex-info "--only does not apply with --host: a host is planned as a whole" {})))
   (let [cfg (load! opts)
         _ (check-config! cfg)
         host (hosts/lookup cfg (:host opts))
@@ -191,8 +212,9 @@
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
-          ;; config on purpose — either one outranks the directory.
-          scope (when-not (or (:all opts) (seq (:projects opts)))
+          ;; config on purpose — either one outranks the directory, and so do
+          ;; --only and --user, which name what to plan by hand too.
+          scope (when-not (or (:all opts) (:user opts) (seq (:only opts)) (seq (:projects opts)))
                   (core/cwd-scope cfg (System/getProperty "user.dir")))
           opts (cond-> opts scope (assoc :projects (:projects scope)))
           ops (core/build-plan cfg st opts)
@@ -210,6 +232,8 @@
           (when scope (println (scope-note cfg scope)))
           (doseq [p (core/unmatched-projects cfg opts)]
             (println (str "  ⚠ -p " p " — no declared project there")))
+          (doseq [o (core/unmatched-only cfg st opts)]
+            (println (str "  ⚠ --only " o " — nothing declared or owned by that id")))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
           (if (or (seq changes) (:show-noop opts))
@@ -301,6 +325,26 @@
                          " (tools: " (str/join ", " (map name config/all-tools)) ")")
                     {}))))
 
+(defn- check-selectors!
+  "`-k` and `--only` name kinds of op, and a kind no op carries selects
+   nothing — a typo would read as a converged machine. Returns `opts` with
+   each `--only` parsed into `[kind id]`."
+  [{:keys [kinds only] :as opts}]
+  (let [valid (set core/kinds)
+        listing (str " (kinds: " (str/join ", " (map name core/kinds)) ")")]
+    (doseq [k kinds :when (not (valid k))]
+      (throw (ex-info (str "-k " (u/kw->str k) ": unknown kind " k listing) {})))
+    (when (and (:user opts) (seq (:projects opts)))
+      (throw (ex-info "--user plans no project; it does not combine with --project" {})))
+    (cond-> opts
+      (seq only)
+      (assoc :only (vec (for [s only
+                              :let [[_ k id] (re-matches #"([^/]+)/(.+)" s)]]
+                          (cond
+                            (nil? k) (throw (ex-info (str "--only " s ": want KIND/ID, e.g. --only skills/review") {}))
+                            (not (valid (keyword k))) (throw (ex-info (str "--only " s ": unknown kind :" k listing) {}))
+                            :else [(keyword k) id])))))))
+
 (defn -main [& args]
   (let [{:keys [command help] :as opts} (parse-args args)]
     (cond
@@ -310,18 +354,21 @@
         (check-tools! opts)
         (when (and (:host opts) (not (#{"apply" "plan" "apply!" "validate" "state"} command)))
           (throw (ex-info (str command " does not take --host") {})))
-        (case command
-          "apply" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
-          "plan" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
-          "apply!" (if (:host opts) (cmd-apply-host opts true) (cmd-apply opts true))
-          "validate" (cmd-validate opts)
-          "import" (cmd-import opts false)
-          "import!" (cmd-import opts true)
-          "state" (cmd-state opts)
-          "gui" (cmd-gui opts)
-          (do (println (str "unknown command: " command "\n"))
-              (println usage)
-              (System/exit 1)))
+        (when (and (or (seq (:only opts)) (:user opts)) (not (#{"apply" "plan" "apply!"} command)))
+          (throw (ex-info (str command " does not take --only or --user") {})))
+        (let [opts (check-selectors! opts)]
+          (case command
+            "apply" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
+            "plan" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
+            "apply!" (if (:host opts) (cmd-apply-host opts true) (cmd-apply opts true))
+            "validate" (cmd-validate opts)
+            "import" (cmd-import opts false)
+            "import!" (cmd-import opts true)
+            "state" (cmd-state opts)
+            "gui" (cmd-gui opts)
+            (do (println (str "unknown command: " command "\n"))
+                (println usage)
+                (System/exit 1))))
         (catch clojure.lang.ExceptionInfo e
           (println (str "error: " (ex-message e)))
           (System/exit 1))))))

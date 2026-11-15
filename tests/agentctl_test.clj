@@ -14,6 +14,7 @@
             [agentctl.gui :as gui]
             [agentctl.hosts :as hosts]
             [agentctl.imports :as imports]
+            [agentctl.main :as main]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.remote :as remote]
@@ -1535,7 +1536,54 @@
   (is (false? (core/scoped? {})))
   (is (true? (core/scoped? {:tools [:claude]})))
   (is (true? (core/scoped? {:kinds [:hooks]})))
-  (is (true? (core/scoped? {:projects #{"p"}}))))
+  (is (true? (core/scoped? {:projects #{"p"}})))
+  (is (true? (core/scoped? {:only [[:skills "review"]]})))
+  (is (true? (core/scoped? {:user true}))))
+
+(deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
+  ;; `-k` is checked against `core/kinds`; a kind missing from it would be
+  ;; refused, and one missing from --help is a kind nobody knows to ask for
+  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
+           :providers :memory :trust :extensions :projects}
+         (set core/kinds)))
+  (is (= (set (map name core/kinds))
+         (->> (str/split-lines main/usage)
+              (drop-while #(not (str/includes? % "--kind KIND")))
+              rest
+              (take-while #(str/starts-with? % (apply str (repeat 23 " "))))
+              (mapcat #(str/split (str/trim %) #"\s+"))
+              set)))
+  (is (= {:only ["skills/review" "mcps/search"] :user true}
+         (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
+                      [:only :user]))))
+
+(deftest only-and-user-select-across-scopes-without-the-rest
+  (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")]
+    (fs/create-dirs (str repo "/.git"))
+    (doseq [s ["review" "lint"]]
+      (fs/create-dirs (str pack "/skills/" s))
+      (spit (str pack "/skills/" s "/SKILL.md") (str "---\nname: " s "\ndescription: d\n---\n")))
+    (let [cfg (config/normalize
+               {:skill-packs {[:uri (str "file://" pack)] {:alias 'p :dir "skills"}}
+                :skills {['p "review"] {:in :all :acli [:claude]}
+                         ['p "lint"] {:in repo :acli [:claude]}}
+                :mcps [{:id :search :cmd "search-mcp" :in :all :acli [:claude]}
+                       {:id :search :cmd "search-mcp" :in repo :acli [:codex]}]}
+               "test")
+          plan (fn [opts] (core/build-plan cfg state/empty-state (merge {:tools #{:claude :codex}} opts)))
+          sel (fn [ops] (set (map (juxt :kind (comp u/kw->str :id) (comp boolean :project)) ops)))]
+      (testing "--only keeps one entity in user scope and in a project, and nothing else"
+        (is (= #{[:mcps "search" false] [:mcps "search" true]}
+               (sel (plan {:only [[:mcps "search"]]}))))
+        (is (= #{[:skills "lint" true]} (sel (plan {:only [[:skills "lint"]]})))))
+      (testing "--user keeps no op that lands in a project"
+        (let [ops (plan {:user true})]
+          (is (seq ops))
+          (is (not-any? #(or (:project %) (:project-path %)) ops))
+          (is (contains? (sel ops) [:skills "review" false]))))
+      (testing "an --only id nothing declares is reported, one that is declared is not"
+        (is (= ["skills/nope"]
+               (core/unmatched-only cfg state/empty-state {:only [[:skills "nope"] [:skills "lint"]]})))))))
 
 (defn- scope-cfg
   "A workspace with two projects and one nested inside the first, so a cwd can

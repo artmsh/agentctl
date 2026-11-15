@@ -38,8 +38,48 @@
   (let [wanted (or (not-empty (set tools)) (config/active-tools cfg))]
     (filter #(and (contains? wanted %) ((get-in registry [% :present?]))) config/all-tools)))
 
+(def kinds
+  "Every kind an op can carry: the DSL's sections and every kind a tool is
+   provisioned with. An old-format config plans a project's trust and
+   settings as `:projects`, and extensions have no DSL section. `-k` and
+   `--only` are checked against this, because a kind no op carries selects
+   nothing, and an empty plan reads exactly like a converged machine."
+  (vec (sort (into (set scope/kinds) (mapcat val config/capabilities)))))
+
 (defn- keep-kinds [ops {:keys [kinds]}]
   (if (seq kinds) (filter #(contains? (set kinds) (:kind %)) ops) ops))
+
+(defn- id-names
+  "The spellings `--only` accepts for an id: whole, and its last segment.
+   A project's copy of an entity carries the project in its id
+   (`target-…/review`), and the selector names the entity, not the copy."
+  [id]
+  (let [s (u/id->str id)] (hash-set s (last (str/split s #"/")))))
+
+(defn- only-match? [[kind id] o]
+  (and (or (= kind (:kind o)) (= kind (:shown-kind o)))
+       (some? (:id o))
+       (contains? (id-names (:id o)) id)))
+
+(defn- keep-only
+  "`--only kind/id` keeps the ops of one entity wherever it is placed, user
+   scope and projects alike. A selected skill keeps the op that fetches its
+   pack, for the reason `keep-projects` gives: without the clone there is
+   nothing to link, and `converge!` never gets its second pass."
+  [ops cfg {:keys [only]}]
+  (if (empty? only)
+    ops
+    (let [packs (set (for [[kind id] only :when (= :skills kind)
+                           p (sources/packs-for-skill cfg (keyword id)) :when p] p))]
+      (filter #(or (some (fn [sel] (only-match? sel %)) only)
+                   (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
+              ops))))
+
+(defn- keep-user
+  "`--user` keeps what lands outside every project: user-wide files, and the
+   packs cloned for them, which belong to no project either."
+  [ops {:keys [user]}]
+  (if user (remove #(or (:project %) (:project-path %)) ops) ops))
 
 (defn- project-ids
   "The declared projects one `--project` value selects: a project id as is,
@@ -149,10 +189,12 @@
           {:projects children :where :root :path cwd})))))
 
 (defn scoped?
-  "Did `-t`/`-k`/`-p` narrow this run to less than the whole config? Callers
-   use this to decide what `done` to pass `sync-state!` — see its docstring."
-  [{:keys [tools kinds projects]}]
-  (boolean (or (seq tools) (seq kinds) (seq projects))))
+  "Did `-t`/`-k`/`-p`/`--only`/`--user` narrow this run to less than the
+   whole config? Callers use this to decide what `done` to pass
+   `sync-state!` — see its docstring. A scoped run forgets only what it
+   removed itself, so nothing outside the selection is ever pruned."
+  [{:keys [tools kinds projects only user]}]
+  (boolean (or (seq tools) (seq kinds) (seq projects) (seq only) user)))
 
 (defn- project-hook-ops [cfg st]
   (let [desired (into {} (for [[pid p] (:projects cfg) [id h] (get-in p [:tools :claude :hooks])]
@@ -395,6 +437,8 @@
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
         (keep-kinds opts)
         (keep-projects cfg opts)
+        (keep-only cfg opts)
+        (keep-user opts)
         defer-unmet-removals
         (->> (annotate-skill-ops cfg))
         same-command
@@ -468,6 +512,31 @@
    (for [[id m] (:memory cfg) t (:tools m)] [t :memory id])
    (for [[id p] (:projects cfg) t (:for-tools p)]
      [t :projects id {:entity-id id :project-id id :project-path (:path p)}]))))
+
+(def ^:private field-kinds
+  "Kinds whose op ids name a field or a file, not a declared entity, so there
+   is no declaration to check an `--only` id against."
+  #{:settings :permissions :trust :projects})
+
+(defn unmatched-only
+  "`--only` selectors whose id names nothing declared or owned, as written.
+   Checked against declarations, never against ops: a converged entity plans
+   no op, and a run narrowed to a typo plans nothing, which reads exactly like
+   a converged machine."
+  [cfg st {:keys [only]}]
+  (let [declared (fn [kind]
+                   (concat (for [[_ k id] (inventory cfg) :when (= k kind)] id)
+                           (for [[[_ k id] _] (:managed st) :when (= k kind)] id)
+                           (for [e (:entities cfg) :when (= kind (:kind e))] (:id e))
+                           (let [section (get cfg kind)] (when (map? section) (keys section)))
+                           (when (= :skills kind)
+                             (concat (mapcat :skills (vals (:projects cfg)))
+                                     (for [[_ p] (:skill-packs cfg) d (sources/skill-dirs p)]
+                                       (fs/file-name d))))))]
+    (for [[kind id :as sel] only
+          :when (not (field-kinds kind))
+          :when (not-any? #(contains? (id-names %) id) (declared kind))]
+      (str (name kind) "/" (second sel)))))
 
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.

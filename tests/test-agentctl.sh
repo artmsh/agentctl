@@ -879,4 +879,112 @@ EDN
   cmp -s "$SB/mcp-before-invalid-ref.json" "$SB/.pi/agent/mcp.json" || fail "invalid reference changed MCPs"
 done
 
+echo "21. --only and --user narrow apply! without pruning what lies outside them"
+# a home of its own: what this section owns, and nothing else, is the point
+SEL="$SB/sel"
+mkdir -p "$SEL/proj" "$SEL/gp/skills/g"
+git -C "$SEL/proj" init -q
+for s in a b c d e; do
+  mkdir -p "$SEL/packs/p/skills/$s"
+  printf -- '---\nname: %s\ndescription: Demo.\n---\n' "$s" > "$SEL/packs/p/skills/$s/SKILL.md"
+done
+printf -- '---\nname: g\ndescription: Demo.\n---\n' > "$SEL/gp/skills/g/SKILL.md"
+git -C "$SEL/gp" init -q
+git -C "$SEL/gp" -c user.email=t@e -c user.name=t add -A
+git -C "$SEL/gp" -c user.email=t@e -c user.name=t commit -qm init
+sel() { AGENTCTL_HOME="$SEL" run "$@"; }
+sel_plan() { (cd "$SEL" && sel apply "$@" || true); }
+owned() { sel state | grep -qE "$1"; }
+pack="{:skill-packs {[:uri \"file://$SEL/packs/p\"] {:alias p :dir \"skills\"}}"
+cat > "$SEL/full.edn" <<EDN
+$pack
+ :skills {[p "a"] {:in :all :acli [:claude]}
+          [p "b"] {:in "proj" :acli [:claude]}}
+ :mcps [{:id :keep :cmd "/bin/echo keep" :in :all :acli [:pi]}]}
+EDN
+(cd "$SEL" && sel apply! -f "$SEL/full.edn" --all -y) > "$SEL/own.txt"
+[ -L "$SEL/.claude/skills/a" ] && [ -L "$SEL/proj/.claude/skills/b" ] || { cat "$SEL/own.txt"; fail "setup: skills not installed"; }
+grep -q '"keep"' "$SEL/.pi/agent/mcp.json" || { cat "$SEL/own.txt"; fail "setup: pi MCP not written"; }
+
+# the hazard: a manifest holding only the new entity owns nothing else, so an
+# unscoped run removes everything else agentctl owns
+cat > "$SEL/min.edn" <<EDN
+$pack
+ :skills {[p "c"] {:in :all :acli [:claude]}}}
+EDN
+sel_plan -f "$SEL/min.edn" --all > "$SEL/min-all.txt"
+grep -q -- '- skill .*/proj/.claude/skills/b' "$SEL/min-all.txt" || { cat "$SEL/min-all.txt"; fail "a minimal manifest no longer plans the prune this section guards against"; }
+
+sel_plan -f "$SEL/min.edn" --only skills/c > "$SEL/only-plan.txt"
+grep -q '+ skill .*skills/c' "$SEL/only-plan.txt" || { cat "$SEL/only-plan.txt"; fail "--only did not plan its entity"; }
+grep -qE '^.{0,12}- ' "$SEL/only-plan.txt" && { cat "$SEL/only-plan.txt"; fail "--only planned a removal outside its selection"; }
+(cd "$SEL" && sel apply! -f "$SEL/min.edn" --only skills/c -y) > "$SEL/only-apply.txt"
+[ -L "$SEL/.claude/skills/c" ] || { cat "$SEL/only-apply.txt"; fail "--only did not install its entity"; }
+[ -L "$SEL/.claude/skills/a" ] && [ -L "$SEL/proj/.claude/skills/b" ] || fail "--only removed a skill outside its selection"
+grep -q '"keep"' "$SEL/.pi/agent/mcp.json" || fail "--only removed an MCP server outside its selection"
+for id in 'skills +a$' 'skills +c$' 'skills +target-[0-9a-f]+/b$' 'mcps +keep$'; do
+  owned "$id" || { sel state; fail "--only dropped ownership of $id"; }
+done
+# still owned, not orphaned: the unscoped plan still knows to remove them
+sel_plan -f "$SEL/min.edn" --all > "$SEL/min-all2.txt"
+grep -q -- '- skill .*/proj/.claude/skills/b' "$SEL/min-all2.txt" || { cat "$SEL/min-all2.txt"; fail "b is no longer owned after --only"; }
+
+# --user: drop b and add d; the project's prune waits for a run that plans it
+cat > "$SEL/user.edn" <<EDN
+$pack
+ :skills {[p "a"] {:in :all :acli [:claude]}
+          [p "c"] {:in :all :acli [:claude]}
+          [p "d"] {:in :all :acli [:claude]}}
+ :mcps [{:id :keep :cmd "/bin/echo keep" :in :all :acli [:pi]}]}
+EDN
+(cd "$SEL" && sel apply -f "$SEL/user.edn" --user --json || true) > "$SEL/user.json"
+python3 - "$SEL/user.json" <<'PY' || fail "--user planned an op inside a project"
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert any(o["kind"] == "skills" and o["id"] == "d" for o in ops), "d not planned"
+assert not [o for o in ops if o.get("project") or o.get("project-path")], "project op under --user"
+PY
+(cd "$SEL/proj" && sel apply! -f "$SEL/user.edn" --user -y) > "$SEL/user-apply.txt"
+grep -q '^scope:' "$SEL/user-apply.txt" && { cat "$SEL/user-apply.txt"; fail "the working directory narrowed a --user run"; }
+[ -L "$SEL/.claude/skills/d" ] || { cat "$SEL/user-apply.txt"; fail "--user did not install a user-wide skill"; }
+[ -L "$SEL/proj/.claude/skills/b" ] || fail "--user removed a project skill"
+owned 'skills +target-[0-9a-f]+/b$' || { sel state; fail "--user dropped ownership of a project skill"; }
+sel_plan -f "$SEL/user.edn" --all > "$SEL/user-all.txt"
+grep -q -- '- skill .*/proj/.claude/skills/b' "$SEL/user-all.txt" || { cat "$SEL/user-all.txt"; fail "b is no longer owned after --user"; }
+
+# --only outranks the working directory: a user-wide entity from inside a project
+sed 's/\[p "d"\]/[p "e"]/' "$SEL/user.edn" > "$SEL/e.edn"
+(cd "$SEL/proj" && sel apply -f "$SEL/e.edn" --only skills/e || true) > "$SEL/e.txt"
+grep -q '^scope:' "$SEL/e.txt" && { cat "$SEL/e.txt"; fail "the working directory narrowed an --only run"; }
+grep -q '+ skill .*skills/e' "$SEL/e.txt" || { cat "$SEL/e.txt"; fail "--only from inside a project missed a user-wide entity"; }
+
+# a skill out of a git pack not fetched yet: --only brings the clone with it
+cat > "$SEL/git.edn" <<EDN
+{:skill-packs {[:uri "file://$SEL/packs/p"] {:alias p :dir "skills"}
+               [:uri "file://$SEL/gp"] {:alias gp :dir "skills" :type :git}}
+ :skills {[p "a"] {:in :all :acli [:claude]}
+          [gp "g"] {:in :all :acli [:claude]}}}
+EDN
+(cd "$SEL" && sel apply! -f "$SEL/git.edn" --only skills/g -y) > "$SEL/git.txt"
+[ -L "$SEL/.claude/skills/g" ] || { cat "$SEL/git.txt"; fail "--only did not fetch the pack its skill comes from"; }
+[ -L "$SEL/.claude/skills/c" ] || fail "--only on a git pack removed a skill outside its selection"
+set +e
+(cd "$SEL" && sel apply -f "$SEL/git.edn" --only skills/g) > "$SEL/git2.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SEL/git2.txt"; fail "--only skills/g did not converge in one apply!"; }
+
+# a selector that names nothing is an error or a warning, never a silent "converged"
+set +e
+sel apply -f "$SEL/git.edn" -k bogus-kind > "$SEL/k.txt" 2>&1; code=$?
+set -e
+[ "$code" = 1 ] && grep -q 'unknown kind' "$SEL/k.txt" && grep -q 'plugins' "$SEL/k.txt" || { cat "$SEL/k.txt"; fail "-k bogus-kind was not rejected with the valid kinds"; }
+for bad in skills skill/x; do
+  set +e
+  sel apply -f "$SEL/git.edn" --only "$bad" > "$SEL/o.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || { cat "$SEL/o.txt"; fail "--only $bad was not rejected"; }
+done
+sel_plan -f "$SEL/git.edn" --only skills/nope > "$SEL/nope.txt"
+grep -q -- '--only skills/nope — nothing declared or owned' "$SEL/nope.txt" || { cat "$SEL/nope.txt"; fail "an --only naming nothing was not reported"; }
+
 echo "all agentctl e2e checks passed"

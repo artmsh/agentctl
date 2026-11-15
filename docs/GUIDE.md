@@ -72,6 +72,37 @@ Two things follow from this that are worth saying out loud: inside a project,
 workspace root the global settings, MCP servers and providers are not planned
 at all. `--all` is how you ask about the machine.
 
+## Applying one entity
+
+agentctl owns what it wrote, and an unscoped run removes whatever it owns that
+the config no longer declares. A manifest holding only the one entity you want
+to add is therefore not a narrow change: run unscoped, it plans the removal of
+everything else agentctl owns. Narrow the run instead, against the full config:
+
+```sh
+agentctl apply  --only skills/review       # the skill, user-wide and in every project it is placed in
+agentctl apply! --only skills/review --only mcps/search
+agentctl apply  --user                     # user scope only: no project is planned
+agentctl apply  --user -k skills           # selectors combine
+```
+
+`--only KIND/ID` keeps the ops of one entity. The id is the entity's own, so a
+project's copy matches as well as the user-wide one; a skill brings the op that
+fetches its pack, so a skill from a pack not on disk yet is cloned and linked in
+one run. `--user` keeps every op that lands outside a project, the packs cloned
+for user-wide skills included, and does not combine with `-p`. Both outrank the
+working directory, as `--all` and `-p` do.
+
+A narrowed run (`-t`, `-k`, `-p`, `--only`, `--user`, or the working
+directory) forgets ownership only of what it removed itself, so nothing outside
+the selection is pruned or orphaned. `--user` still removes user-scope
+resources dropped from the config; only `--only` is a single-entity change.
+
+`-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`
+lists them — or the run exits 1. An `--only` id that nothing declares or owns
+is reported with `⚠`, because a run narrowed to a typo plans nothing and would
+otherwise read as converged.
+
 ## Claude session retention
 
 Claude Code session retention can be declared in days:
