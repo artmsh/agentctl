@@ -2311,6 +2311,36 @@
     (is (string? (:summary p)))
     (is (nil? (:diffs p)) "ops are rendered, never serialized")))
 
+(deftest gui-pills-count-ops-not-plan-lines
+  ;; a new settings.json renders one `+` line per field under its op, and a
+  ;; command renders a `!` line; the pills are ops, as the summary counts them
+  (let [dir (temp-dir)
+        notes (str dir "/AGENTS.md")
+        text (str "{:executors {:claude {:model \"sonnet\" :thinking \"high\"}}\n"
+                  " :mcps {:search {:cmd \"search-mcp --stdio\" :tools [:claude]}}\n"
+                  " :memory {:shared {:from \"" notes "\" :mode :symlink :tools [:claude]}}}\n")]
+    (spit notes "# notes\n")
+    (with-redefs [claude/settings-file (str dir "/settings.json")
+                  claude/runtime-file (str dir "/claude.json")
+                  claude/memory-file (str dir "/CLAUDE.md")
+                  state/load-state (constantly state/empty-state)]
+      (doseq [verbose [false true]]
+        (let [opts {:tools #{:claude} :kinds #{} :projects #{} :verbose verbose}
+              p (gui/plan-for-text text (str dir "/agents.edn") opts)
+              ops (core/build-plan (config/parse-config text (str dir "/agents.edn")) state/empty-state opts)
+              lines (fn [c] (count (filter #(str/starts-with? (str/triml %) c) (str/split-lines (:plan p)))))
+              [_ adds changes removes] (re-find #"^(\d+) to add, (\d+) to change, (\d+) to remove" (:summary p))]
+          (is (true? (:ok p)))
+          (is (= {:create (parse-long adds) :update (parse-long changes) :delete (parse-long removes)}
+                 (select-keys (:counts p) [:create :update :delete]))
+              "the pills say what the summary line says")
+          (is (> (lines "+") (get-in p [:counts :create]))
+              "the plan has nested field lines a line count would take for creates")
+          (is (= (count (filter #(and (plan/mutating? %) (seq (:cmds %))) ops))
+                 (get-in p [:counts :cmds]))
+              "one per op that runs a command")
+          (is (pos? (get-in p [:counts :cmds]))))))))
+
 (deftest gui-answers-a-half-typed-file-with-a-message
   (testing "the live pane means most keystrokes see invalid edn — that is a payload, not a 500"
     (let [p (gui/plan-for-text "{:mcps {" "/tmp/agentctl-gui/agents.edn" {})]

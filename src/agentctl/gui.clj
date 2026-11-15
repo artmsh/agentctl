@@ -80,6 +80,9 @@
            ;; and for parity with what the CLI prints
            :ops (plan/plan-data ops opts)
            :summary (plan/summary-line ops)
+           ;; the pills: the same ops `:summary` counts, so the two agree by
+           ;; construction rather than by re-deriving them from `:plan` text
+           :counts (plan/op-counts ops)
            :changes (count changes)
            :secrets (count (filter #(= :secret (:risk %)) changes))})))
     (catch Exception e

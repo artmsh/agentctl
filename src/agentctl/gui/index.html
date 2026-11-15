@@ -1974,16 +1974,11 @@ $("view-toggle").addEventListener("click", (e) => {
 if (localStorage.getItem("agentctl_planview") === "text")
   document.querySelector('#view-toggle button[data-view="text"]').click();
 
-function updateMetrics(planText, secretsCount) {
-  if (!planText) { $("plan-metrics").hidden = true; return; }
-  let creates = 0, updates = 0, deletes = 0, cmds = 0;
-  for (const line of planText.split("\n")) {
-    const c = line.trim()[0];
-    if (c === "+") creates++;
-    else if (c === "~") updates++;
-    else if (c === "-") deletes++;
-    else if (c === "!") cmds++;
-  }
+/* the server counts ops, the numbers behind the summary line; counting the
+   plan's text would take every nested field line for a create */
+function updateMetrics(counts, secretsCount) {
+  if (!counts) { $("plan-metrics").hidden = true; return; }
+  const {create: creates = 0, update: updates = 0, delete: deletes = 0, cmds = 0} = counts;
   const hasMetrics = creates || updates || deletes || cmds || secretsCount;
   $("plan-metrics").hidden = !hasMetrics;
 
@@ -2025,7 +2020,7 @@ function show(p) {
     last = p;
     renderPlan(p.plan);
     renderOps(p.ops, p.changes);
-    updateMetrics(p.plan, p.secrets);
+    updateMetrics(p.counts, p.secrets);
     $("summary").textContent = p.summary || "";
     $("apply").disabled = p.changes === 0;
     $("apply").innerHTML = p.changes

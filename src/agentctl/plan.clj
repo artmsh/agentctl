@@ -488,6 +488,19 @@
     (format "%d to add, %d to change, %d to remove, %d unchanged"
             (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))))
 
+(defn op-counts
+  "The numbers behind the GUI's pills, counted over ops the way `summary-line`
+   counts them. Counting the rendered text instead takes every nested field
+   line for a create and every per-tool `!` line for a command. `:cmds` is
+   one per changing op that runs a shell command, however many lines it
+   renders as."
+  [ops]
+  (let [f (frequencies (map :action ops))]
+    {:create (get f :create 0)
+     :update (get f :update 0)
+     :delete (get f :delete 0)
+     :cmds (count (filter #(and (mutating? %) (seq (op-cmds %))) ops))}))
+
 ;; ---------------------------------------------------------------- generic file ops
 
 (defn- dissoc-in
