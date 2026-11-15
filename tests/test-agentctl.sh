@@ -879,4 +879,37 @@ EDN
   cmp -s "$SB/mcp-before-invalid-ref.json" "$SB/.pi/agent/mcp.json" || fail "invalid reference changed MCPs"
 done
 
+# The steps below each get a home of their own: what the steps above own would
+# otherwise turn into prunes and change the exit codes asserted here.
+fresh_home() { local h="$SB/homes/$1"; rm -rf "$h"; mkdir -p "$h"; printf '%s' "$h"; }
+
+echo "21. a stale lock entry beside a dangling project link is cleaned up, not a crash"
+(
+  H=$(fresh_home stale-lock); export AGENTCTL_HOME="$H"
+  PK="$H/projects/shared"; P="$H/projects/game"
+  mkdir -p "$PK/skills/wrap-up" "$PK/skills/other" "$P/.agents/skills" "$P/.claude/skills"
+  printf -- '---\nname: wrap-up\ndescription: Demo.\n---\n' > "$PK/skills/wrap-up/SKILL.md"
+  printf -- '---\nname: other\ndescription: Demo.\n---\n' > "$PK/skills/other/SKILL.md"
+  # the CLI's copy is gone; claude's link into it and the lock entry are not
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' \
+    > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$PK/skills"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex]}
+          [shared "other"] {:in "projects/game" :acli [:claude]}}}
+EDN
+  set +e
+  run apply -f "$H/agents.edn" --all > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "a dangling project link: expected drift (exit 2), got $code"; }
+  grep -q "^exec: '.*skills-stub remove wrap-up -y'" "$H/plan.txt" || { cat "$H/plan.txt"; fail "the stale lock entry is not dropped"; }
+  grep -q "^exec: 'unlink ~/projects/game/.claude/skills/wrap-up'" "$H/plan.txt" || { cat "$H/plan.txt"; fail "the dangling link is not unlinked"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed on a dangling project link"; }
+  [ ! -L "$P/.claude/skills/wrap-up" ] || fail "the dangling link survived apply!"
+  grep -q '"wrap-up"' "$P/skills-lock.json" && fail "the stale lock entry survived apply!"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "a second apply did not converge"; }
+)
+
 echo "all agentctl e2e checks passed"

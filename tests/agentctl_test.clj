@@ -2980,5 +2980,20 @@
     (is (= decl (get-in config [:hosts :win])))
     (is (str/includes? (imports/render config) ":hosts"))))
 
+(deftest a-dangling-link-has-no-content
+  (let [root (temp-dir) dir (str root "/skill") gone (str root "/gone")]
+    (fs/create-dirs dir)
+    (spit (str dir "/SKILL.md") "---\nname: skill\n---\n")
+    (fs/create-sym-link gone (str root "/nowhere"))
+    (is (u/exists? gone) "a removal still sees the link")
+    (is (not (u/resolves? gone)))
+    (is (nil? (u/path-sha256 gone)) "hashing a dangling link does not throw")
+    (is (not (u/same-content? gone (str root "/also-nowhere")))
+        "two missing paths are not the same content")
+    (is (u/same-content? dir dir))
+    (is (some? (plan/link-op {:tool :pi :kind :skills :id :skill :src (str root "/missing")
+                              :dest gone :mode :copy}))
+        "a dangling copy of a missing source is not converged")))
+
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

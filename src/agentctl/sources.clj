@@ -171,7 +171,7 @@
         :let [dest (str project-dir "/" (name sid))
               global (str global-dir "/" (name sid))
               link? (fs/sym-link? dest)
-              same? #(and (:source s) (= (u/path-sha256 (u/real-path dest)) (u/path-sha256 (:source s))))]
+              same? #(and (:source s) (u/same-content? (u/real-path dest) (:source s)))]
         :when (or link? (fs/directory? dest))
         :let [id (keyword (name pid) (name sid))
               ;; a dangling link points nowhere; nothing is lost removing it

@@ -36,6 +36,12 @@ claude gets a link in `.claude/skills`, and the install is recorded in
 skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
 into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
 
+A skill a project installed that is now declared `:in :all` is removed from the
+project with `skills remove` once the user-wide one is installed, provided the
+copy still matches its source. A lock entry whose copy is already gone, with at
+most a dangling `.claude/skills/<name>` link left behind, is removed the same
+way.
+
 Imports emit this format. The older map-and-project format ([AGENTCTL.md](AGENTCTL.md#legacy-map-form))
 remains supported; use one format per file.
 

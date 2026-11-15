@@ -701,7 +701,7 @@
         ok (or in-place
                (case mode
                  :symlink (= current-target (u/real-path want))
-                 :copy (and exists (= (u/path-sha256 dest) (u/path-sha256 src)))))]
+                 :copy (and exists (u/same-content? dest src))))]
     (when-not ok
       (op {:project project :action (if exists :update :create)
            :tool tool :kind kind :id id

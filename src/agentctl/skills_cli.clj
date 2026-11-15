@@ -187,7 +187,7 @@
                           (fs/directory? c)
                           (or (not (shared? tools)) (not (fs/sym-link? c)))
                           (or (not (:local u))
-                              (= (u/path-sha256 c) (u/path-sha256 (by-name n))))
+                              (u/same-content? c (by-name n)))
                           (or (not (shared? tools)) (not (contains? tools :claude))
                               (= (u/real-path (claude-link dir n)) (u/real-path c))))))
                  names))))
@@ -366,11 +366,16 @@
   (let [lock (read-lock dir)]
     (set (mapcat (fn [u] (or (:names u) (keep (fn [[n s]] (when (= s (:source u)) n)) lock))) units))))
 
+(defn- dangling? [p] (and (fs/sym-link? p) (not (u/resolves? p))))
+
 (defn global-duplicate-ops
   "A project copy the CLI installed of a skill that is now user-wide: removed
-   with `skills remove`, so the lock stays true. `:drop` names the paths whose
-   plain unlink this replaces. `global-dirs` is each tool's user-wide skills
-   directory: the copy is only removed once the user-wide one is installed."
+   with `skills remove`, so the lock stays true. A lock entry whose copy is
+   already gone — a dangling link left behind, or nothing at all — is removed
+   the same way: nothing is lost, and a dangling link is not a copy to hash.
+   `:drop` names the paths whose plain unlink this replaces. `global-dirs` is
+   each tool's user-wide skills directory: the copy is only removed once the
+   user-wide one is installed."
   [cfg tool-cfg selected global-dirs]
   (let [desired (wants tool-cfg cfg (keys agents))
         found (for [[pid proj] (:projects cfg)
@@ -384,29 +389,37 @@
                     :let [src (sources/skill-source cfg s)
                           n (some-> src skill-name)
                           ts (filter #(and (contains? (:tools s) %) (contains? (:for-tools proj) %) (selected %))
-                                     (keys agents))]
+                                     (keys agents))
+                          paths (when n [(canonical dir n) (claude-link dir n)])
+                          live (filter u/resolves? paths)]
                     ;; A lock records origin, not current contents. Preserve
                     ;; edited copies even when installed from this source.
                     :when (and n (contains? lock n) (seq ts) (not (keep-names n))
-                               (let [copies (filter u/exists? [(canonical dir n) (claude-link dir n)])]
-                                 (and (seq copies)
-                                      (every? #(= (u/path-sha256 %) (u/path-sha256 src)) copies))))]
-                {:pid pid :dir dir :sid sid :n n :src src :ts ts})]
-    {:drop (set (mapcat (fn [{:keys [dir n]}] [(claude-link dir n) (canonical dir n)]) found))
-     :ops (for [{:keys [pid dir sid n src ts]} found
+                               (every? #(u/same-content? % src) live))]
+                {:pid pid :dir dir :sid sid :n n :src src :ts ts :paths paths
+                 :stale (empty? live)})]
+    {:drop (set (mapcat :paths found))
+     :ops (for [{:keys [pid dir sid n src ts paths stale]} found
                 :let [argv (vec (concat (command) ["remove" n "-y"]))]]
             (plan/op {:action :delete :tool :agentctl :kind :skills :project pid :project-path dir
                       :id (keyword (name pid) (name sid)) :target (canonical dir n) :category :fs
-                      :owns [] :summary (str "skills remove " n " — installed user-wide")
+                      :owns []
+                      :summary (str "skills remove " n (if stale
+                                                         " — its copy is gone, the lock entry is stale"
+                                                         " — installed user-wide"))
                       :requires (mapv #(str (global-dirs %) "/" (name sid)) ts)
-                      :cmds [argv]
+                      :cmds (into [argv] (for [p paths :when (dangling? p)] ["unlink" p]))
                       :display {:kind "skill" :entity sid :source (u/tilde src) :agents (sort (map agent-label ts))}
                       :exec! (fn []
                                (doseq [t ts :let [g (str (global-dirs t) "/" (name sid))]]
                                  (when-not (u/exists? (str g "/SKILL.md"))
                                    (throw (ex-info "global skill is not installed; keeping project copy"
                                                    {:skill sid :global g}))))
-                               (run! dir argv "skills remove"))}))}))
+                               (run! dir argv "skills remove")
+                               ;; whatever link the CLI left behind points nowhere now
+                               (doseq [p paths :when (dangling? p)]
+                                 (u/backup! p)
+                                 (fs/delete p)))}))}))
 
 (defn inventory
   "Ownership of project skills: one `[tool :skills project/id]` per agent,
