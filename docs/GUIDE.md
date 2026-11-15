@@ -190,11 +190,26 @@ whichever scope it landed. A server agentctl never installed is left alone.
 
 ## Unresolved secrets
 
-A value in an MCP server's `:env` or `:headers` may be a reference (`$VAR`,
-`!env://`, `!bw://`, `!file://`, `!cmd://`) that is resolved when `apply!` runs.
-When one of them does not resolve — the vault is locked, the variable is unset,
-the Bitwarden field is empty or holds the text `null` — Claude's server is not
-written at all, in any scope. Writing the rest of it would leave a server that is
+A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
+`:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
+that is resolved when `apply!` runs. A settings `env` is where a project's
+`.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
+value:
+
+```clojure
+{:settings [{:env {"DOCS_API_KEY" "!bw://vendor/docs-api-key"} :acli [:claude] :in "projects/sample"}]}
+```
+
+The resolved value is what lands in `settings.json`, so the plan flags the op
+`⚠ secret value written into the project` (or into `~/.claude/settings.json`)
+and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
+same on both sides is marked `(changed)`. A project's `.claude/settings.json` is
+usually committed; `.claude/settings.local.json` is the private one.
+
+When a reference does not resolve — the vault is locked, the variable is unset,
+the Bitwarden field is empty or holds the text `null`, the reference is
+malformed — Claude's server, or the settings `env` object, is not written at
+all, in any scope. Writing the rest of it would leave a server that is
 configured and cannot authenticate, and because the missing value would then be
 missing from the desired entry too, the next plan would report no drift. The plan
 names the server, the key and the reason instead:

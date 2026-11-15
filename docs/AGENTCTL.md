@@ -680,9 +680,11 @@ end up writing a resolved secret into a tool's config file are tagged
 `⚠ writes resolved secret` and counted before the confirmation prompt.
 
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
-not a value: written out, it is a header that authenticates nothing. A Claude
-MCP server with any ref that does not resolve is held back whole, as
-[GUIDE.md](GUIDE.md#unresolved-secrets) describes.
+not a value: written out, it is a header that authenticates nothing. Claude's
+settings `:env` takes the same forms as an MCP server's `:env`. A Claude MCP
+server or settings `env` with any ref that does not resolve is held back whole,
+as [GUIDE.md](GUIDE.md#unresolved-secrets) describes; a resolved one is printed
+masked.
 
 `codex` reads provider keys from the environment only — declare those as
 `:key $VAR`; `validate` flags anything else.

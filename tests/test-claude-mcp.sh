@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# End-to-end: Claude Code MCP servers and the secrets they carry. A `claude`
-# stub does what the real CLI does with `mcp add`/`mcp remove --scope user`
-# (writes ~/.claude.json, which agentctl then reads back), and a `bw` stub
-# serves a vault that is locked or holds the fields in $SB/bw-items.json.
+# End-to-end: Claude Code MCP servers and settings, and the secrets they
+# carry. A `claude` stub does what the real CLI does with `mcp add`/`mcp
+# remove --scope user` (writes ~/.claude.json, which agentctl then reads
+# back), and a `bw` stub serves a vault that is locked or holds the fields in
+# $SB/bw-items.json.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -173,5 +174,69 @@ apply -k mcps
 [ "$(json "$SB/.claude.json" "d['mcpServers']['docs']['headers']['api-key']")" = "$SECRET" ] || fail "a missing header was not restored"
 plan -k mcps
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after restoring a header: exit $code"; }
+
+# ---------------------------------------------------------------- settings env
+
+ROTATED=sk-test-9999999999abcdef
+cat > "$SB/agents.edn" <<EDN
+{:settings [{:env {"DOCS_KEY" "!bw://vendor/KEY" "MODE" "fast"} :acli [:claude] :in :all}
+            {:env {"DOCS_KEY" "!bw://vendor/KEY"} :model "sonnet" :acli [:claude] :in "proj"}]}
+EDN
+unset BW_STATE
+
+echo "7. a settings env ref is resolved, flagged as a secret and masked in the plan"
+vault '{"vendor": {"KEY": "'$SECRET'"}}'
+plan -k settings
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "settings env: expected drift, got exit $code"; }
+grep -q 'env: ⚠ secret value written into ~/.claude/settings.json' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the user settings env write is not flagged as a secret"; }
+grep -q 'env: ⚠ secret value written into the project' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the project settings env write is not flagged as a secret"; }
+grep -q '+ env.DOCS_KEY: "sk-t…ef"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the secret is not shown masked"; }
+grep -q '+ env.MODE: "fast"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "a plain env value should print as it is"; }
+set +e; run apply -f "$SB/agents.edn" --all -t claude -k settings --json > "$SB/plan.json" 2>&1; set -e
+for f in plan.txt plan.json; do
+  grep -q "$SECRET" "$SB/$f" && fail "$f printed a resolved secret"
+  grep -q '!bw://' "$SB/$f" && fail "$f printed the raw reference as the value"
+done
+apply -k settings
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "settings env apply! exited $code"; }
+grep -q "write resolved secrets" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the confirmation does not count the secret writes"; }
+[ "$(json "$SB/.claude/settings.json" "d['env']['DOCS_KEY']")" = "$SECRET" ] || fail "user settings env not resolved"
+[ "$(json "$SB/proj/.claude/settings.json" "d['env']['DOCS_KEY']")" = "$SECRET" ] || fail "project settings env not resolved"
+plan -k settings
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "settings env not converged: exit $code"; }
+
+echo "8. a rotated secret that masks the same still shows as a change"
+vault '{"vendor": {"KEY": "'$ROTATED'"}}'
+plan -k settings
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a rotated secret is not drift: exit $code"; }
+grep -q '~ DOCS_KEY: "sk-t…ef" -> "sk-t…ef (changed)"' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "a rotated secret shows no change"; }
+grep -qE "$SECRET|$ROTATED" "$SB/plan.txt" && fail "the plan printed a resolved secret"
+vault '{"vendor": {"KEY": "'$SECRET'"}}'
+
+echo "9. an unresolved settings env ref writes nothing to env, the rest still applies"
+cp "$SB/.claude/settings.json" "$SB/settings-before.json"
+sed -i.bak 's/:model "sonnet"/:model "opus"/; s/"MODE" "fast"/"MODE" "slow"/' "$SB/agents.edn"
+export BW_STATE=locked
+plan -k settings
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "an unresolved settings env read as converged: exit $code"; }
+grep -q "⚠ secret unresolved: bitwarden vault locked (env.DOCS_KEY)" "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the unresolved settings env is not reported"; }
+apply -k settings
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "apply! with an unresolved settings env exited $code"; }
+cmp -s "$SB/settings-before.json" "$SB/.claude/settings.json" || fail "user settings env was partially written"
+[ "$(json "$SB/proj/.claude/settings.json" "d['model']")" = opus ] || fail "a setting with no secret was held back too"
+[ "$(json "$SB/proj/.claude/settings.json" "d['env']['DOCS_KEY']")" = "$SECRET" ] || fail "the existing secret was blanked"
+
+echo "10. a malformed settings env ref is reported, not a crash"
+unset BW_STATE
+cat > "$SB/agents.edn" <<EDN
+{:settings [{:env {"BROKEN" "!bw://"} :acli [:claude] :in :all}]}
+EDN
+plan -k settings
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a malformed settings env ref exited $code"; }
+grep -q "⚠ secret unresolved: invalid reference" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the malformed ref is not reported"; }
 
 echo "all claude mcp e2e checks passed"

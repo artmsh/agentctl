@@ -129,6 +129,38 @@
   [env]
   (boolean (some (fn [[k v]] (or (refs/secret-ref? v) (refs/secret-shaped? k v))) env)))
 
+(defn secret-keys
+  "Names in an env map whose value is a credential: a secret ref, resolved at
+   apply time, or a literal shaped like one. `raw` is the map as declared, for
+   a literal whose ref no longer shows what it looked like."
+  [refs raw]
+  (into #{} (keep (fn [[k r]]
+                    (when (or (refs/secret-ref? r) (refs/secret-shaped? k (get raw k)))
+                      (u/kw->str k))))
+        refs))
+
+(defn mask-secrets
+  "`[before after]` env maps as a plan may print them, the value under each
+   name in `ks` masked. A plan carries resolved values, and a name that says
+   nothing about a credential (`X`, `DOCS_KEY`) is not masked by rendering. A
+   value that changed but masks the same on both sides is marked changed, or
+   a rotated secret would show no change at all."
+  [before after ks]
+  (let [masked (fn [m] (when (map? m)
+                         (into {} (map (fn [[k v]] (let [k (u/key-str k)]
+                                                     [k (if (ks k) (refs/mask v) v)])))
+                               m)))
+        b (masked before)
+        a (masked after)
+        raw-b (u/norm before)
+        raw-a (u/norm after)]
+    [b (when a
+         (into {} (map (fn [[k v]] [k (if (and (ks k) (= v (get b k))
+                                               (not= (get raw-b k) (get raw-a k)))
+                                        (str v " (changed)")
+                                        v)]))
+               a))]))
+
 (def project-mcp-tools
   "Tools with a project-level MCP config. Everything else is user-wide only."
   #{:claude :codex})

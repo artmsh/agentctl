@@ -6,6 +6,7 @@
    ever mutated through `claude mcp` or narrowly-scoped project keys."
   (:require [agentctl.adapters.common :as common]
             [agentctl.plan :as plan]
+            [agentctl.refs :as refs]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
             [agentctl.util :as u]
@@ -60,6 +61,41 @@
                                     (assoc acc k [nk v])))
                {})))
 
+(defn- env-setting-op
+  "The `env` object of a settings file. Its values take the reference forms an
+   MCP server's env does and resolve the same way: written as declared, a
+   `!bw://` ref would land in the file as its own text. A ref that does not
+   resolve holds the whole object back, as it does an MCP server, and a
+   resolved secret is masked in the plan and flagged by `note`.
+
+   `base` is what `plan/json-set-op` takes, less the value."
+  [base env note]
+  (let [{parsed :refs invalid :invalid}
+        (reduce (fn [acc [k v]]
+                  ;; a malformed ref is one key's problem, not the whole plan's
+                  (try (assoc-in acc [:refs k] (refs/parse v))
+                       (catch clojure.lang.ExceptionInfo e
+                         (update acc :invalid conj {:key k :status :error :message (ex-message e)
+                                                    :where "env"}))))
+                {:refs {} :invalid []}
+                env)
+        resolved (common/resolve-env parsed)
+        issues (concat invalid (common/issues-in "env" resolved))
+        secrets (common/secret-keys parsed env)]
+    (if (seq issues)
+      (common/unresolved-op (-> (select-keys base [:tool :kind :id :project])
+                                (assoc :target (:file base)))
+                            issues)
+      (when-let [op (plan/json-set-op (assoc base
+                                             :value (:values resolved)
+                                             :risk (if (seq secrets) :secret :low)
+                                             :note (when (seq secrets) note)))]
+        (cond-> op
+          (seq (:diffs op))
+          (update :diffs (partial mapv (fn [{:keys [before after] :as d}]
+                                         (let [[b a] (common/mask-secrets before after secrets)]
+                                           (assoc d :before b :after a))))))))))
+
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
         kvs (declared-settings settings)
@@ -76,10 +112,13 @@
      ;; keyed by the name agents.edn uses: a reader checking the plan against
      ;; the file they wrote should not have to translate back
      (for [[k [nk v]] kvs
-           :let [op (plan/json-set-op {:tool tool :kind :settings :id k
-                                       :file settings-file :path [nk] :value v
-                                       :report-converged? true
-                                       :summary (str "settings.json " (name nk))})]
+           :let [base {:tool tool :kind :settings :id k
+                       :file settings-file :path [nk]
+                       :report-converged? true
+                       :summary (str "settings.json " (name nk))}
+                 op (if (= :env nk)
+                      (env-setting-op base v "⚠ secret value written into ~/.claude/settings.json")
+                      (plan/json-set-op (assoc base :value v)))]
            :when op]
        op)
      (for [k unsupported]
@@ -587,11 +626,15 @@
      ;; per-project settings file: model / output style / permissions
      (keep identity
            (concat
-            (for [[k v] kvs]
-              (plan/json-set-op {:tool tool :kind :projects :project id
-                                 :id (keyword (str (name id) "/" (name k)))
-                                 :file pfile :path [k] :value v
-                                 :summary (str (u/tilde pfile) " " (name k))}))
+            (for [[k v] kvs
+                  :let [base {:tool tool :kind :projects :project id
+                              :id (keyword (str (name id) "/" (name k)))
+                              :file pfile :path [k]
+                              :summary (str (u/tilde pfile) " " (name k))}]]
+              (if (= :env k)
+                (env-setting-op base v (str "⚠ secret value written into the project — "
+                                            ".claude/settings.json is usually tracked"))
+                (plan/json-set-op (assoc base :value v))))
             ;; one op per declared bucket: writing the whole :permissions map
             ;; would drop defaultMode / additionalDirectories the CLI put there
             (for [[bucket rules] (:permissions proj)]

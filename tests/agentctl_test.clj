@@ -1250,6 +1250,22 @@
       (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
              (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
 
+(deftest a-secret-env-value-is-masked-and-a-rotation-still-shows
+  (let [ks (common/secret-keys {"X" (refs/parse "!bw://vendor/KEY") "MODE" (refs/parse "fast")}
+                               {"X" "!bw://vendor/KEY" "MODE" "fast"})]
+    (is (= #{"X"} ks))
+    (testing "a create masks the new value and leaves a plain one readable"
+      (is (= [nil {"X" "sk-t…ef" "MODE" "fast"}]
+             (common/mask-secrets nil {"X" "sk-test-0123456789abcdef" "MODE" "fast"} ks))))
+    (testing "keys read back from JSON as keywords mask the same"
+      (is (= {"X" "********"} (first (common/mask-secrets {:X "s3cret"} {"X" "s3cret"} ks)))))
+    (testing "a rotated value whose mask reads the same is marked changed"
+      (is (= [{"X" "sk-t…ef"} {"X" "sk-t…ef (changed)"}]
+             (common/mask-secrets {:X "sk-test-0123456789abcdef"} {"X" "sk-test-9999999999abcdef"} ks))))
+    (testing "an unchanged value is not"
+      (is (= [{"X" "********" "MODE" "fast"} {"X" "********" "MODE" "slow"}]
+             (common/mask-secrets {:X "s3cret" :MODE "fast"} {"X" "s3cret" "MODE" "slow"} ks))))))
+
 (defn- mcp-op [id action diffs]
   (plan/op {:action action :tool :claude :kind :mcps :project :example
             :id (keyword (str "example/" id))
