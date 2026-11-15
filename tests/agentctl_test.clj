@@ -2995,5 +2995,106 @@
                               :dest gone :mode :copy}))
         "a dangling copy of a missing source is not converged")))
 
+(defn- git! [dir & args]
+  (let [{:keys [exit err]} (apply u/sh "git" "-C" dir "-c" "user.email=t@example.com" "-c" "user.name=t" args)]
+    (assert (zero? exit) err)))
+
+(defn- skill-dir! [dir n]
+  (fs/create-dirs dir)
+  (spit (str dir "/SKILL.md") (str "---\nname: " n "\ndescription: d\n---\n")))
+
+(deftest a-symlinked-copy-hashes-as-its-target
+  (let [root (temp-dir) dir (str root "/skill") link (str root "/link")]
+    (skill-dir! dir "skill")
+    (fs/create-sym-link link dir)
+    (is (= (u/path-sha256 dir) (u/path-sha256 link)))
+    (is (not= (u/path-sha256 link) (u/sha256 "")) "a link to a directory is not an empty tree")))
+
+(deftest a-project-copy-git-tracks-is-kept
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs repo)
+    (git! repo "init" "-q")
+    (fs/copy-tree src copy)
+    (git! repo "add" "-A")
+    (git! repo "commit" "-qm" "own copy")
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= copy (:target %)) (plan/mutating? %)) ops) "identical, but committed")
+        (is (some #(and (:warn %) (= copy (:target %))
+                        (str/includes? (str (:summary %)) "tracked by git")) ops))))))
+
+(deftest a-cli-copy-git-tracks-keeps-its-lock-entry
+  (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")
+        skill (str pack "/skills/wrap-up")
+        raw (fn [in] {:skill-packs {[:uri (str "file://" pack)] {:alias 'kit :dir "skills"}}
+                      :skills {['kit "wrap-up"] {:in in :acli [:claude :codex]}
+                               [:uri (str root "/local")] {:in repo :acli [:claude :codex]}}})]
+    (skill-dir! skill "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs repo)
+    (git! repo "init" "-q")
+    (is (zero? (:exit @(p/process (concat (skills-cli/command) ["add" skill "-a" "codex" "-a" "claude-code" "-y"])
+                                  {:dir repo}))))
+    (git! repo "add" "-A")
+    (git! repo "commit" "-qm" "skills")
+    (with-redefs [claude/skills-dir (str root "/claude-skills")
+                  codex/skills-dir (str root "/codex-skills")]
+      (doseq [d [claude/skills-dir codex/skills-dir]]
+        (fs/create-dirs d)
+        (fs/create-sym-link (str d "/wrap-up") skill))
+      (let [cfg (config/normalize (raw :all) "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:claude :codex}})]
+        (is (not-any? #(some (fn [c] (some #{"remove"} c)) (:cmds %)) ops) "skills remove would take the committed copy")
+        (is (not-any? #(and (plan/mutating? %) (str/includes? (str (:target %)) "/.agents/skills/wrap-up")) ops))
+        (is (some #(and (:warn %) (str/includes? (str (:summary %)) "tracked by git")) ops))
+        (is (empty? (:failed (core/execute! ops))))
+        (is (contains? (skills-cli/read-lock repo) "wrap-up"))
+        (is (fs/directory? (str repo "/.agents/skills/wrap-up")))))))
+
+(deftest a-global-skills-own-source-in-a-project-is-not-its-duplicate
+  ;; the user-wide skill is published from one project's .agents/skills
+  (let [root (temp-dir) repo (str root "/repo") src (str repo "/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= src (:target %)) (plan/mutating? %)) ops))
+        (is (some #(and (:warn %) (str/includes? (str (:summary %)) "codex's wrap-up is linked from it")) ops))))))
+
+(deftest removing-a-project-copy-takes-the-links-into-it
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up") link (str repo "/.claude/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs (str repo "/.git"))
+    (fs/copy-tree src copy)
+    (fs/create-dirs (fs/parent link))
+    (fs/create-sym-link link "../../.agents/skills/wrap-up")
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [rm (filter #(and (= copy (:target %)) (plan/mutating? %))
+                       (core/build-plan (cfg) state/empty-state {:tools #{:codex}}))]
+        (is (= 1 (count rm)))
+        (is (= [["rm" "-r" copy] ["unlink" link]] (:cmds (first rm))) "one op, the link with the copy")
+        (is (empty? (:failed (core/execute! rm))))
+        (is (not (u/exists? copy)))
+        (is (not (u/exists? link)) "no link is left dangling")
+        (is (fs/directory? src))))))
+
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

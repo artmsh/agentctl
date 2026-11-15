@@ -159,26 +159,142 @@
               :let [src (skill-source cfg s)]]
           [id (assoc s :source src)])))
 
+;; ---------------------------------------------------------------- project copies
+
+(def project-skill-roots
+  "Where in a repository the agents look for skills. A link in one of them may
+   lead into a copy kept in another, as claude's `.claude/skills/<name>` leads
+   into the `skills` CLI's `.agents/skills/<name>`."
+  [".claude/skills" ".agents/skills"])
+
+(defn- leaf-path
+  "`p` with the directories above it resolved and its last segment kept as
+   written: where a link itself lives, as opposed to where it leads."
+  [p]
+  (let [a (u/abs-path p)]
+    (if-let [parent (fs/parent a)]
+      (str (u/real-path (str parent)) "/" (fs/file-name a))
+      a)))
+
+(defn- hops
+  "Every path `p` passes through on its way to what it names: the path as
+   written, each link it meets, and where it lands."
+  [p]
+  (loop [cur (leaf-path p) out []]
+    (if (and (fs/sym-link? cur) (< (count out) 40))
+      (let [t (fs/read-link cur)]
+        (recur (leaf-path (str (if (fs/absolute? t) t (fs/path (fs/parent cur) t))))
+               (conj out cur)))
+      (conj out cur))))
+
+(defn- under? [parent p] (or (= parent p) (str/starts-with? p (str parent "/"))))
+
+(defn placements
+  "Every place a declared skill is linked from, per tool — a `:per-tool :path`
+   included — and every pack's skills directory. A project copy any of them
+   leads into is some agent's live source, however redundant it looks."
+  [cfg]
+  (concat
+   (for [[sid s] (:skills cfg)
+         :let [src (skill-source cfg s)]
+         t (or (seq (sort (:tools s))) [nil])
+         :let [p (or (get-in s [:per-tool t :path]) src)]
+         :when p]
+     {:path p :why (str (if t (str (name t) "'s ") "") (name sid) " is linked from it")})
+   (for [[pid pack] (:skill-packs cfg)
+         :let [d (pack-skills-dir pack)]
+         :when d]
+     {:path d :why (str "it is part of pack " (name (or (:alias pack) pid)))})))
+
+(defn- placed-in
+  "The placement that needs `p`, or nil. A directory is needed while a
+   placement leads into it; a link only while a placement passes through the
+   link itself — removing a link never touches what it points at. Either is
+   needed while it lies inside a placement, as a skill inside a pack does."
+  [cfg p]
+  (let [link? (fs/sym-link? p)
+        at (if link? (leaf-path p) (u/real-path p))]
+    (some (fn [{:keys [path why]}]
+            (let [hs (hops path)]
+              (when (or (if link? (some #(= at %) hs) (some #(under? at %) hs))
+                        (under? (last hs) at))
+                why)))
+          (placements cfg))))
+
+(defn git-tracked?
+  "Does git track anything at `p` in the repository at `root`? A committed
+   copy is the project's own, whatever it matches."
+  [root p]
+  (when (and root (u/resolves? root))
+    (let [r (u/real-path root)
+          rel (str (fs/relativize r (leaf-path p)))
+          {:keys [exit out]} (u/sh "git" "-C" r "ls-files" "--" rel)]
+      (and (zero? exit) (not (str/blank? out))))))
+
+(defn links-into
+  "Links in the project's skill directories, under `p`'s name, that lead into
+   the copy at `p` — they would dangle once it is gone. A dangling one is
+   included: it has already lost its target."
+  [root p]
+  (let [at (u/real-path p)]
+    (for [r project-skill-roots
+          :let [l (str root "/" r "/" (fs/file-name p))]
+          :when (and (fs/sym-link? l) (not= (leaf-path l) (leaf-path p))
+                     (or (not (u/resolves? l)) (some #(under? at %) (hops l))))]
+      l)))
+
+(defn kept-because
+  "Why the project copy at `p` must stay, or nil: some placement needs it, or
+   git tracks it, or a link git tracks leads into it."
+  [cfg root p]
+  (or (placed-in cfg p)
+      (when (git-tracked? root p) "it is tracked by git")
+      (when (some #(git-tracked? root %) (when-not (fs/sym-link? p) (links-into root p)))
+        "a link tracked by git leads into it")))
+
+(defn lock-names
+  "Names the `skills` CLI recorded as installed in the repository at `root`."
+  [root]
+  (set (map u/key-str (keys (:skills (u/read-json (str root "/skills-lock.json")))))))
+
+(defn kept-op
+  "The report for a project copy that stays."
+  [m dest why]
+  (plan/op (merge m {:action :noop :warn true :target dest
+                     :summary (str "project copy " (u/tilde dest) " kept — " why)})))
+
 (defn global-project-unlink-ops
   "Remove redundant project copies of declared global skills — a symlink or a
    local directory, including ones predating the ownership manifest — only
-   when it is byte-identical to the skill's source (a directory is backed up
-   first). One that differs is another skill of the same name: reported, kept. Check the global
-   install again at execution time before removing."
+   when it is byte-identical to the skill's source. One that differs is
+   another skill of the same name: reported, kept. So is one some placement
+   still needs (`kept-because`). A directory goes with the links into it,
+   after a backup. A copy the `skills` CLI installed is left to
+   `skills-cli/global-duplicate-ops`, which takes its lock entry with it.
+   Check the global install again at execution time before removing."
   [cfg tool pid project-dir global-dir]
   (for [[sid s] (for-tool cfg (all-skills cfg) tool)
         :when (= :global (:scope s))
         :let [dest (str project-dir "/" (name sid))
               global (str global-dir "/" (name sid))
               link? (fs/sym-link? dest)
+              dangling? #(and link? (not (u/resolves? dest)))
               same? #(and (:source s) (u/same-content? (u/real-path dest) (:source s)))]
         :when (or link? (fs/directory? dest))
-        :let [id (keyword (name pid) (name sid))
-              ;; a dangling link points nowhere; nothing is lost removing it
-              o (if (or (and link? (not (fs/exists? dest))) (same?))
-                  (plan/unlink-op {:tool tool :kind :skills :project pid :id id :dest dest})
-                  (plan/op {:action :noop :warn true :tool tool :kind :skills :project pid :id id :target dest
-                            :summary (str "local copy differs from the user-wide " (name sid) " — kept")}))]
+        :let [root (get-in cfg [:projects pid :path])
+              id (keyword (name pid) (name sid))
+              base {:tool tool :kind :skills :project pid :id id}
+              kept (kept-because cfg root dest)
+              links (when-not link? (links-into root dest))
+              o (cond
+                  kept (kept-op base dest kept)
+                  ;; a dangling link points nowhere; nothing is lost removing it
+                  (dangling?) (plan/unlink-op (assoc base :dest dest))
+                  (not (same?))
+                  (plan/op (merge base {:action :noop :warn true :target dest
+                                        :summary (str "local copy differs from the user-wide " (name sid) " — kept")}))
+                  (and (not link?) (contains? (lock-names root) (fs/file-name dest))) nil
+                  :else (plan/unlink-op (assoc base :dest dest)))]
         :when o]
     (if (= :noop (:action o))
       o
@@ -188,14 +304,17 @@
                :summary (if link?
                           (str "unlink " (u/tilde dest))
                           (str "remove " (u/tilde dest) " — identical to the user-wide skill"))
-               :cmds [(if link? ["unlink" dest] ["rm" "-r" dest])]
+               :cmds (into [(if link? ["unlink" dest] ["rm" "-r" dest])]
+                           (for [l links] ["unlink" l]))
                :exec! (fn []
                         (when-not (u/exists? (str global "/SKILL.md"))
                           (throw (ex-info "global skill is not installed; keeping project copy"
                                           {:skill sid :global global})))
-                        (when-not (or (and link? (not (fs/exists? dest))) (same?))
+                        (when-not (or (dangling?) (same?))
                           (throw (ex-info "project skill changed since planning" {:path dest})))
-                        ((:exec! o)))))))
+                        (doseq [p (cons dest links) :when (u/exists? p)]
+                          (u/backup! p)
+                          (fs/delete-tree p {:nofollow-links true})))))))
 
 (defn packs-for
   "Pack ids the given projects could need. A project names a skill by one of

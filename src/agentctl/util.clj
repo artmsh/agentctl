@@ -67,10 +67,12 @@
 
 (defn path-sha256
   "Content hash of a file or a directory tree; nil when nothing is behind `p`,
-   which is the case for a dangling link."
+   which is the case for a dangling link. A link is hashed as what it leads
+   to: walked as written, a link to a directory is an empty tree, so every
+   such link would hash alike and none would match its own target."
   [p]
   (when (resolves? p)
-    (let [p (fs/path (expand (str p)))]
+    (let [p (fs/real-path (fs/path (expand (str p))))]
       (if (fs/directory? p)
         (sha256 (->> (fs/glob p "**")
                      (sort)

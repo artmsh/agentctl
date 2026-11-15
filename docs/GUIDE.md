@@ -38,9 +38,19 @@ into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
 
 A skill a project installed that is now declared `:in :all` is removed from the
 project with `skills remove` once the user-wide one is installed, provided the
-copy still matches its source. A lock entry whose copy is already gone, with at
-most a dangling `.claude/skills/<name>` link left behind, is removed the same
-way.
+copy still matches its source. The links into the copy and its lock entry go
+in the same step. A lock entry whose copy is already gone, with at most a
+dangling `.claude/skills/<name>` link left behind, is removed the same way.
+A project copy is kept, and the plan says why, when:
+
+- it differs from the user-wide source, because it is another skill of the same name;
+- git tracks it, or a link git tracks leads into it, because it is the project's own;
+- a declared placement needs it: a `:per-tool :path`, another skill's source,
+  or a pack that lives there. Removing it would leave that tool's link dangling.
+
+A kept copy that the `skills` CLI installed keeps its lock entry, since
+`skills remove` would delete the copy as well. A redundant link into a kept
+copy, such as claude's `.claude/skills/<name>`, is still removed.
 
 Imports emit this format. The older map-and-project format ([AGENTCTL.md](AGENTCTL.md#legacy-map-form))
 remains supported; use one format per file.

@@ -912,4 +912,41 @@ EDN
   run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "a second apply did not converge"; }
 )
 
+echo "22. a project copy pi is pinned to survives its skill going user-wide, in one apply!"
+(
+  H=$(fresh_home pinned-copy); export AGENTCTL_HOME="$H"
+  PK="$H/projects/shared"; P="$H/projects/game"
+  mkdir -p "$PK/skills/wrap-up" "$PK/skills/other" "$P/.agents/skills" "$P/.claude/skills"
+  printf -- '---\nname: wrap-up\ndescription: Demo.\n---\n\nbody\n' > "$PK/skills/wrap-up/SKILL.md"
+  printf -- '---\nname: other\ndescription: Demo.\n---\n' > "$PK/skills/other/SKILL.md"
+  # what the skills CLI left behind: a copy, claude's relative link into it, a lock entry
+  cp -R "$PK/skills/wrap-up" "$P/.agents/skills/wrap-up"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' \
+    > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$PK/skills"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]
+                              :per-tool {:pi {:path "~/projects/game/.agents/skills/wrap-up"}}}
+          [shared "other"] {:in "projects/game" :acli [:claude]}}}
+EDN
+  set +e
+  run apply -f "$H/agents.edn" --all > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "the pinned copy: expected drift (exit 2), got $code"; }
+  grep -q "copy ~/projects/game/.agents/skills/wrap-up kept — pi's wrap-up is linked from it" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the kept copy is not reported with its reason"; }
+  grep -q "skills-stub remove wrap-up" "$H/plan.txt" && { cat "$H/plan.txt"; fail "the copy pi is pinned to is planned for removal"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed"; }
+  [ -f "$H/.pi/agent/skills/wrap-up/SKILL.md" ] || { ls -l "$H/.pi/agent/skills"; fail "pi's user-wide wrap-up dangles"; }
+  [ -d "$P/.agents/skills/wrap-up" ] && [ ! -L "$P/.agents/skills/wrap-up" ] || fail "the copy pi is pinned to was removed"
+  [ ! -e "$P/.claude/skills/wrap-up" ] && [ ! -L "$P/.claude/skills/wrap-up" ] || fail "claude's redundant project link survived"
+  grep -q '"wrap-up"' "$P/skills-lock.json" || fail "the kept copy lost its lock entry"
+  set +e
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$H/plan2.txt"; fail "one apply! did not converge (exit $code)"; }
+)
+
 echo "all agentctl e2e checks passed"
