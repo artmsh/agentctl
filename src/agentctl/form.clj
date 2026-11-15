@@ -31,7 +31,7 @@
   "The settings each tool understands, taken from the adapter that writes them
    so the form cannot drift from what a plan would actually do."
   {:claude (vec (sort (keys claude/setting-keys)))
-   :codex (vec (sort (conj (keys codex/setting-keys) :keymap)))
+   :codex (vec (sort (concat (keys codex/setting-keys) codex/nested-settings)))
    :pi (vec (sort (keys pi/setting-keys)))
    :omp (vec (sort (conj (keys omp/setting-paths) :model-roles)))
    :antigravity (vec (sort (keys antigravity/setting-keys)))
@@ -46,6 +46,7 @@
    :non-workspace-access {:type :bool} :enable-workflows {:type :bool}
    :env {:type :edn} :status-line {:type :edn} :model-roles {:type :edn}
    :aliases {:type :edn} :model-settings {:type :edn} :keymap {:type :edn}
+   :presets {:type :edn}
    :thinking {:suggest ["low" "medium" "high"]}
    :effort {:suggest ["low" "medium" "high"]}
    :reasoning-effort {:suggest ["low" "medium" "high"]}})

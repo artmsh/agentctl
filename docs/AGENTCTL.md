@@ -290,12 +290,13 @@ underscores; keyword and string keys both work. Codex validates the supported
 actions and shortcuts for the installed version. See the
 [official keymap reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-Codex CLI 0.165.0 rejects `open_model` in the `global` and `chat` contexts
-under strict configuration checking. Use `/model` to open the selector and
-`/keymap` to inspect the actions the installed release exposes. An accepted
-`codex mcp list --json` invocation is no longer proof that an action exists:
-unknown fields are ignored unless strict checking is enabled. Re-probe in a
-scratch `CODEX_HOME` without changing the real configuration:
+Codex CLI 0.169.0 has no keymap action that opens the model picker
+(`open_model` is rejected in `global` and `chat` under strict configuration
+checking); bind `chat.open_presets` and declare a `/model` preset instead (see
+`:presets` below). `/keymap` shows the actions the installed release exposes.
+An accepted `codex mcp list --json` invocation is no longer proof that an
+action exists: unknown fields are ignored unless strict checking is enabled.
+Re-probe in a scratch `CODEX_HOME` without changing the real configuration:
 
 ```sh
 probe_dir=$(mktemp -d)
@@ -311,6 +312,31 @@ Only declared actions are updated. Undeclared bindings, other TUI settings,
 comments, and Codex-owned state are preserved. Omitting an action (or using an
 empty `:keymap`) leaves its existing binding alone. Import includes the current
 keymap, and the control panel offers it as an EDN field.
+
+### Codex `:presets`
+
+Saved prompts for the Codex presets browser, keyed by slot:
+
+```edn
+{:executors
+ {:codex {:keymap {:chat {:open_presets "alt-t"}}
+          :presets {0 {:input "/model" :label "model picker"}
+                    1 {:input "/model m-b --reasoning=low" :label "fast"}}}}}
+```
+
+Each slot writes its own `[tui.presets.<n>]` table in `~/.codex/config.toml`.
+`:input` is required and is submitted exactly as typed, so a slash command with
+arguments works; `:label` names the entry in the browser. `chat.open_presets`
+opens the browser, and a digit then runs that slot: with the declaration above,
+alt-t then 0 opens the model picker. `validate` rejects a slot outside 0-9, a
+missing or non-string `:input`, and any field other than `:input` and `:label`
+(codex-cli 0.169.0 accepts only those two and ignores the rest silently).
+
+The write is key surgery on the slot's table: the rest of `[tui]`, including the
+counters Codex keeps there (`[tui.model_availability_nux]`), is never replaced.
+Under the entity DSL, dropping a slot from the config removes that slot's table
+if agentctl wrote it; a slot saved from Codex itself (`n · new` in the browser)
+is not agentctl's and stays. Import reads presets back as `{0 {:input …}}`.
 
 ### `:permissions`
 

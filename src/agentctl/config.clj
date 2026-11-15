@@ -4,7 +4,8 @@
    The declared file is convenience-shaped (loose, terse). Everything downstream
    consumes the normalized shape produced here, so adapters never re-interpret
    surface syntax."
-  (:require [agentctl.refs :as refs]
+  (:require [agentctl.codex-schema :as codex-schema]
+            [agentctl.refs :as refs]
             [agentctl.scope :as scope]
             [agentctl.sources :as sources]
             [agentctl.util :as u]
@@ -921,7 +922,9 @@
            :when (or (nil? (:event h)) (nil? (:command h)) (:hook-id-missing h))]
        (finding :error [:hooks pid id] "project hook needs an id, event, and command"))
      (for [[_ h] (get-in cfg [:tools :claude :hooks]) :when (:hook-id-missing h)]
-       (finding :error [:executors :claude :hooks (:event h)] "hook grouped under :hooks needs :id")))))
+       (finding :error [:executors :claude :hooks (:event h)] "hook grouped under :hooks needs :id"))
+     (for [[level where message] (codex-schema/findings (get-in cfg [:tools :codex]) [:executors :codex])]
+       (finding level where message)))))
 
 ;; ---------------------------------------------------------------- entry
 

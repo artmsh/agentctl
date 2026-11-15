@@ -54,7 +54,13 @@
                                                   (when (string? v) [dk v]))))
                             t)
                 (seq (get-in t ["tui" "keymap"]))
-                (assoc :keymap (get-in t ["tui" "keymap"])))))
+                (assoc :keymap (get-in t ["tui" "keymap"]))
+                ;; slots are digits; EDN reads best with them as numbers
+                (seq (get-in t ["tui" "presets"]))
+                (assoc :presets (into (sorted-map-by #(compare (str %1) (str %2)))
+                                      (for [[n p] (get-in t ["tui" "presets"])]
+                                        [(or (parse-long n) n)
+                                         (into {} (map (fn [[k v]] [(keyword k) v])) p)]))))))
     :pi (let [s (u/read-json pi/settings-file)
               inv (invert pi/setting-keys)]
           (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]

@@ -998,6 +998,68 @@
             (is (not (str/includes? (slurp f) "[tui.keymap.chat]")))
             (is (empty? (codex-drift less st3)))))))))
 
+(def codex-tui-state
+  "What Codex itself keeps in `[tui]` between sessions: must survive any write."
+  (str "model = \"m-a\"\n"
+       "[tui]\ntheme = \"x\"\nstatus_line_use_colors = true\n"
+       "[tui.model_availability_nux]\n\"m-a\" = 4\n"
+       "[tui.presets.7]\ninput = \"hand-written\"\nlabel = \"\"\n"
+       "[hooks.state]\nopaque = \"do-not-touch\"\n"))
+
+(deftest codex-presets-plan-write-converge-and-round-trip
+  (let [f (str (temp-dir) "/config.toml")
+        presets {0 {:input "/model" :label "model picker"}
+                 1 {:input "/model m-b --reasoning=low"}}
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all
+                         :keymap {:chat {:open_presets "alt-t"}}
+                         :presets presets}]}]
+    (u/write-text! f codex-tui-state)
+    (with-redefs [codex/config-file f]
+      (testing "each slot is its own table op, next to the binding that opens the browser"
+        (let [ops (codex-drift raw state/empty-state)]
+          (is (= #{:keymap/chat :preset-0 :preset-1} (set (map :id ops))))
+          (is (= ["tui" "presets" "0"] (:path (first (filter #(= :preset-0 (:id %)) ops)))))
+          (is (= codex-tui-state (slurp f)) "planning does not write")))
+      (let [{st1 :st} (converge-codex raw state/empty-state)
+            t (toml/read-toml f)]
+        (is (= {"input" "/model" "label" "model picker"} (get-in t ["tui" "presets" "0"])))
+        (is (= {"input" "/model m-b --reasoning=low"} (get-in t ["tui" "presets" "1"])))
+        (is (= "alt-t" (get-in t ["tui" "keymap" "chat" "open_presets"])))
+        (testing "Codex's own [tui] keys and counters are untouched"
+          (is (= {"m-a" 4} (get-in t ["tui" "model_availability_nux"])))
+          (is (= "x" (get-in t ["tui" "theme"])))
+          (is (true? (get-in t ["tui" "status_line_use_colors"])))
+          (is (= "do-not-touch" (get-in t ["hooks" "state" "opaque"]))))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (testing "import reads the presets back, and the import plans nothing"
+          (let [imported (:codex (imports/scan-settings))]
+            (is (= {:input "/model" :label "model picker"} (get-in imported [:presets 0])))
+            (is (empty? (codex/settings-ops (config/normalize {:executors {:codex imported}} nil))))))
+        (testing "dropping a slot removes that table only; an unowned slot stays"
+          (let [less (assoc-in raw [:settings 0 :presets] (dissoc presets 1))
+                {st2 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["tui" "presets" "1"])))
+            (is (not (str/includes? (slurp f) "[tui.presets.1]")) "no bare header left behind")
+            (is (= "/model" (get-in t ["tui" "presets" "0" "input"])))
+            (is (= "hand-written" (get-in t ["tui" "presets" "7" "input"])))
+            (is (empty? (codex-drift less st2)))))))))
+
+(deftest codex-presets-reject-a-bad-slot-or-a-missing-input
+  (doseq [[presets msg] [[{10 {:input "/model"}} #"single digit"]
+                         [{:p {:input "/model"}} #"single digit"]
+                         [{0 {:label "no input"}} #":input is required"]
+                         [{0 {:input :model}} #":input must be a string"]
+                         [{0 {:input "/model" :model "m-b"}} #"unknown preset field :model"]
+                         [[{:input "/model"}] #"maps a slot"]]]
+    (let [cfg (config/normalize {:executors {:codex {:presets presets}}} nil)
+          errors (filter #(= :error (:level %)) (config/structural-findings cfg))]
+      (is (some #(re-find msg (:message %)) errors) (pr-str presets))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo msg (doall (codex/settings-ops cfg))))))
+  (is (not-any? #(= :error (:level %))
+                (config/structural-findings
+                 (config/normalize {:executors {:codex {:presets {"3" {:input "x"} :4 {:input "y" :label ""}}}}} nil)))))
+
 (deftest codex-keymap-is-editable-as-edn
   (let [keymap {:global {:open_transcript "alt-t"}}
         m (form/model (pr-str {:executors {:codex {:keymap keymap}}}))

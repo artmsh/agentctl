@@ -84,6 +84,25 @@ This writes the integer `cleanupPeriodDays` to `~/.claude/settings.json`.
 `validate` checks its type and minimum against the cached SchemaStore schema;
 use `validate --deep` to fetch the current schema.
 
+## Codex TUI
+
+Codex keeps its TUI settings in nested `[tui.*]` tables of
+`~/.codex/config.toml`, next to state it writes for itself. Each declared
+setting below is written key by key into its own table, so that state survives.
+
+A model switch two keys away: bind the presets browser and put `/model` in slot 0.
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :keymap {:chat {:open_presets "alt-t"}}
+             :presets {0 {:input "/model" :label "model picker"}}}]}
+```
+
+alt-t opens the browser and 0 runs `/model`, which opens the model picker. A
+preset is `{:input "…" :label "…"}` in slots 0-9; `:input` is required and runs
+as typed. `validate` rejects other slots and fields. Removing a slot removes
+only a table agentctl wrote; presets saved from the Codex browser stay.
+
 ## GUI
 
 ```sh

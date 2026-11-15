@@ -5,6 +5,7 @@
    relevant table). Everything else is TOML key surgery so codex-owned state
    ([hooks.state], [plugins.*], trust dialogs) is preserved."
   (:require [agentctl.adapters.common :as common]
+            [agentctl.codex-schema :as schema]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
@@ -108,11 +109,43 @@
       (empty? path) (set (keep setting-keys (keys settings)))
       (and (= 3 (count path)) (= ["tui" "keymap"] (subvec path 0 2)))
       (names (by-name (:keymap settings) (nth path 2)))
+      (and (= 3 (count path)) (= ["tui" "presets"] (subvec path 0 2)))
+      (names (some (fn [[k p]] (when (= (nth path 2) (schema/preset-slot k)) p)) (:presets settings)))
       :else #{})))
+
+(defn- native
+  "A declared value as config.toml holds it: keywords become strings and a
+   map is keyed by full string names."
+  [v]
+  (cond
+    (keyword? v) (u/key-str v)
+    (map? v) (into {} (map (fn [[k x]] [(u/key-str k) (native x)])) v)
+    (sequential? v) (mapv native v)
+    :else v))
+
+(defn- preset-ops
+  "One `[tui.presets.<n>]` table per declared slot, set key by key: Codex
+   writes its own state into `[tui]` (`model_availability_nux`), so nothing
+   above the slot is ever replaced."
+  [presets]
+  (for [[k p] (sort-by (comp str key) presets)
+        :let [n (schema/preset-slot k)
+              op (plan/toml-set-op {:tool tool :kind :settings :id (keyword (str "preset-" n))
+                                    :file config-file :table ["tui" "presets" n]
+                                    :kvs (native p)
+                                    :summary (str "codex preset " n)})]
+        :when op]
+    op))
+
+(def nested-settings
+  "Declared settings with an op of their own rather than a root key."
+  [:keymap :presets])
 
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
-        [kvs unsupported] (common/map-settings (dissoc settings :keymap) setting-keys)
+        _ (when-let [e (schema/errors settings [:executors :codex])]
+            (throw (ex-info (str "codex settings: " e) {:path [:executors :codex]})))
+        [kvs unsupported] (common/map-settings (apply dissoc settings nested-settings) setting-keys)
         bindings (when (contains? settings :keymap) (keymap-ops (:keymap settings)))]
     (concat
      (keep identity
@@ -120,6 +153,7 @@
                                :file config-file :table [] :kvs kvs
                                :summary "global codex settings"})])
      bindings
+     (preset-ops (:presets settings))
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")

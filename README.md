@@ -41,6 +41,8 @@ segment.
   supersedes ([project skills](docs/GUIDE.md#project-skills)).
 - TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
   each CLI's own subcommand, so keys a CLI writes for itself survive.
+- Codex's nested tables are declarable too: keymap and presets
+  ([Codex TUI](docs/GUIDE.md#codex-tui)).
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
   values; review its output before sharing a config.
