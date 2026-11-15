@@ -157,6 +157,25 @@
     (is (= :ok (:status (refs/resolve-ref r)))))
   (is (= :missing (:status (refs/resolve-ref (refs/parse "!env://AGENTCTL_DEFINITELY_UNSET"))))))
 
+(deftest an-empty-vault-field-is-missing-never-the-login-password
+  (let [item (fn [v] {:login {:username "u" :password "pw-test-login"}
+                      :fields [{:name "KEY" :value v} {:name "OTHER" :value "sk-test-other"}]})
+        resolve (fn [it ref]
+                  (reset! @#'refs/cache {})
+                  (with-redefs [refs/bw-state (delay :unlocked)
+                                u/sh (fn [& _] {:exit 0 :out (json/generate-string it) :err ""})]
+                    (refs/resolve-ref (refs/parse ref))))]
+    (doseq [v [nil "" "null" " null "]]
+      (testing (str "a KEY field holding " (pr-str v))
+        (let [r (resolve (item v) "!bw://vendor/KEY")]
+          (is (= :missing (:status r)))
+          (is (nil? (:value r))))))
+    (testing "a field with a value resolves to it"
+      (is (= {:status :ok :value "sk-test-other"} (resolve (item nil) "!bw://vendor/OTHER"))))
+    (testing "a field the item does not name still falls back to the login"
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor/password"))))
+    (reset! @#'refs/cache {})))
+
 ;; ---------------------------------------------------------------- config
 
 (def sample-config
@@ -1207,6 +1226,29 @@
   (is (common/holds-secret? {"NEW_RELIC_API_KEY" "NRAK-abc123"}))
   (is (common/holds-secret? {"TOKEN" "!bw://example-vault/x/y"}))
   (is (not (common/holds-secret? {"SLACK_MCP_CHANNELS_CACHE" "/tmp/channels.json"}))))
+
+(deftest an-unresolved-secret-holds-the-op-back-and-names-only-keys
+  (let [env (common/resolve-env {"TOKEN" (refs/parse "!env://AGENTCTL_TEST_NEVER_SET")
+                                 "PLAIN" (refs/parse "sk-test-literal-0123456789")})
+        o (common/unresolved-op {:tool :claude :kind :mcps :id :docs :target "/x/.claude.json"
+                                 :exec! (fn [] (throw (ex-info "must not run" {})))
+                                 :diffs [{:key :docs :before nil :after {:env (:values env)}}]}
+                                (common/issues-in "env" env))]
+    (testing "nothing is written for it"
+      (is (nil? (:exec! o)))
+      (is (nil? (:diffs o)))
+      (is (= :noop (:action o)))
+      (is (not (plan/mutating? o))))
+    (testing "the plan says why and where, and apply! sees it"
+      (is (:warn o))
+      (is (= [o] (core/unresolved [o (plan/op {:tool :claude :kind :mcps :id :plain})])))
+      (is (= "⚠ secret unresolved: env var unset: AGENTCTL_TEST_NEVER_SET (env.TOKEN) — nothing written"
+             (:summary o))))
+    (testing "a resolved neighbour's value never reaches the line"
+      (is (not (str/includes? (plan/render-plan [o] {:verbose true}) "sk-test-literal"))))
+    (testing "the summary counts it apart from what is unchanged"
+      (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
+             (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
 
 (defn- mcp-op [id action diffs]
   (plan/op {:action action :tool :claude :kind :mcps :project :example

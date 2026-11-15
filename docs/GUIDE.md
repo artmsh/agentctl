@@ -188,6 +188,32 @@ Claude Code still offers the `.mcp.json` definition.
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
 
+## Unresolved secrets
+
+A value in an MCP server's `:env` or `:headers` may be a reference (`$VAR`,
+`!env://`, `!bw://`, `!file://`, `!cmd://`) that is resolved when `apply!` runs.
+When one of them does not resolve — the vault is locked, the variable is unset,
+the Bitwarden field is empty or holds the text `null` — Claude's server is not
+written at all, in any scope. Writing the rest of it would leave a server that is
+configured and cannot authenticate, and because the missing value would then be
+missing from the desired entry too, the next plan would report no drift. The plan
+names the server, the key and the reason instead:
+
+```
+= mcps/docs
+    ⚠ secret unresolved: bitwarden vault locked (headers.api-key) — nothing written
+```
+
+Every other change in the run still applies. `apply` exits 2 while such a server
+remains and `apply!` exits 1, listing what it held back, so a partial run is never
+reported as converged. A server held back this way is not recorded as owned: one
+that never got written cannot be pruned later, and a hand-made server of the same
+name stays the user's.
+
+For a user-wide server, whose secret `claude mcp add` stores and agentctl does
+not read back, drift is decided by the env and header *names*: a name missing
+from `~/.claude.json` is drift, a changed value is not.
+
 ## Kimi Code
 
 Kimi Code CLI keeps its configuration in `$KIMI_CODE_HOME`, or `~/.kimi-code`

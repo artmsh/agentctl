@@ -37,8 +37,10 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
    and exits 2 on drift so it is usable from cron or CI.
 4. **Secrets are references, never literals.** `agents.edn` holds
    `!bw://…`/`$ENV` refs; values are resolved at apply time. A ref that cannot
-   be resolved (locked vault, unset variable) leaves any existing credential
-   untouched instead of blanking it.
+   be resolved (locked vault, unset variable, a vault field holding `""` or
+   `"null"`) leaves any existing credential untouched instead of blanking it:
+   the Claude adapter writes nothing for that server, and `apply!` exits 1
+   until the ref resolves.
 5. **Unknown ≠ failure.** A locked Bitwarden vault or an unreachable endpoint
    is reported as `?`, not as an error.
 6. Every mutation is backed up under `~/.config/agentctl/backups/<run>/`, one
@@ -676,6 +678,11 @@ stdin in the OEM codepage. An operation that does not end with a final `OK` line
 Plans print `bw:dev-keys/hosted/api-key`, never the resolved value. Changes that
 end up writing a resolved secret into a tool's config file are tagged
 `⚠ writes resolved secret` and counted before the confirmation prompt.
+
+A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
+not a value: written out, it is a header that authenticates nothing. A Claude
+MCP server with any ref that does not resolve is held back whole, as
+[GUIDE.md](GUIDE.md#unresolved-secrets) describes.
 
 `codex` reads provider keys from the environment only — declare those as
 `:key $VAR`; `validate` flags anything else.

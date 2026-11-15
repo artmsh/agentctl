@@ -130,14 +130,24 @@
         (let [it (try (cheshire.core/parse-string out true) (catch Exception _ nil))
               fields (into {} (map (juxt :name :value)) (:fields it))
               login (:login it)
-              v (or (get fields field)
-                    (when (= field "password") (:password login))
-                    (when (= field "username") (:username login))
-                    (when (and (:username login) (= field (:username login))) (:password login))
-                    (:password login))]
-          (if v
-            {:status :ok :value v}
-            {:status :missing :message (str "field not found on bw item: " item "/" field)}))))))
+              named? (contains? fields field)
+              ;; a field the item names is the answer, even when it is empty:
+              ;; falling through to the login would send its password instead
+              v (if named?
+                  (get fields field)
+                  (or (when (= field "password") (:password login))
+                      (when (= field "username") (:username login))
+                      (when (and (:username login) (= field (:username login))) (:password login))
+                      (:password login)))]
+          (cond
+            ;; an emptied field reads back as null, "" or the text "null";
+            ;; written out, any of them is a header that authenticates nothing
+            (and named? (or (nil? v) (contains? #{"" "null"} (str/trim (str v)))))
+            {:status :missing :message (str "field is empty on bw item: " item "/" field)}
+            (nil? v) {:status :missing :message (str "field not found on bw item: " item "/" field)}
+            (contains? #{"" "null"} (str/trim (str v)))
+            {:status :missing :message (str "field is empty on bw item: " item "/" field)}
+            :else {:status :ok :value v}))))))
 
 (defn resolve-ref
   "Resolve a ref. Returns {:status :ok|:missing|:unknown|:error :value ... :message ...}.

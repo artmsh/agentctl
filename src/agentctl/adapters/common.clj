@@ -37,6 +37,33 @@
           {:values {} :issues []}
           env))
 
+(defn issues-in
+  "`resolve-env`'s issues, each tagged with the map it came from — `env`,
+   `headers` — so a report can say where the unresolved key sits."
+  [where resolved]
+  (map #(assoc % :where where) (:issues resolved)))
+
+(defn- unresolved-reason
+  "`bitwarden vault locked (headers.api-key)`: the resolver's message and the
+   key names it applies to. Names only — a value never reaches this line."
+  [issues]
+  (str/join "; " (for [[msg is] (group-by #(or (:message %) (name (:status %))) issues)]
+                   (str msg " (" (str/join ", " (map #(str (:where %) "." (u/kw->str (:key %))) is)) ")"))))
+
+(defn unresolved-op
+  "Stands in for the op `base` would have been when its env or headers hold a
+   secret that did not resolve: a locked vault, an unset variable, an emptied
+   vault field. Writing the rest would leave a server that is configured and
+   authenticates nothing — and since the missing value contributes nothing to
+   the desired entry either, the next plan would see no drift. So nothing is
+   written: the op has no `:exec!`, and `:unresolved` tells apply! the run
+   has not converged."
+  [base issues]
+  (-> base
+      (dissoc :exec! :diffs :cmds :note :path)
+      (merge {:action :noop :warn true :unresolved true :risk :low
+              :summary (str "⚠ secret unresolved: " (unresolved-reason issues) " — nothing written")})))
+
 (def dialect-path
   "Where each dialect lives under a bare host. Only consulted for a provider
    that declares several: naming the host once is the whole point of writing

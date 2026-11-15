@@ -483,10 +483,15 @@
            {:tool (name tool)
             :groups (mapv group-data (chunk-ops tool-ops))}))))
 
-(defn summary-line [ops]
-  (let [f (frequencies (map :action ops))]
-    (format "%d to add, %d to change, %d to remove, %d unchanged"
-            (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))))
+(defn summary-line
+  "Counts by action. A resource held back on an unresolved secret is a noop
+   that did not converge, so it is counted apart rather than as unchanged."
+  [ops]
+  (let [held (count (filter :unresolved ops))
+        f (frequencies (map :action (remove :unresolved ops)))]
+    (str (format "%d to add, %d to change, %d to remove, %d unchanged"
+                 (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))
+         (when (pos? held) (format ", %d unresolved" held)))))
 
 ;; ---------------------------------------------------------------- generic file ops
 

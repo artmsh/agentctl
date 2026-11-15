@@ -526,6 +526,15 @@
   [o]
   (or (:owns o) [[(:tool o) (:kind o) (:id o)]]))
 
+(defn unresolved
+  "Ops held back because a secret did not resolve (`common/unresolved-op`).
+   Nothing was written for them, so a run holding one has not converged:
+   `apply` exits 2 and `apply!` exits 1, and like a failed op none of them is
+   claimed as owned — a later removal from agents.edn would otherwise prune a
+   hand-made server of the same name that agentctl never wrote."
+  [ops]
+  (filter :unresolved ops))
+
 (defn execute!
   "Run every mutating op. Returns {:done [...] :failed [...]}."
   [ops]

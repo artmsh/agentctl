@@ -159,19 +159,41 @@
 (defn current-mcps []
   (or (:mcpServers (u/read-json runtime-file)) {}))
 
-(defn- desired-shape [m]
-  (u/prune-nils
-   {:type (name (:transport m))
-    :command (:command m)
-    :args (vec (:args m))
-    :url (:url m)}))
+(defn- key-names
+  "Sorted names of an env or header map. Shapes compare names, never values:
+   the value is a secret `claude mcp add` stores and nothing here reads back,
+   while a missing name is a server that cannot authenticate."
+  [m]
+  (not-empty (vec (sort (map u/key-str (keys m))))))
+
+(defn- entry-type
+  "The transport an entry is written for. Claude Code infers it when `type`
+   is absent, and so does this."
+  [entry]
+  (or (:type entry) (if (:url entry) "http" "stdio")))
+
+(defn- desired-shape
+  "What `claude mcp add` will write: env for a stdio server, headers for an
+   http one — the other is never passed, so counting it would be drift that
+   no apply can clear."
+  [m]
+  (let [http? (= :http (:transport m))]
+    (u/prune-nils
+     {:type (name (:transport m))
+      :command (:command m)
+      :args (not-empty (vec (:args m)))
+      :url (:url m)
+      :env (when-not http? (key-names (:env m)))
+      :headers (when http? (key-names (:headers m)))})))
 
 (defn- current-shape [entry]
   (u/prune-nils
-   {:type (or (:type entry) (if (:url entry) "http" "stdio"))
+   {:type (entry-type entry)
     :command (:command entry)
-    :args (vec (:args entry))
-    :url (:url entry)}))
+    :args (not-empty (vec (:args entry)))
+    :url (:url entry)
+    :env (key-names (:env entry))
+    :headers (key-names (:headers entry))}))
 
 (defn mcp-ops [cfg st]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
@@ -184,25 +206,30 @@
                  want (desired-shape m)
                  have (some-> cur current-shape)
                  env (common/resolve-env (:env m))
-                 headers (common/resolve-env (:headers m))]
-           :when (not= (u/norm want) (u/norm have))]
-       (plan/op {:action (if cur :update :create)
-                 :tool tool :kind :mcps :id id
-                 :target runtime-file
-                 :summary (common/mcp-summary m)
-                 :note (when (common/holds-secret? (merge (:env m) (:headers m)))
-                         "⚠ secret value stored in ~/.claude.json")
-                 :diffs (plan/field-diffs (or have {}) want)
-                 :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
-                 :exec! (fn []
-                          (when cur (claude-sh "claude" "mcp" "remove" "--scope" "user" nm))
-                          (if (= :http (:transport m))
-                            (claude-sh (concat ["claude" "mcp" "add" "--scope" "user"
-                                           "--transport" "http" nm (:url m)]
-                                          (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers))))
-                            (claude-sh (concat ["claude" "mcp" "add" "--scope" "user" nm]
-                                          (mapcat (fn [[k v]] ["-e" (str k "=" v)]) (:values env))
-                                          ["--"] [(:command m)] (:args m)))))}))
+                 headers (common/resolve-env (:headers m))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))]
+           ;; an unresolved secret is reported even when the shapes agree: the
+           ;; value cannot be checked, so the run cannot call itself converged
+           :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
+       (if (seq issues)
+         (common/unresolved-op {:tool tool :kind :mcps :id id :target runtime-file} issues)
+         (plan/op {:action (if cur :update :create)
+                   :tool tool :kind :mcps :id id
+                   :target runtime-file
+                   :summary (common/mcp-summary m)
+                   :note (when (common/holds-secret? (merge (:env m) (:headers m)))
+                           "⚠ secret value stored in ~/.claude.json")
+                   :diffs (plan/field-diffs (or have {}) want)
+                   :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
+                   :exec! (fn []
+                            (when cur (claude-sh "claude" "mcp" "remove" "--scope" "user" nm))
+                            (if (= :http (:transport m))
+                              (claude-sh (concat ["claude" "mcp" "add" "--scope" "user"
+                                             "--transport" "http" nm (:url m)]
+                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers))))
+                              (claude-sh (concat ["claude" "mcp" "add" "--scope" "user" nm]
+                                            (mapcat (fn [[k v]] ["-e" (str k "=" v)]) (:values env))
+                                            ["--"] [(:command m)] (:args m)))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
@@ -434,18 +461,16 @@
 (defn- mcp-json-entry
   "Merged onto whatever .mcp.json already holds: the file is checked into the
    project and may carry servers agentctl knows nothing about."
-  [m cur]
-  (let [env (common/resolve-env (:env m))
-        headers (common/resolve-env (:headers m))]
-    (merge cur
-           (:extra m)
-           (u/prune-nils
-            {:type (name (:transport m))
-             :command (:command m)
-             :args (not-empty (vec (:args m)))
-             :url (:url m)
-             :env (not-empty (merge (:env cur) (:values env)))
-             :headers (not-empty (merge (:headers cur) (:values headers)))}))))
+  [m cur env headers]
+  (merge cur
+         (:extra m)
+         (u/prune-nils
+          {:type (name (:transport m))
+           :command (:command m)
+           :args (not-empty (vec (:args m)))
+           :url (:url m)
+           :env (not-empty (merge (:env cur) (:values env)))
+           :headers (not-empty (merge (:headers cur) (:values headers)))})))
 
 (defn- project-mcp-target
   "Where a project's server is written. Local scope — the default — is the
@@ -466,18 +491,24 @@
 (defn- project-mcp-writes [cfg id proj]
   (for [[mid m] (common/project-mcps cfg proj tool)
         :let [{:keys [file path shared?]} (project-mcp-target proj m mid)
+              oid (keyword (str (name id) "/" (name mid)))
               current (get-in (u/read-json file) path)
+              env (common/resolve-env (:env m))
+              headers (common/resolve-env (:headers m))
+              issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
               secret? (common/holds-secret? (merge (:env m) (:headers m)))
-              op (plan/json-set-op
-                  {:tool tool :kind :mcps :project id
-                   :id (keyword (str (name id) "/" (name mid)))
-                   :file file
-                   :path path
-                   :value (mcp-json-entry m current)
-                   :risk (if secret? :secret :low)
-                   :summary (common/mcp-summary m)
-                   :note (when (and secret? shared?)
-                           "⚠ secret value written into the project — .mcp.json is usually tracked")})]
+              op (if (seq issues)
+                   (common/unresolved-op {:tool tool :kind :mcps :project id :id oid :target file} issues)
+                   (plan/json-set-op
+                    {:tool tool :kind :mcps :project id
+                     :id oid
+                     :file file
+                     :path path
+                     :value (mcp-json-entry m current env headers)
+                     :risk (if secret? :secret :low)
+                     :summary (common/mcp-summary m)
+                     :note (when (and secret? shared?)
+                             "⚠ secret value written into the project — .mcp.json is usually tracked")}))]
         :when op]
     op))
 
