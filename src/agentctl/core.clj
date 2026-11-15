@@ -205,7 +205,10 @@
                           {:tool :claude :kind :hooks :id id :project project
                            :file (str project-path "/.claude/settings.json")
                            :path [:hooks (keyword (u/kw->str (:event decl)))]
-                           :old (:value (state/entry st :claude :hooks id)) :value (claude/hook-group decl)})]
+                           :old (:value (state/entry st :claude :hooks id)) :value (claude/hook-group decl)
+                           ;; as user-scope hooks do: under --show-noop a
+                           ;; converged hook is the confirmation a change landed
+                           :report-converged? true})]
                (assoc o :project-path project-path))) desired)
      (keep (fn [[[t k sid] data]]
              (let [id (keyword sid)]

@@ -1500,6 +1500,27 @@
                     (is (= ["reminder.sh"]
                            (map :command (mapcat :hooks (get-in after [:hooks :SessionStart])))))))))))))))
 
+(deftest a-converged-project-hook-is-reported-like-a-user-one
+  ;; the user-scope pass above renders `= hooks/{lock reminder}`; a hook placed
+  ;; in a project has to confirm itself the same way, or a hooks change there
+  ;; can only be checked by reading settings.json by hand
+  (let [root (temp-dir) repo (str root "/repo")]
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [claude/settings-file (str root "/settings.json") claude/runtime-file (str root "/runtime.json")]
+      (let [raw {:hooks [{:id :start :event :SessionStart :command "echo ready" :in repo}]}
+            cfg (config/normalize raw "test")
+            opts {:tools #{:claude} :kinds #{:hooks}}
+            ops (core/build-plan cfg state/empty-state opts)
+            _ (is (empty? (:failed (core/execute! ops))))
+            st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            again (core/build-plan cfg st opts)
+            id (keyword (name (scope/target-id repo)) "start")]
+        (is (= [[:create id]] (map (juxt :action :id) ops)))
+        (is (= [[:noop id]] (map (juxt :action :id) again)))
+        (is (re-find #"(?m)^= \S*/repo hooks/start$"
+                     (binding [plan/*color* false] (plan/render-plan again {:show-noop true}))))
+        (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged" (plan/summary-line again)))))))
+
 (deftest a-scoped-run-that-plans-nothing-for-a-hook-does-not-forget-its-live-value
   ;; `-t`/`-k`/`-p` can filter a hook's op out of the plan entirely while the
   ;; id stays declared in cfg, so `inventory` still calls it owned. Passing
