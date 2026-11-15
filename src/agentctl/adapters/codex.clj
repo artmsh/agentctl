@@ -91,6 +91,25 @@
                              :summary (str "codex keymap " (u/kw->str context))}))
         keymap))
 
+(defn- by-name
+  "The value a declared map holds under the native name `k`: its keys may be
+   keywords, strings or numbers, the table path is always strings."
+  [m k]
+  (when (map? m) (some (fn [[dk v]] (when (= k (u/key-str dk)) v)) m)))
+
+(defn owned-keys
+  "Native keys the declared `settings` still hold in the config.toml table at
+   `path` (strings). Ownership prunes a key agentctl once wrote there only
+   when it is missing from this set."
+  [settings path]
+  (let [path (vec path)
+        names (fn [m] (if (map? m) (set (map u/key-str (keys m))) #{}))]
+    (cond
+      (empty? path) (set (keep setting-keys (keys settings)))
+      (and (= 3 (count path)) (= ["tui" "keymap"] (subvec path 0 2)))
+      (names (by-name (:keymap settings) (nth path 2)))
+      :else #{})))
+
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
         [kvs unsupported] (common/map-settings (dissoc settings :keymap) setting-keys)

@@ -30,14 +30,20 @@
 
 (defn write-key [o] [(:tool o) (:target o) (:path o) (when (:array-element o) (:project-path o))])
 
-(defn- desired-fields [cfg o]
+(defn- desired-fields
+  "Native keys the config still declares in the table or object `o` wrote.
+   Codex writes nested tables (`[tui.keymap.<ctx>]`, …) whose keys are not
+   setting names, so its adapter answers per table path."
+  [cfg o]
   (let [settings (if (:project o) (get-in cfg [:projects (:project o) :tools (:tool o)])
                      (get-in cfg [:tools (:tool o)]))
         mapping (case (:tool o) :claude claude/setting-keys :codex codex/setting-keys
                       :pi pi/setting-keys :antigravity antigravity/setting-keys
                       :kimi kimi/setting-keys :omp omp/setting-paths {})]
-    (set (keep (fn [k] (when-let [native (get mapping k)]
-                        (u/kw->str (if (vector? native) (last native) native)))) (keys settings)))))
+    (if (= :codex (:tool o))
+      (codex/owned-keys settings (vec (:path o)))
+      (set (keep (fn [k] (when-let [native (get mapping k)]
+                          (u/kw->str (if (vector? native) (last native) native)))) (keys settings))))))
 
 (defn record
   "Keep the exact destinations of successful writes; planning never claims ownership."
@@ -85,7 +91,9 @@
                     (and (= :settings kind) (= "$schema" (last path))
                          (or (seq (owners cfg o))
                              (seq (owners cfg (assoc o :kind :permissions))))) nil
-                    (and (= :settings kind) ((desired-fields cfg o) (last path))) nil
+                    ;; a JSON setting is one key at `[native]`; a codex table
+                    ;; path's last element is a table name, not a key
+                    (and (= :settings kind) (not= :codex tool) ((desired-fields cfg o) (last path))) nil
                     (str/ends-with? target ".json")
                     ;; Trust arrays contain unmanaged members too: subtract only
                     ;; members this write added, preserving the rest.
@@ -102,9 +110,13 @@
                       (when (some #(contains? table (u/kw->str %)) ks)
                         (plan/op {:tool tool :kind kind :id id :target target :path path :project project
                                   :action :delete :summary "removed from agents.edn" :pruned-keys (vec ks)
+                                  ;; a table left with no keys goes too: a bare
+                                  ;; `[tui.presets.N]` header is a codex load error
                                   :exec! #(do (u/backup! target)
                                               (toml/update-file! target
-                                                                (fn [text] (reduce (fn [s k] (toml/remove-key s path k)) text ks))))})))
+                                                                (fn [text] (toml/remove-table-if-empty
+                                                                            (reduce (fn [s k] (toml/remove-key s path k)) text ks)
+                                                                            path))))})))
                     (or (str/ends-with? target ".yaml") (str/ends-with? target ".yml"))
                     (plan/yaml-remove-op args)
                     :else nil)]

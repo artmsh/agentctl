@@ -68,6 +68,41 @@
     (is (= "[\"a\", \"b\"]" (toml/encode-value ["a" "b"])))
     (is (= "\"say \\\"hi\\\"\"" (toml/encode-value "say \"hi\"")))))
 
+(def multiline-toml
+  (str "[tui]\n"
+       "theme = \"x\"\n"
+       "status_line = [\n"
+       "    \"model\",\n"
+       "    \"context-used\", # trailing comment ]\n"
+       "]\n"
+       "note = \"\"\"\n"
+       "status_line = 1\n"
+       "\"\"\"\n"
+       "after = 1\n"))
+
+(deftest toml-surgery-replaces-and-removes-a-whole-multi-line-value
+  (testing "a value Codex writes one item per line is replaced as one"
+    (let [out (toml/set-key multiline-toml ["tui"] "status_line" ["a" "b"])]
+      (is (nil? (toml/parse-error out)) out)
+      (is (= {"theme" "x" "status_line" ["a" "b"] "note" "status_line = 1\n" "after" 1}
+             (get (json/parse-string (:out (u/sh "python3" "-c" "import sys,tomllib,json;print(json.dumps(tomllib.loads(sys.argv[1])))" out))) "tui")))))
+  (testing "and removed as one; a look-alike line inside a string is not a key"
+    (let [out (toml/remove-key multiline-toml ["tui"] "status_line")]
+      (is (nil? (toml/parse-error out)) out)
+      (is (str/includes? out "status_line = 1"))
+      (is (not (str/includes? out "context-used")))))
+  (testing "a dotted or quoted key is told apart from a bare one"
+    (is (str/includes? (toml/set-key "[t]\n\"a.b\" = 1\na = 2\n" ["t"] "a" 3) "\"a.b\" = 1\na = 3")))
+  (testing "a table emptied by a prune loses its header; one that still holds keys keeps it"
+    (is (= "[a]\nk = 1\n" (toml/remove-table-if-empty "[a]\nk = 1\n[a.b]\n\n" ["a" "b"])))
+    (is (= "[a]\nk = 1\n" (toml/remove-table-if-empty "[a]\nk = 1\n" ["a"]))))
+  (testing "update-file! refuses an edit that would leave the file unparseable"
+    (let [f (str (temp-dir) "/c.toml")]
+      (u/write-text! f "a = 1\n")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid TOML"
+                            (toml/update-file! f (fn [t] (str t "b = [\n")))))
+      (is (= "a = 1\n" (slurp f))))))
+
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)
         f (str dir "/config.toml")]
@@ -926,6 +961,42 @@
         (doseq [op (codex/settings-ops cfg)] ((:exec! op)))
         (is (= [] (get-in (toml/read-toml f) ["tui" "keymap" "global" "copy"])))
         (is (empty? (codex/settings-ops cfg)))))))
+
+(defn converge-codex
+  "Plan, run and record one entity-DSL apply! for codex, the way `main` does:
+   ownership only takes part through `:planned-ops` and `sync-state!`."
+  [raw st]
+  (let [cfg (config/normalize raw "test")
+        ops (core/build-plan cfg st {:tools #{:codex}})
+        {:keys [failed]} (core/execute! ops)]
+    (is (empty? failed) (pr-str (map :error failed)))
+    {:ops ops :cfg cfg :st (core/sync-state! st (assoc cfg :planned-ops ops))}))
+
+(defn codex-drift [raw st]
+  (filter plan/mutating? (core/build-plan (config/normalize raw "test") st {:tools #{:codex}})))
+
+(deftest codex-keymap-stays-owned-in-the-entity-dsl
+  ;; ownership used to know only root setting names, so the next run read
+  ;; `[tui.keymap.chat] open_presets` as a removed setting and pruned it, and
+  ;; the run after that wrote it back
+  (let [f (str (temp-dir) "/config.toml")
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b"
+                         :keymap {:chat {:open_presets "alt-t"}}}]}]
+    (u/write-text! f "model = \"m-a\"\n[tui]\ntheme = \"x\"\n")
+    (with-redefs [codex/config-file f]
+      (let [{st1 :st} (converge-codex raw state/empty-state)]
+        (is (= "alt-t" (get-in (toml/read-toml f) ["tui" "keymap" "chat" "open_presets"])))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (let [{st2 :st} (converge-codex raw st1)]
+          (is (empty? (codex-drift raw st2)) "and stays converged"))
+        (testing "a dropped binding is pruned, and its emptied table with it"
+          (let [less (update-in raw [:settings 0] dissoc :keymap)
+                {st3 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["tui" "keymap"])))
+            (is (= "x" (get-in t ["tui" "theme"])))
+            (is (not (str/includes? (slurp f) "[tui.keymap.chat]")))
+            (is (empty? (codex-drift less st3)))))))))
 
 (deftest codex-keymap-is-editable-as-edn
   (let [keymap {:global {:open_transcript "alt-t"}}
