@@ -468,6 +468,21 @@ unrelated server of the same name, so the project's own entry is cleaned up
 separately. The ownership manifest also records the resolved path, so deleting
 the entire project declaration still prunes entries agentctl wrote there.
 
+Both project placements are merged onto the entry already there, so an env
+var, header or unmodelled key added by hand survives an update; the declared
+type, command, args and url replace their old values. A transport change
+(stdio to http, or back) replaces every transport key instead: merged, the
+stdio server's `command`, `args` and `env` would stay beside the new `url`. The
+plan lists the keys that go:
+
+```
+~ projects/sample mcps/docs
+      - args: ["docs-mcp"]
+      - command: "/usr/local/bin/docs-mcp"
+      ~ type: "stdio" -> "http"
+      + url: "https://docs.example.com/mcp"
+```
+
 ### Project skills (legacy)
 
 A project's `:skills` names a whole skill-pack, a skill declared under

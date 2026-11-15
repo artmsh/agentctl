@@ -497,19 +497,38 @@
     (concat (keep plugin-install-op desired)
             (keep plugin-uninstall-op managed))))
 
+(def ^:private transport-keys
+  "The keys that say how Claude Code reaches a server, for any transport."
+  [:type :command :args :url :env :headers])
+
+(defn- str-keys
+  "JSON reads a key back as a keyword and a resolved value carries a string:
+   merged as they are, one name would be written twice."
+  [m]
+  (into {} (map (fn [[k v]] [(u/key-str k) v])) m))
+
 (defn- mcp-json-entry
-  "Merged onto whatever .mcp.json already holds: the file is checked into the
-   project and may carry servers agentctl knows nothing about."
+  "The entry as Claude Code reads it, in `.mcp.json` or a project's local
+   scope. On the same transport the declared fields are merged onto what is
+   there, so an env var, header or unmodelled key the user added survives:
+   neither file is agentctl's alone. The declared type, command, args and url
+   are the server itself and replace what was there.
+
+   A transport change replaces every transport key instead. Merged, a stdio
+   server's command, args and env would stay beside the new url, and the
+   entry would describe two servers at once."
   [m cur env headers]
-  (merge cur
-         (:extra m)
-         (u/prune-nils
-          {:type (name (:transport m))
-           :command (:command m)
-           :args (not-empty (vec (:args m)))
-           :url (:url m)
-           :env (not-empty (merge (:env cur) (:values env)))
-           :headers (not-empty (merge (:headers cur) (:values headers)))})))
+  (let [same? (and cur (= (name (:transport m)) (entry-type cur)))
+        kept (if same? cur (apply dissoc cur transport-keys))]
+    (merge (dissoc kept :type :command :args :url)
+           (:extra m)
+           (u/prune-nils
+            {:type (name (:transport m))
+             :command (:command m)
+             :args (not-empty (vec (:args m)))
+             :url (:url m)
+             :env (not-empty (merge (str-keys (:env kept)) (:values env)))
+             :headers (not-empty (merge (str-keys (:headers kept)) (:values headers)))}))))
 
 (defn- project-mcp-target
   "Where a project's server is written. Local scope — the default — is the

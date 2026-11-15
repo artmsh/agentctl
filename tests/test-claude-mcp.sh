@@ -239,4 +239,85 @@ plan -k settings
 [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a malformed settings env ref exited $code"; }
 grep -q "⚠ secret unresolved: invalid reference" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the malformed ref is not reported"; }
 
+# ---------------------------------------------------------------- transport change
+
+entry() { # entry <local|project> -> the docs server's entry, sorted JSON
+  if [ "$1" = local ]; then local_entry "$SB/proj" docs
+  else python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))['mcpServers'].get('docs'), sort_keys=True))" "$SB/proj/.mcp.json"; fi
+}
+target() { if [ "$1" = local ]; then echo "$SB/.claude.json"; else echo "$SB/proj/.mcp.json"; fi; }
+nodups() { # fail when a JSON object in the file names one key twice
+  python3 - "$1" <<'PY'
+import json, sys
+def pairs(ps):
+    ks = [k for k, _ in ps]
+    assert len(ks) == len(set(ks)), "duplicate key in %s" % ks
+    return dict(ps)
+json.load(open(sys.argv[1]), object_pairs_hook=pairs)
+PY
+}
+edit_entry() { # edit_entry <local|project> <python statement over e>
+  python3 - "$(target "$1")" "$SB/proj" "$2" <<'PY'
+import json, sys
+f, proj, stmt = sys.argv[1:]
+d = json.load(open(f))
+e = (d["projects"][proj] if f.endswith(".claude.json") else d)["mcpServers"]["docs"]
+exec(stmt)
+json.dump(d, open(f, "w"), indent=2)
+PY
+}
+stdio() { # stdio <scope> <args>
+  cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :docs :command "/bin/echo" :args [$2] :env {"A" "1"} :in "proj" :scope :$1 :acli [:claude]}]}
+EDN
+}
+http() { # http <scope>
+  cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :docs :type :http :url "https://mcp.example.com/docs" :headers {"api-key" "!bw://vendor/KEY"} :in "proj" :scope :$1 :acli [:claude]}]}
+EDN
+}
+vault '{"vendor": {"KEY": "'$SECRET'"}}'
+for scope in local project; do
+  echo "11. $scope: a same-transport update keeps what the user added, and drops args no longer declared"
+  stdio $scope '"docs-mcp" "--stdio"'
+  apply -k mcps
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "$scope: stdio apply! exited $code"; }
+  edit_entry $scope 'e["timeout"] = 30; e["env"]["USER_VAR"] = "kept"'
+  stdio $scope ''
+  sed -i.bak 's/{"A" "1"}/{"A" "2"}/' "$SB/agents.edn"
+  plan -k mcps
+  [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "$scope: dropped args are not drift"; }
+  grep -q -- '- args: \["docs-mcp" "--stdio"\]' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "$scope: the plan does not show the dropped args"; }
+  apply -k mcps
+  nodups "$(target $scope)" || fail "$scope: an env name was written twice"
+  [ "$(entry $scope)" = '{"command": "/bin/echo", "env": {"A": "2", "USER_VAR": "kept"}, "timeout": 30, "type": "stdio"}' ] \
+    || { entry $scope; fail "$scope: same-transport update lost a user key or kept stale args"; }
+
+  echo "12. $scope: stdio -> http replaces the transport keys, and the plan shows what goes"
+  http $scope
+  plan -k mcps
+  [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "$scope: a transport change is not drift"; }
+  for line in '- command: "/bin/echo"' '- env' '- USER_VAR: "kept"' '~ type: "stdio" -> "http"' '+ url: "https://mcp.example.com/docs"'; do
+    grep -qF -- "$line" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "$scope: the plan does not show '$line'"; }
+  done
+  grep -q "$SECRET" "$SB/plan.txt" && fail "$scope: the plan printed a resolved secret"
+  apply -k mcps
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "$scope: http apply! exited $code"; }
+  [ "$(entry $scope)" = '{"headers": {"api-key": "'$SECRET'"}, "timeout": 30, "type": "http", "url": "https://mcp.example.com/docs"}' ] \
+    || { entry $scope; fail "$scope: stale stdio keys survived the transport change"; }
+  plan -k mcps
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "$scope: not converged after the transport change"; }
+
+  echo "13. $scope: http -> stdio drops the url and headers"
+  stdio $scope '"docs-mcp"'
+  plan -k mcps
+  grep -qF -- '- url: "https://mcp.example.com/docs"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "$scope: the plan does not show the url going"; }
+  apply -k mcps
+  [ "$(entry $scope)" = '{"args": ["docs-mcp"], "command": "/bin/echo", "env": {"A": "1"}, "timeout": 30, "type": "stdio"}' ] \
+    || { entry $scope; fail "$scope: stale http keys survived the transport change"; }
+  plan -k mcps
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "$scope: not converged after http -> stdio"; }
+  rm -f "$SB/proj/.mcp.json"
+done
+
 echo "all claude mcp e2e checks passed"

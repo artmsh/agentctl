@@ -188,6 +188,21 @@ Claude Code still offers the `.mcp.json` definition.
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
 
+Both project placements are merged onto the entry already there, so an env
+var, header or unmodelled key added by hand survives an update; the declared
+type, command, args and url replace their old values. A transport change
+(stdio to http, or back) replaces every transport key instead: merged, the
+stdio server's `command`, `args` and `env` would stay beside the new `url`. The
+plan lists the keys that go:
+
+```
+~ projects/sample mcps/docs
+      - args: ["docs-mcp"]
+      - command: "/usr/local/bin/docs-mcp"
+      ~ type: "stdio" -> "http"
+      + url: "https://docs.example.com/mcp"
+```
+
 ## Unresolved secrets
 
 A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
