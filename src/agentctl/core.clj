@@ -118,7 +118,9 @@
    exactly like a converged machine."
   [{:keys [tools] :as opts}]
   (concat
-   (for [t tools :when (not (some #{t} config/all-tools))]
+   (for [t tools :when (not (or (some #{t} config/all-tools)
+                                ;; a host, having no agents.edn, provisions consumers
+                                (and (:host opts) (scope/consumers t))))]
      ["-t" t (str (config/tool-problem t) " (tools: " (str/join ", " (map name config/all-tools)) ")")])
    (for [k (:kinds opts) :when (not (some #{k} kinds))]
      ["-k" k (kind-problem k)])))

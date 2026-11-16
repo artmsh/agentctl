@@ -643,6 +643,29 @@
 
 (defn- keyed-section? [v] (or (nil? v) (and (map? v) (every? vector? (keys v)))))
 
+(defn- host-consumers
+  "A consumer reads its skills out of agents.edn here, but a host has no
+   agents.edn: there, what awl reads has to be placed on disk like any tool's.
+   So the consumers each row named are carried onto the skills and packs it
+   selects. A skill a pack brings takes the pack's; one declared on its own
+   keeps its own, as it does for `:tools`."
+  [cfg]
+  (let [add (fnil into #{})]
+    (reduce
+     (fn [cfg {:keys [kind id decl]}]
+       (let [cs (set (:consumers decl))]
+         (cond
+           (empty? cs) cfg
+           (= :skills kind) (cond-> cfg (get-in cfg [:skills id]) (update-in [:skills id :consumers] add cs))
+           (= :skill-packs kind)
+           (-> cfg
+               (update-in [:skill-packs id :consumers] add cs)
+               (update :skills #(into {} (for [[sid s] %]
+                                           [sid (cond-> s (and (:via-pack s) (= id (:from s)))
+                                                  (update :consumers add cs))]))))
+           :else cfg)))
+     cfg (:entities cfg))))
+
 (defn- norm-host
   "A host's own declarations, in the keyed shape of the top-level sections. They
    sit inside the host rather than selecting from the top level because a source
@@ -667,7 +690,7 @@
       :home (:home decl)
       :sections-ok? sections?
       :unsupported (vec (sort (remove (into host-settings host-sections) (keys decl))))
-      :cfg (normalize-resources (or body {}) source)})))
+      :cfg (host-consumers (normalize-resources (or body {}) source))})))
 
 (declare config-format)
 

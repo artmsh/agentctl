@@ -26,7 +26,8 @@ selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`, `:kimi`,
 `:dsh`. `:awl` is valid on these two sections only:
 `awl` reads this file itself, so agentctl does not
 provision it and the value only decides what awl takes. An entry naming `:awl`
-alone plans nothing, and a git pack is not cloned for it.
+alone plans nothing, and a git pack is not cloned for it. A remote host is the
+exception, because it has no copy of this file ([Remote hosts](#remote-hosts)).
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
@@ -758,9 +759,23 @@ Declare one host for each side you want provisioned; neither sees the other's sk
 
 Host sections take the keyed `:skills` and `:skill-packs` forms, and a pack there
 defaults to `:in :all`. A source already placed at the top level can be placed
-again on a host, for different tools. Only codex's user-wide skills are provisioned
-so far: other tools and kinds are reported in the plan and by `validate`, never
-dropped silently. `:home` overrides the remote home, for a scratch tree.
+again on a host, for different tools. User-wide skills for codex and awl are
+provisioned so far: other tools and kinds are reported in the plan and by
+`validate`, never dropped silently. `:home` overrides the remote home, for a
+scratch tree.
+
+Locally awl reads its skills out of `agents.edn`, but a host has none, so there
+`:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
+not awl's alone: codex 0.95.0 and later read it as well, and list a skill once
+for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
+when the host's `codex --version` is 0.95.0 or later. An older codex gets its own
+copy in `~/.codex/skills`, and so does a codex whose version can't be read, with a
+warning. Changing the declaration or the codex version moves the copy on the next
+apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
+since it is often a shell alias, so an awl skill is placed whether or not `awl` is
+on the host's `PATH`. When codex reads both directories and one holds a hand-made
+copy of a skill agentctl places in the other, the plan warns that codex lists the
+skill twice. `-t awl` selects `~/.agents/skills`; it is valid only with `--host`.
 
 Skills are copied, not linked: sources are read on this machine (a git pack is
 fetched here) and sent over SSH. Drift is a per-file comparison of byte hashes,
@@ -768,7 +783,9 @@ ignoring `.git`, `__pycache__` and `.DS_Store`; a file mode change alone is not
 drift. An identical copy already on the host is adopted without a write. What a run
 replaces or prunes moves to `.config/agentctl/backups/<stamp>` in the remote home,
 and ownership is kept per host in `~/.config/agentctl/hosts/<name>.edn`, apart from
-local state. An unreachable host exits 1 from `apply` and `apply!`.
+local state, under `codex` for `~/.codex/skills` and `awl` for `~/.agents/skills`.
+Dropping a skill from `agents.edn`, even the host's last, prunes it. An unreachable
+host exits 1 from `apply` and `apply!`.
 
 ## Reading a plan
 

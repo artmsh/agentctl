@@ -49,6 +49,7 @@
     "OPTIONS"
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi dsh"
+    "                       (and awl with --host)"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"]
    ;; the DSL's kinds, then the old format's own, each named against the DSL
    ;; kind it stands in for — never a list of its own beside `core/kinds-for`

@@ -714,7 +714,7 @@ changing built-in models in place.
 {:hosts {:win {:ssh "user@example.com" ; ssh destination; options belong in ~/.ssh/config
                :os :windows           ; :windows, :linux or :macos
                :home "C:\\scratch"     ; optional: pins the remote home, ignoring CODEX_HOME
-               :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex]}}
+               :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex :awl]}}
                :skills {[:gh "owner/skill"] {:acli [:codex]}}}}}
 ```
 
@@ -725,7 +725,18 @@ host ones never reach a local plan.
 
 A host has no projects: `:in` is `:all` (or `:none` on a pack that a `[pack "skill"]`
 key names), and anything else is a config error, as is a non-keyed section. Host
-keys other than the ones above, and any tool but codex, are reported as not provisioned.
+keys other than the ones above, and any tool but codex and awl, are reported as not
+provisioned.
+
+A host has no `agents.edn` for awl to read, so `:awl` there places copies, in
+`~/.agents/skills/<name>`. Codex keeps `$CODEX_HOME/skills`, and from 0.95.0 on also
+reads `~/.agents/skills`, listing a skill once per copy. A skill selected by both
+tools goes into `~/.agents/skills` alone when the host's `codex --version` is 0.95.0
+or later. Otherwise it goes into both, with a warning when the version cannot be
+read. Codex has to be on the host's `PATH` to be provisioned. awl is not looked for.
+Ownership in the host's state file is per directory: `codex` for `$CODEX_HOME/skills`,
+`awl` for `~/.agents/skills`. A skill whose placement changes is copied to its new
+directory and pruned from the old one in the same run, writes first.
 
 The transport is one generated script per operation, sent on stdin. Nothing is spliced
 into the ssh command line, because Windows OpenSSH's `DefaultShell` may be cmd, PowerShell

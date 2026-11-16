@@ -3245,10 +3245,31 @@
         host {:id :w :ssh "h" :os :windows}
         ascii? #(every? (fn [c] (< (int c) 128)) %)]
     (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
-      (remote/write-tree! host "skill" [{:rel "dïr/fïle ünï.md" :bytes (.getBytes "ünï" "UTF-8") :sha "00"}])
-      (is (ascii? @script))
-      (is (not (str/includes? @script "fïle")))
-      (is (str/includes? @script (remote/b64-str "dïr/fïle ünï.md"))))))
+      (doseq [root remote/roots]
+        (testing (name root)
+          (remote/write-tree! host root "skïll" [{:rel "dïr/fïle ünï.md" :bytes (.getBytes "ünï" "UTF-8") :sha "00"}])
+          (is (ascii? @script))
+          (is (not (str/includes? @script "fïle")))
+          (is (str/includes? @script (remote/b64-str "dïr/fïle ünï.md")))
+          (remote/park! host root "skïll")
+          (is (ascii? @script))))
+      (remote/inventory host [:codex] ["skïll"])
+      (is (ascii? @script)))))
+
+(deftest each-root-has-its-own-place-and-backup-name
+  ;; a run that moves a skill between roots parks the same id from both
+  (let [script (atom nil)]
+    (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
+      (doseq [[os sep] [[:linux "/"] [:windows "\\"]]
+              :let [host {:id :w :ssh "h" :os os}]]
+        (testing (name os)
+          (remote/park! host :codex "x")
+          (is (str/includes? @script (str "$C" sep "skills" sep "$id")))
+          (is (str/includes? @script "_.codex_skills_$id"))
+          (remote/park! host :awl "x")
+          (is (str/includes? @script (str "$H" sep ".agents" sep "skills" sep "$id")))
+          (is (str/includes? @script "_.agents_skills_$id"))
+          (is (not (str/includes? @script (str "$C" sep "skills")))))))))
 
 (deftest a-file-name-cannot-climb-out-of-a-windows-skill
   (doseq [bad ["..\\..\\x.bat" "C:x.bat" "a:b.txt" "dir/CON" "dir/nul.txt" "trail." "trail " "q?.md"]]
@@ -3258,21 +3279,70 @@
   (testing "write-tree! refuses before anything leaves this machine"
     (with-redefs [remote/exec (fn [& _] (throw (Exception. "must not be reached")))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot exist on Windows"
-                            (remote/write-tree! {:os :windows :id :w} "s"
+                            (remote/write-tree! {:os :windows :id :w} :codex "s"
                                                 [{:rel "..\\x" :bytes (.getBytes "") :sha ""}]))))))
 
 (deftest an-inventory-tolerates-a-chatty-login-shell
   (let [e #(remote/b64-str %)
         inv (remote/parse-inventory
-             ["Welcome to Ubuntu" (str "H\t" (e "C:\\Users\\a")) (str "R\t" (e "C:\\Users\\a\\.codex\\skills"))
-              "T\tcodex\t1" "T\tpi\t0"
-              "S\talpha\tD" (str "M\talpha\t" (e "sub dir/ünï.md") "\tabc")
-              "S\tgone\tA" "S\tjn\tL" "OK"])]
+             ["Welcome to Ubuntu" (str "H\t" (e "C:\\Users\\a"))
+              (str "R\tcodex\t" (e "C:\\Users\\a\\.codex\\skills"))
+              (str "R\tawl\t" (e "C:\\Users\\a\\.agents\\skills"))
+              "T\tcodex\t1" (str "V\tcodex\t" (e "codex-cli 0.169.0\n")) "T\tpi\t0"
+              "S\tcodex\talpha\tD" (str "M\tcodex\talpha\t" (e "sub dir/ünï.md") "\tabc")
+              "S\tawl\talpha\tA"
+              "S\tcodex\tgone\tA" "S\tcodex\tjn\tL" "OK"])]
     (is (= "C:\\Users\\a" (:home inv)))
+    (is (= {:codex "C:\\Users\\a\\.codex\\skills" :awl "C:\\Users\\a\\.agents\\skills"} (:roots inv)))
     (is (= #{:codex} (:tools inv)))
-    (is (= {:state :dir :files {"sub dir/ünï.md" "abc"}} (get-in inv [:entries "alpha"])))
-    (is (= :absent (get-in inv [:entries "gone" :state])))
-    (is (= :link (get-in inv [:entries "jn" :state])))))
+    (is (= {:codex "codex-cli 0.169.0"} (:versions inv)))
+    (is (= {:state :dir :files {"sub dir/ünï.md" "abc"}} (get-in inv [:entries :codex "alpha"])))
+    (is (= :absent (get-in inv [:entries :awl "alpha" :state])))
+    (is (= :absent (get-in inv [:entries :codex "gone" :state])))
+    (is (= :link (get-in inv [:entries :codex "jn" :state]))))
+  (testing "a tool that printed no version, its line trimmed of the empty field"
+    (is (= {:codex ""} (:versions (remote/parse-inventory ["V\tcodex" "OK"]))))))
+
+(deftest codex-reads-the-shared-root-from-0-95
+  (is (true? (hosts/codex-reads-agents? "codex-cli 0.169.0")))
+  (is (true? (hosts/codex-reads-agents? "codex-cli 0.95.0")))
+  (is (true? (hosts/codex-reads-agents? "codex-cli 1.0.0-alpha.1")))
+  (is (false? (hosts/codex-reads-agents? "codex-cli 0.94.9")))
+  (is (false? (hosts/codex-reads-agents? "codex-cli 0.9.100")))
+  (is (nil? (hosts/codex-reads-agents? "")))
+  (is (nil? (hosts/codex-reads-agents? nil))))
+
+(deftest a-skill-both-want-goes-where-both-read-it
+  (testing "codex reads ~/.agents/skills: one copy, there"
+    (is (= [:awl] (hosts/roots-for #{:codex :awl} true))))
+  (testing "it does not, or may not: a copy in each"
+    (is (= [:codex :awl] (hosts/roots-for #{:codex :awl} false)))
+    (is (= [:codex :awl] (hosts/roots-for #{:codex :awl} nil))))
+  (testing "one tool: its own root, whatever codex reads"
+    (is (= [:codex] (hosts/roots-for #{:codex} true)))
+    (is (= [:awl] (hosts/roots-for #{:awl} false))))
+  (is (= [] (hosts/roots-for #{} true))))
+
+(deftest a-host-carries-awl-onto-what-it-selects
+  (let [d (temp-dir)
+        _ (doseq [s ["a" "b"]]
+            (fs/create-dirs (str d "/pack/skills/" s))
+            (spit (str d "/pack/skills/" s "/SKILL.md") "x"))
+        pack [:uri (str "file://" d "/pack")]
+        raw {:skill-packs {pack {:alias 'kit :acli [:awl]}}
+             :skills {['kit "a"] {:acli [:claude :awl]}}}
+        local (config/normalize raw "/x")
+        hosted (get-in (config/normalize {:hosts {:box (assoc raw :ssh "h" :os :linux)}} "/x")
+                       [:hosts :box :cfg])]
+    (testing "a host places awl's skills: the pack's and its own"
+      (is (= #{:awl} (get-in hosted [:skill-packs :kit :consumers])))
+      (is (= #{:awl} (get-in hosted [:skills :b :consumers])))
+      (is (= #{:awl} (get-in hosted [:skills :a :consumers])))
+      (is (= #{} (get-in hosted [:skills :b :tools])))
+      (is (= #{:claude} (get-in hosted [:skills :a :tools]))))
+    (testing "locally awl reads agents.edn itself: nothing carries it"
+      (is (nil? (get-in local [:skill-packs :kit :consumers])))
+      (is (every? (comp nil? :consumers) (vals (:skills local)))))))
 
 (deftest a-skills-build-output-is-not-drift
   (let [d (temp-dir)]
@@ -3294,16 +3364,28 @@
            (:sha (first (hosts/source-files d)))))))
 
 (deftest a-failed-host-write-is-not-owned
-  (let [st (state/record {:managed {}} :codex :skills :old {})
-        planned {:desired {:a {:source "/a" :target "T\\a"} :b {:source "/b" :target "T\\b"}}
-                 :gone #{:vanished}}
+  (let [st (-> {:managed {}}
+               (state/record :codex :skills :old {})
+               (state/record :codex :skills :vanished {})
+               (state/record :codex :skills :moved {}))
+        planned {:desired {[:codex :a] {:source "/a" :target "T\\a"}
+                           [:codex :b] {:source "/b" :target "T\\b"}
+                           [:awl :b] {:source "/b" :target "A\\b"}
+                           [:awl :moved] {:source "/m" :target "A\\moved"}}
+                 :gone #{[:codex :vanished]}}
         failed [{:tool :codex :kind :skills :id :b}]
-        done [{:tool :codex :kind :skills :id :old :action :delete}]
-        out (hosts/sync-host-state (state/record st :codex :skills :vanished {}) planned done failed)]
+        done [{:tool :codex :kind :skills :id :old :action :delete}
+              {:tool :codex :kind :skills :id :moved :action :delete}]
+        out (hosts/sync-host-state st planned done failed)]
     (is (state/managed? out :codex :skills :a))
     (is (not (state/managed? out :codex :skills :b)))
+    (testing "ownership is per root: a failure in one leaves the other's"
+      (is (state/managed? out :awl :skills :b)))
     (is (not (state/managed? out :codex :skills :old)))
-    (is (not (state/managed? out :codex :skills :vanished)))))
+    (is (not (state/managed? out :codex :skills :vanished)))
+    (testing "a skill moved between roots is owned where it now is"
+      (is (state/managed? out :awl :skills :moved))
+      (is (not (state/managed? out :codex :skills :moved))))))
 
 (deftest a-host-section-survives-import
   (let [decl {:ssh "example.com" :os :windows :skill-packs {[:uri "file:///p"] {:acli [:codex]}}}
