@@ -97,10 +97,25 @@
     (is (empty? (errors [:gh "acme/market" "lint"] {:ref "dev"})))
     (is (empty? (errors [:uri "git@git.example.com:acme/m.git" "lint"] {:ref "dev"})))))
 
-(deftest one-marketplace-name-from-two-places-is-a-warning
-  (is (some (fn [[l m]] (and (= :warn l) (str/includes? m "marketplace shared is declared from 2")))
+(deftest one-marketplace-name-from-two-places-is-an-error
+  (is (some (fn [[l m]] (and (= :error l) (str/includes? m "marketplace shared is declared from 2")))
             (findings {:plugins {[:gh "acme/market" "lint"] {:in :all :acli [:claude] :marketplace "shared" :ref "a"}
-                                 [:gh "acme/market" "fmt"] {:in :all :acli [:claude] :marketplace "shared" :ref "b"}}}))))
+                                 [:gh "acme/market" "fmt"] {:in :all :acli [:claude] :marketplace "shared" :ref "b"}}})))
+  (is (not-any? (fn [[l m]] (and (= :error l) (str/includes? m "marketplace shared")))
+                (findings {:plugins {[:uri "https://github.com/acme/market" "lint"] {:in :all :acli [:claude] :marketplace "shared"}
+                                     [:uri "https://github.com/acme/market.git" "fmt"] {:in :all :acli [:claude] :marketplace "shared"}}}))
+      "one remote spelled with and without .git"))
+
+(deftest one-marketplace-name-from-two-places-is-flagged-in-the-plan
+  (clean!)
+  (let [repo (str u/home "/repo")]
+    (fs/create-dirs (str repo "/.git"))
+    (let [ops (claude/plugin-ops (cfg {:plugins {[:gh "acme/market" "lint"] {:in :all :acli [:claude] :marketplace "shared"}
+                                                 [:gh "acme/market" "fmt"] {:in [repo] :at :repo :acli [:claude]
+                                                                             :marketplace "shared" :ref "dev"}}})
+                                 state/empty-state)]
+      (is (= 2 (count ops)))
+      (is (every? #(str/includes? (str (:note %)) "declares marketplace shared from more than one source") ops)))))
 
 (deftest import-keeps-the-ref-the-marketplace-and-a-directory-source
   (clean!)

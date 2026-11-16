@@ -892,11 +892,15 @@
          :when (and (some? b) (not (and (string? b) (not (str/blank? b)))))]
      (finding :error [:plugins id :build] ":build is a shell command, run in the plugin's install path"))
    (for [[m ps] (group-by :marketplace (vals (:plugins cfg)))
-         :let [sources (distinct (map (juxt :repo :uri :ref) ps))]
+         ;; spelled as the CLI reads it: a URL with or without .git is one source
+         :let [canon (fn [{:keys [repo uri ref]}]
+                       [repo (when uri (if (scope/local-uri? uri) uri (:url (cs/remote uri)))) ref])
+               sources (distinct (map canon ps))]
          :when (next sources)]
-     (finding :warn [:plugins (keyword m)]
+     (finding :error [:plugins (keyword m)]
               (str "marketplace " m " is declared from " (count sources)
-                   " different sources or refs — Claude keeps one per name, the last one added")))))
+                   " different sources or refs — Claude keeps one source per marketplace name and"
+                   " refuses to add it from another, so apply! fails for all but one")))))
 
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]

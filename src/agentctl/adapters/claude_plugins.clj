@@ -212,6 +212,10 @@
                           (:installPath rec)
                           (str plugins-dir "/cache/" (:marketplace plugin) "/" (:plugin plugin)))
                 :category :cmd
+                ;; a failed build fails apply!, but the install it follows
+                ;; stands and stays owned: a dropped row still uninstalls it.
+                ;; No stamp is left, so the next run builds again.
+                :owns []
                 :summary (str "build `" build "` in "
                               (if (and rec (not installing?)) (u/tilde (:installPath rec)) "the new install path"))
                 :cmds [["sh" "-c" build]]

@@ -319,7 +319,7 @@ EDN
   [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after the switch: exit $code"; }
 )
 
-echo "15. :build runs once per new install path; a failing build fails apply! and claims nothing"
+echo "15. :build runs once per new install path; a failing build fails apply!, and the install stays owned"
 (
   SB="$SB/build"; stub_home "$SB"
   export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
@@ -329,7 +329,8 @@ echo "15. :build runs once per new install path; a failing build fails apply! an
 EDN
   apply
   [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a failing build exited $code"; }
-  owned lp && { cat "$SB/.config/agentctl/state.edn"; fail "ownership claimed for a failed build"; }
+  # the install stands: owned, so a dropped row still uninstalls it
+  owned lp || { cat "$SB/.config/agentctl/state.edn"; fail "an install whose build failed is not owned"; }
   plan
   [ "$code" = 2 ] && grep -q "sh -c exit 3" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the failed build is not planned again"; }
   sed -i.bak 's/:build "exit 3"/:build "echo built >> BUILT"/' "$SB/agents.edn"
@@ -462,6 +463,25 @@ PY
     || { cat "$SB/.claude/settings.json"; fail "autoUpdate was dropped"; }
   [ "$(setting "$SB/.claude/settings.json" 's["extraKnownMarketplaces"]["acme"]["source"].get("ref")')" = main ] \
     || fail "the source was not re-pointed"
+)
+
+echo "21. an owned agent link whose source is gone is reported, not converged"
+(
+  SB="$SB/agent-gone"; mkdir -p "$SB/bin"; ln -s "$ROOT/tests/claude-plugin-stub" "$SB/bin/claude"
+  export AGENTCTL_HOME="$SB" HOME="$SB" PATH="$SB/bin:$PATH"
+  pack="$SB/packs/team"; mkdir -p "$pack/agents"
+  printf -- '---\nname: reviewer\ndescription: d\n---\n' > "$pack/agents/reviewer.md"
+  cat > "$SB/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$pack"] {:alias team}}
+ :agents {[team "reviewer"] {:in :all}}}
+EDN
+  set +e; run apply! -y -f "$SB/agents.edn" --all -t claude > "$SB/out.txt" 2>&1; code=$?; set -e
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "apply! failed: exit $code"; }
+  rm "$pack/agents/reviewer.md"
+  set +e; run apply -f "$SB/agents.edn" --all -t claude > "$SB/out.txt" 2>&1; code=$?; set -e
+  grep -q "source missing: ~/packs/team/agents/reviewer.md" "$SB/out.txt" || { cat "$SB/out.txt"; fail "a dangling owned link reads as converged"; }
+  grep -q "no changes" "$SB/out.txt" && { cat "$SB/out.txt"; fail "the plan says no changes"; }
+  [ -L "$SB/.claude/agents/reviewer.md" ] || fail "the link was touched"
 )
 
 echo "all plugin e2e checks passed"

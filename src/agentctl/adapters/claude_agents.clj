@@ -58,13 +58,19 @@
         b (base p (:entity p) source)
         root (str (fs/parent (fs/parent source)))]
     (cond
+      ;; a link agentctl made, to a file no longer there: it dangles, and
+      ;; must not read as converged
+      (and owned (not (u/exists? source)) (or (u/exists? root) (link-target path)))
+      (plan/op (assoc b :action :noop :warn true :conflict true
+                      :summary (str "source missing: " (u/tilde source) " — link not changed")))
+
       (not (u/exists? root))
       (plan/op (assoc b :action :noop :warn true :pending true
                       :summary (str "linked once pack " (clojure.core/name pack) " is fetched")))
 
       (not (u/exists? source))
-      (plan/op (assoc b :action :noop :warn true
-                      :summary (str "no " name ".md in " (u/tilde (fs/parent source)) " — nothing linked")))
+      (plan/op (assoc b :action :noop :warn true :conflict true
+                      :summary (str "source missing: " (u/tilde source) " — nothing linked")))
 
       :else
       (when-let [o (plan/link-op {:tool tool :kind kind :id (:id p) :src source :dest path

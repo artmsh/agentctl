@@ -475,7 +475,7 @@
    :cli-scope (plugin-scope scope)
    :key (plugin-key p)})
 
-(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key remote]}]
+(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key remote rows-clash]}]
   (let [current (u/read-json file)
         marketplaces (or (:extraKnownMarketplaces current) {})
         enabled (or (:enabledPlugins current) {})
@@ -521,7 +521,10 @@
         :summary (str "Claude marketplace " mname "; enable " key
                       (when (and missing (not desired-m) (not desired-e))
                         " (enabled in settings but not installed)"))
-        :note (or (when clash
+        :note (or (when rows-clash
+                    (str "⚠ agents.edn declares marketplace " mname " from more than one source;"
+                         " Claude keeps one source per name, so apply! fails for all but one"))
+                  (when clash
                     (str "⚠ " (u/tilde settings-file) " declares marketplace " mname " from "
                          (pr-str user-source) "; Claude adds it to a project only from that source,"
                          " so apply! fails until the two agree"))
@@ -606,6 +609,10 @@
                                      p (assoc proj :id pid) (:scope p)))))
                  (:projects cfg))
         desired (concat global project)
+        clashing (set (for [[m es] (group-by (comp :marketplace :plugin) desired)
+                            :when (next (distinct (map #(:source (plugin-marketplace (:plugin %))) es)))]
+                        m))
+        desired (map #(cond-> % (clashing (get-in % [:plugin :marketplace])) (assoc :rows-clash true)) desired)
         desired-ids (set (map :id desired))
         managed (for [sid (state/managed-ids st tool :plugins)
                       :let [id (keyword sid)

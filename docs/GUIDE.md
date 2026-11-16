@@ -790,14 +790,15 @@ ships sources rather than a built tree:
 
 It runs once per install path, and again after an install or update moves the
 plugin. A stamp under `~/.agents/plugins/.built` records the path, the commit
-and the command. A failing build fails `apply!`, leaves no stamp, and agentctl
-claims no ownership of the plugin, so the next run builds again. Claude runs a
+and the command. A failing build fails `apply!` and leaves no stamp, so the
+next run builds again; the install it follows stays, and stays owned, so
+dropping the row still uninstalls it. Claude runs a
 plugin from a directory marketplace out of that directory, not the install
 path, so a build there does not change what Claude loads.
 
-Marketplace names are global to Claude: two declarations whose sources share a
-marketplace name re-register it, and every project follows the last one.
-`validate` warns when rows name one marketplace from different sources or refs.
+Marketplace names are global to Claude: it keeps one source per name and
+refuses to add a marketplace from another. Rows naming one marketplace from
+different sources or refs are a `validate` error, and the plan flags them.
 Claude adds a marketplace to a project only from the source the user settings
 name for it, spelled the same way; when `~/.claude/settings.json` names it from
 elsewhere, the plan says so and `apply!` fails for that project.
