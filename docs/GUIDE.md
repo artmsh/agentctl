@@ -43,7 +43,9 @@ in the same step. A lock entry whose copy is already gone, with at most a
 dangling `.claude/skills/<name>` link left behind, is removed the same way.
 A project copy is kept, and the plan says why, when:
 
-- it differs from the user-wide source, because it is another skill of the same name;
+- it differs from the user-wide source, or from the source of the project
+  skill that would be linked in its place, because it is another skill of
+  the same name (a copy the `skills` CLI installed is the CLI's to replace);
 - git tracks it, or a link git tracks leads into it, because it is the project's own;
 - a declared placement needs it: a `:per-tool :path`, another skill's source,
   or a pack that lives there. Removing it would leave that tool's link dangling;
@@ -52,8 +54,14 @@ A project copy is kept, and the plan says why, when:
   where it reads the project's skills), and claude reads a copy its
   `.claude/skills/<name>` link leads into.
 
-A kept copy that the `skills` CLI installed keeps its lock entry, since
-`skills remove` would delete the copy as well. A redundant link into a kept
+The same holds wherever agentctl would put something: no link and no
+`skills add` lands on a directory that stays, and nothing is linked over the
+skill's own source. A kept copy that the `skills` CLI installed keeps its
+lock entry, since `skills remove` would delete the copy as well — and the CLI
+clears a name from every agent's directory in the repository (`.cursor/skills`
+as much as `.agents/skills`), so a name is not removed while any of those
+must stay. A whole remote pack names its skills only once the CLI has
+fetched it, so its install is not checked this way. A redundant link into a kept
 copy, such as claude's `.claude/skills/<name>`, is still removed. A plan
 with nothing left to change prints no warnings, so `validate` repeats these
 reports under SKILLS for every agent; they do not fail its exit code.

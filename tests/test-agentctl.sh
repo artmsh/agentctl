@@ -1123,4 +1123,134 @@ EDN
   [ ! -e "$P/.agents/skills/wrap-up" ] || fail "the copy only pi reads is still there"
 )
 
+echo "28. a link or an install never lands on a project directory that stays"
+(
+  # committed NAME DIR ACLI [same]: shared's foo declared for ACLI in a project
+  # that already commits its own foo (identical with "same") at DIR
+  committed() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    K="$H/projects/shared/skills"; P="$H/projects/proj"
+    mkskill "$K/foo" foo theirs; mkskill "$P/$2/foo" foo ours
+    [ -n "${4:-}" ] && cp "$K/foo/SKILL.md" "$P/$2/foo/SKILL.md"
+    git -C "$P" init -q; commit_all "$P"
+    cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "foo"] {:in "projects/proj" :acli [$3]}}}
+EDN
+    (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+    grep -q "project copy ~/projects/proj/$2/foo kept — it is tracked by git" "$H/plan.txt" \
+      && ! grep -q "ln -sfn .* ~/projects/proj/$2/foo'" "$H/plan.txt" \
+      || { cat "$H/plan.txt"; fail "$1: the committed $2/foo is not kept, or a link is planned onto it"; }
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+    [ -d "$P/$2/foo" ] && [ ! -L "$P/$2/foo" ] || fail "$1: the committed copy was replaced"
+    [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "$1: tracked files changed"; }
+    run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "$1: not converged"; }
+    (run validate -f "$H/agents.edn" || true) > "$H/validate.txt" 2>&1
+    grep -q "! ~/projects/proj/$2/foo .*kept — it is tracked by git" "$H/validate.txt" \
+      || { cat "$H/validate.txt"; fail "$1: validate does not report the kept copy"; }
+  }
+  committed codex-differs .agents/skills :codex
+  committed codex-same .agents/skills :codex same
+  committed claude-differs .claude/skills :claude
+
+  # a copy pi is pinned to, and another pack's skill that goes by the same name
+  H=$(fresh_home pinned-name); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; O="$H/projects/other/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other; mkskill "$O/wu2" wrap-up second
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}
+               [:uri "file://$O"] {:alias other}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]
+                              :per-tool {:pi {:path "~/projects/game/.agents/skills/wrap-up"}}}
+          [other "wu2"] {:in "projects/game" :acli [:codex]}
+          [shared "other"] {:in "projects/game" :acli [:claude]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  ! grep -q "ln -sfn ~/projects/other/skills/wu2" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "another skill is linked onto the copy pi is pinned to"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "pinned-name: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "pinned-name: an op failed"; }
+  grep -q "body shared" "$P/.agents/skills/wrap-up/SKILL.md" || fail "the copy pi is pinned to was replaced"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "pinned-name: not converged"; }
+
+  # skills add from a git pack only the project uses, beside a committed review
+  H=$(fresh_home git-pack-add); export AGENTCTL_HOME="$H"
+  G="$H/remote/kit"; P="$H/projects/proj"
+  mkskill "$G/review" review theirs; mkskill "$G/audit" audit theirs
+  git -C "$G" init -q; commit_all "$G"
+  mkskill "$P/.agents/skills/review" review ours
+  git -C "$P" init -q; commit_all "$P"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex]}
+          [kit "audit"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/proj/.agents/skills/review kept — it is tracked by git' "$H/plan.txt" \
+    && ! grep -q -- "-s review" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "skills add is planned over the committed review"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "git-pack-add: apply! failed"; }
+  [ -f "$P/.agents/skills/audit/SKILL.md" ] || fail "audit was not installed"
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "skills add changed the committed review"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "git-pack-add: not converged"; }
+)
+
+echo "29. a hand-made copy that differs from the source is another skill: kept"
+(
+  H=$(fresh_home hand-made); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/foo" foo theirs; mkskill "$K/bar" bar theirs
+  # foo: left over in .agents/skills, which nothing placed there reads;
+  # bar: where claude's link would go
+  mkskill "$P/.agents/skills/foo" foo ours; mkskill "$P/.claude/skills/bar" bar ours
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "foo"] {:in "projects/proj" :acli [:claude]}
+          [shared "bar"] {:in "projects/proj" :acli [:claude]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/proj/.agents/skills/foo kept — it differs from ~/projects/shared/skills/foo' "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/proj/.claude/skills/bar kept — it differs from ~/projects/shared/skills/bar' "$H/plan.txt" \
+    && ! grep -q "rm -r ~/projects/proj/.agents/skills/foo" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a differing hand-made copy is planned for removal"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "hand-made: apply! failed"; }
+  grep -q "body ours" "$P/.agents/skills/foo/SKILL.md" && grep -q "body ours" "$P/.claude/skills/bar/SKILL.md" \
+    || fail "a differing hand-made copy was removed"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "hand-made: not converged"; }
+)
+
+echo "30. skills remove is never asked to take a directory that stays in any agent's directory"
+(
+  H=$(fresh_home other-agent-dir); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  # another agent's committed copy, which the skills CLI counts as its own
+  mkdir -p "$P/.cursor/skills"; cp -R "$K/wrap-up" "$P/.cursor/skills/wrap-up"
+  git -C "$P" init -q; commit_all "$P"
+  # the CLI's own, untracked install of the same name
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  ! grep -q "remove wrap-up" "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/game/.cursor/skills/wrap-up kept — it is tracked by git' "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/game/.agents/skills/wrap-up kept — `skills remove` would take ~/projects/game/.cursor/skills/wrap-up with it' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "skills remove is planned while another agent's committed copy would go with it"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "other-agent-dir: apply! failed"; }
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "another agent's committed copy was removed"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "other-agent-dir: not converged"; }
+)
+
 echo "all agentctl e2e checks passed"
