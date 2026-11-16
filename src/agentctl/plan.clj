@@ -138,6 +138,12 @@
                               [kk (mask-diff kk (get b kk) (get a kk) inner?)]))
              side (fn [m pick] (when m (into (sorted-map) (map (fn [kk] [kk (pick (pairs kk))])) (keys m))))]
          [(side b first) (side a second)])
+       (if (and (sequential? b) (sequential? a))
+         ;; argv: a rotated secret sits at the same position on both sides
+         (let [pairs (mapv #(mask-diff mk (nth b % nil) (nth a % nil) secret-map?)
+                           (range (max (count b) (count a))))]
+           [(mapv (comp first pairs) (range (count b)))
+            (mapv (comp second pairs) (range (count a)))])
        (let [changed? (not= (u/norm b) (u/norm a))
              a-hit? (or (refs/credential? mk a) (refs/resolved-secret? a))
              a' (mask-leaf mk a false)
@@ -146,7 +152,7 @@
          ;; must still show
          [b' (if (and changed? (some? a') (= b' a') (not (refs/masked? a)))
                (str a' " (changed)")
-               a')])))))
+               a')]))))))
 
 (defn mask-op
   "`o` as output may show it: every diff masked by `mask-diff`, and every

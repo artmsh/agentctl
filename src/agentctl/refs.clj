@@ -215,8 +215,11 @@
                              :else {:status :ok :value (str/trim out)}))
                     :bw (bw-fetch r))]
           (swap! cache assoc r res)
+          ;; a value that names a file or directory (`$HOME`) is no secret,
+          ;; and masked it would take every path under it along
           (when (and (= :ok (:status res)) (not= :literal (:ref/kind r))
-                     (string? (:value res)) (not (str/blank? (:value res))))
+                     (string? (:value res)) (not (str/blank? (:value res)))
+                     (not (and (re-find #"^[/~]" (:value res)) (u/exists? (:value res)))))
             (swap! resolved-secrets conj (:value res)))
           res))))
 

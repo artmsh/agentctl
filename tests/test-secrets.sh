@@ -32,16 +32,22 @@ if a[:2] == ["get", "item"]:
     print(json.dumps({"fields": [{"name": k, "value": v} for k, v in items[a[2]].items()]})); sys.exit(0)
 sys.exit(1)
 STUB
-for cli in claude codex pi omp llm agy kimi; do printf '#!/bin/sh\nexit 0\n' > "$SB/bin/$cli"; done
+for cli in claude pi omp llm agy kimi; do printf '#!/bin/sh\nexit 0\n' > "$SB/bin/$cli"; done
+cat > "$SB/bin/codex" <<'STUB'
+#!/bin/sh
+# refuses `mcp add` on demand, echoing its whole argv — secrets included
+if [ -e "$HOME/codex-refuse" ] && [ "$1 $2" = "mcp add" ]; then echo "refused: $*" >&2; exit 1; fi
+exit 0
+STUB
 chmod +x "$SB/bin/"*
 export PATH="$SB/bin:$PATH"
 
-vault() { # vault <env> <header> <key>
-  printf '{"plant": {"ENV": "%s", "HDR": "%s", "KEY": "%s"}}\n' "$1" "$2" "$3" > "$SB/bw-items.json"
+vault() { # vault <env> <header> <key> <arg>
+  printf '{"plant": {"ENV": "%s", "HDR": "%s", "KEY": "%s", "ARG": "%s"}}\n' "$1" "$2" "$3" "$4" > "$SB/bw-items.json"
 }
 
 cat > "$SB/agents.edn" <<'EDN'
-{:mcps [{:id :sdocs :cmd "/bin/echo s" :env {"DOCS_ENV" "!bw://plant/ENV" "MODE" "fast"} :in :all
+{:mcps [{:id :sdocs :cmd "/bin/echo s" :env {"DOCS_ENV" "!bw://plant/ENV" "MODE" "fast" "WORKDIR" "$HOME"} :in :all
          :acli [:pi :omp :kimi :antigravity :codex]}
         {:id :hdocs :type :http :url "https://mcp.example.com/h" :headers {"x-docs" "!bw://plant/HDR"} :in :all
          :acli [:omp :kimi :antigravity :codex]}]
@@ -81,7 +87,7 @@ leaks() { # leaks <value>...: fail when any output carries one
 }
 
 echo "1. a resolved MCP env var, header and provider key print in no output, for any tool"
-vault envsecretvalue111 hdrsecretvalue222 keysecretvalue333
+vault envsecretvalue111 hdrsecretvalue222 keysecretvalue333 argsecretvalue777
 outputs
 for f in plain.txt plan.json gui.out; do
   grep -q "sdocs" "$SB/$f" || { cat "$SB/$f"; fail "$f does not plan the servers"; }
@@ -100,6 +106,9 @@ for tool, masks in want.items():
         assert m in text, (tool, m)
 PY
 grep -q 'hdrs…22' "$SB/verbose.txt" || fail "-v does not show the masked header"
+# a reference to a directory is no secret: paths still print whole
+grep -qF "\"target\" : \"$SB/.pi/agent/mcp.json\"" "$SB/plan.json" || { grep -n target "$SB/plan.json"; fail "--json mangled a target path"; }
+grep -qF "WORKDIR: \"$SB\"" "$SB/verbose.txt" || { cat "$SB/verbose.txt"; fail "a directory reference was masked"; }
 grep -q envsecretvalue111 "$SB/.pi/agent/mcp.json" || fail "the secret was not written"
 python3 - "$SB/.omp/agent/mcp.json" <<'PY' || fail "omp's http server was written without its header"
 import json, sys
@@ -107,10 +116,11 @@ assert json.load(open(sys.argv[1]))["mcpServers"]["hdocs"]["headers"] == {"x-doc
 PY
 
 echo "2. rotated, neither the old values nor the new ones print"
-vault envsecretvalue444 hdrsecretvalue555 keysecretvalue666
+vault envsecretvalue444 hdrsecretvalue555 keysecretvalue666 argsecretvalue888
 outputs --json
 grep -q '"ops"' "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "apply! --json printed no plan"; }
-leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333 envsecretvalue444 hdrsecretvalue555 keysecretvalue666
+leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333 \
+  envsecretvalue444 hdrsecretvalue555 keysecretvalue666
 grep -q envsecretvalue444 "$SB/.pi/agent/mcp.json" || fail "the rotated secret was not written"
 
 echo "3. an llm provider whose key does not resolve is held back whole, not written keyless"
@@ -128,5 +138,37 @@ set -e
 grep -q 'providers/gw' "$SB/llm-plan.txt" && grep -q 'secret unresolved: field not found on bw item: plant/NOPE' "$SB/llm-plan.txt" \
   || { cat "$SB/llm-plan.txt"; fail "the plan does not say the llm key is unresolved"; }
 [ ! -e "$LLM_DIR/extra-openai-models.yaml" ] || { cat "$LLM_DIR/extra-openai-models.yaml"; fail "the keyless llm models were written"; }
+
+echo "4. an llm provider written once and then unresolved is held back, not pruned"
+sed -i.bak 's|plant/NOPE|plant/KEY|' "$SB/llm.edn"
+set +e; "$ROOT/agentctl" apply! --all -t llm -f "$SB/llm.edn" -y > "$SB/llm-apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/llm-apply.txt"; fail "apply! of a resolved llm provider exited $code"; }
+grep -q keysecretvalue666 "$LLM_DIR/keys.json" || fail "the llm key was not stored"
+cp "$LLM_DIR/extra-openai-models.yaml" "$SB/models.before"; cp "$LLM_DIR/keys.json" "$SB/keys.before"
+sed -i.bak 's|plant/KEY|plant/NOPE|' "$SB/llm.edn"
+set +e
+"$ROOT/agentctl" apply --all -t llm -f "$SB/llm.edn" > "$SB/llm-plan.txt" 2>&1; code=$?
+"$ROOT/agentctl" apply! --all -t llm -f "$SB/llm.edn" -y > "$SB/llm-apply.txt" 2>&1; bang=$?
+set -e
+[ "$code" = 2 ] && [ "$bang" = 1 ] || { cat "$SB/llm-plan.txt" "$SB/llm-apply.txt"; fail "an unresolved llm key exited $code/$bang, not 2/1"; }
+grep -q '^.*- ' "$SB/llm-plan.txt" && { cat "$SB/llm-plan.txt"; fail "an unresolved llm key plans a removal"; }
+cmp -s "$SB/models.before" "$LLM_DIR/extra-openai-models.yaml" || fail "an unresolved llm key changed the models"
+cmp -s "$SB/keys.before" "$LLM_DIR/keys.json" || fail "an unresolved llm key changed keys.json"
+
+echo "5. a CLI that refuses, echoing its argv, prints no secret in the failure"
+touch "$SB/codex-refuse"
+for mode in text json; do
+  set +e
+  if [ $mode = json ]; then
+    "$ROOT/agentctl" apply! --all -t codex -f "$SB/agents.edn" -y --json > "$SB/fail.txt" 2>&1; code=$?
+  else
+    "$ROOT/agentctl" apply! --all -t codex -f "$SB/agents.edn" -y > "$SB/fail.txt" 2>&1; code=$?
+  fi
+  set -e
+  [ "$code" = 1 ] || { cat "$SB/fail.txt"; fail "$mode: a refused add exited $code, not 1"; }
+  grep -q 'refused' "$SB/fail.txt" || { cat "$SB/fail.txt"; fail "$mode: the failure is not reported"; }
+  grep -nE 'envsecretvalue444|hdrsecretvalue555' "$SB/fail.txt" && fail "$mode: the failure printed a secret"
+done
+rm "$SB/codex-refuse"
 
 echo "all secrets e2e checks passed"

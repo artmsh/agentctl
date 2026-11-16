@@ -171,7 +171,7 @@
               rows (fn [failed] (mapv (fn [f] {:tool (name (:tool f))
                                                :kind (name (:kind f))
                                                :id (u/kw->str (:id f))
-                                               :error (:error f)})
+                                               :error (refs/scrub (:error f))})
                                       failed))
               config-backup (when (u/exists? path) (u/backup! path))]
           (u/write-text! path text)
