@@ -1286,7 +1286,9 @@ echo "29. a shared project copy stays while an agent that reads it has no user-w
     H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
     K="$H/projects/shared/skills"; P="$H/projects/proj"
     mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
-    mkdir -p "$P/.agents/skills"; cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+    mkdir -p "$P/.agents/skills"
+    if [ "${4:-}" = link ]; then ln -s "$K/wrap-up" "$P/.agents/skills/wrap-up"
+    else cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"; fi
     git -C "$P" init -q
     cat > "$H/agents.edn" <<EDN
 {:skill-packs {[:uri "file://$K"] {:alias shared}}
@@ -1307,6 +1309,13 @@ EDN
     || { cat "$H/plan.txt"; fail "the copy codex reads is planned for removal, or not reported"; }
   [ -f "$P/.agents/skills/wrap-up/SKILL.md" ] || fail "pi removed the copy codex reads"
   run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-reads: not converged"; }
+
+  # a link there is how codex gets the skill, as much as a copy is
+  pi_copy codex-link ":codex :pi" "$trust" link
+  ! grep -q "unlink ~/projects/proj/.agents/skills/wrap-up" "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/proj/.agents/skills/wrap-up kept — codex reads it here' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the link codex reads is planned for removal"; }
+  [ -L "$P/.agents/skills/wrap-up" ] || fail "pi removed the link codex reads"
 
   pi_copy pi-asks ":codex :pi" ""
   ! grep -q "$rm_line" "$H/plan.txt" && grep -q 'pi asks before reading project skills here' "$H/plan.txt" \
@@ -1450,6 +1459,27 @@ EDN
   run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "other-agent-dir: apply! failed"; }
   [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "another agent's committed copy was removed"; }
   run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "other-agent-dir: not converged"; }
+
+  # the same for a project's own skill: the CLI's older copy stays with its
+  # lock entry, rather than being linked over while the lock still names it
+  H=$(fresh_home blocked-project-skill); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/foo" foo theirs; mkskill "$P/.cursor/skills/foo" foo cursor
+  git -C "$P" init -q; commit_all "$P"
+  mkskill "$P/.agents/skills/foo" foo cli-old
+  printf '{"version":2,"skills":{"foo":{"source":"../shared/skills/foo","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "foo"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/proj/.agents/skills/foo kept — `skills remove` would take ~/projects/proj/.cursor/skills/foo with it' "$H/plan.txt" \
+    && ! grep -q "ln -sfn" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a blocked CLI copy is linked over"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "blocked-project-skill: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "blocked-project-skill: an op failed"; }
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "the committed .cursor copy changed"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "blocked-project-skill: not converged"; }
 )
 
 echo "33. a user-wide link whose source is gone is reported, and the plan still converges"

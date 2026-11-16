@@ -282,14 +282,19 @@
 (defn needed-by
   "Why the copy at `p` in project `proj` must stay for agents that read it
    and have no user-wide `s` (named `n`), or nil: removing it would take the
-   skill from them. A link is only a way in; the copy is what they read, and
-   claude, where it is placed, reads one its `.claude/skills/<n>` link leads
-   into, which goes with the copy."
+   skill from them. A link in the shared `.agents/skills` or in `.pi/skills`
+   is how its readers get the skill, as much as a copy would be; claude's own
+   `.claude/skills` link is only its way into a copy, and claude, where it is
+   placed, reads one its link leads into, which goes with the copy."
   [proj p s n]
   (let [root (:path proj)
+        dir (str (fs/parent (u/abs-path p)))
         claude-link (leaf-path (str root "/.claude/skills/" (fs/file-name p)))
-        readers (when-not (fs/sym-link? p)
-                  (cond-> (readers proj (str (fs/parent (u/abs-path p))))
+        readers (if (fs/sym-link? p)
+                  (when (and (u/resolves? p)
+                             (not= (leaf-path dir) (leaf-path (str root "/.claude/skills"))))
+                    (readers proj dir))
+                  (cond-> (readers proj dir)
                     (and (contains? (set (:for-tools proj)) :claude)
                          (some #(= claude-link (leaf-path %)) (links-into root p)))
                     (conj :claude)))

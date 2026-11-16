@@ -217,9 +217,16 @@
   (let [listed? (contains? lock n)
         c (canonical dir n)
         paths (distinct (cond-> (link-paths dir n tools) (not shared-wanted?) (conj c)))
-        kept (keep #(some->> (stays-because cfg dir % src listed?) (vector %)) paths)
-        kept? (set (map first kept))
-        blockers (when listed? (remove-blockers cfg dir n src))]
+        blockers (when listed? (remove-blockers cfg dir n src))
+        ;; the CLI's own copy stays with its lock entry while its remove is blocked
+        kept (keep #(some->> (or (stays-because cfg dir % src listed?)
+                                 (when-let [[b] (and (u/exists? %) (not (fs/sym-link? %))
+                                                     (not (source-itself? % src))
+                                                     (first (remove (comp #{%} first) blockers)))]
+                                   (str "`skills remove` would take " (u/tilde b) " with it")))
+                             (vector %))
+                   paths)
+        kept? (set (map first kept))]
     {:n n :src src :kept kept
      :held (and listed? (empty? blockers))
      :blocked (seq blockers)

@@ -50,9 +50,9 @@ A project copy is kept, and the plan says why, when:
 - a declared placement needs it: a `:per-tool :path`, another skill's source,
   or a pack that lives there. Removing it would leave that tool's link dangling;
 - an agent placed in the project reads it and has no user-wide copy of that
-  skill: every agent placed there reads the shared `.agents/skills` (pi only
-  where it reads the project's skills), and claude reads a copy its
-  `.claude/skills/<name>` link leads into.
+  skill: every agent placed there reads the shared `.agents/skills`, a copy
+  or a link alike (pi only where it reads the project's skills), and claude
+  reads a copy its `.claude/skills/<name>` link leads into.
 
 The same holds wherever agentctl would put something: no link and no
 `skills add` lands on a directory that stays, and nothing is linked over the
