@@ -671,6 +671,27 @@
                     (u/backup! file)
                     (toml/update-file! file #(toml/set-keys % (vec table) kvs)))}))))
 
+(defn toml-tree-ops
+  "`toml-set-op`s that make the nested map `value` hold under `table`: one op
+   per table, each owning only the keys it declares, so hand-added keys in the
+   same tables survive. A nested map becomes a sub-table of its own unless the
+   file already holds that key as an inline table, which then stays inline —
+   a write never defines one table twice. `id-for` names each table's op from
+   its path below `table`."
+  [{:keys [tool kind file table value summary project id-for]}]
+  (let [text (or (u/slurp-safe file) "")
+        walk (fn walk [path sub m]
+               (let [inline? (fn [k] (toml/has-key? text path (u/key-str k)))
+                     nested? (fn [[k v]] (and (map? v) (not (inline? k))))
+                     kvs (into {} (map (fn [[k v]] [(u/key-str k) v])) (remove nested? m))]
+                 (cons (when (seq kvs)
+                         (toml-set-op {:tool tool :kind kind :project project :id (id-for sub)
+                                       :file file :table path :kvs kvs
+                                       :summary (str summary (when (seq sub) (str " " (str/join "." sub))))}))
+                       (mapcat (fn [[k v]] (walk (conj path (u/key-str k)) (conj sub (u/key-str k)) v))
+                               (filter nested? m)))))]
+    (remove nil? (walk (vec table) [] value))))
+
 (defn toml-remove-table-op
   [{:keys [tool kind id file table summary project]}]
   (let [current (try (toml/read-toml file) (catch Exception _ nil))

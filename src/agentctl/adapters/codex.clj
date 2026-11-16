@@ -108,6 +108,8 @@
     (cond
       (empty? path) (set (keep setting-keys (keys settings)))
       (= ["tui"] path) (if (schema/status-line? (:status-line settings)) #{"status_line"} #{})
+      (and (<= 2 (count path)) (= "permissions" (first path)))
+      (names (reduce by-name (by-name (:permission-profiles settings) (second path)) (drop 2 path)))
       (and (= 3 (count path)) (= ["tui" "keymap"] (subvec path 0 2)))
       (names (by-name (:keymap settings) (nth path 2)))
       (and (= 3 (count path)) (= ["tui" "presets"] (subvec path 0 2)))
@@ -147,9 +149,35 @@
                      :kvs {"status_line" (mapv u/key-str items)}
                      :summary "codex footer items"}))
 
+(defn- op-id
+  "An id that reads back from state.edn: a table path may hold `/` and spaces."
+  [prefix parts]
+  (keyword (str prefix (str/join "." (map #(str/replace % #"[^A-Za-z0-9_.-]+" "_") parts)))))
+
+(defn permission-profile-ops
+  "`[permissions.<name>]` tables for the declared profiles, written into
+   `file` key by key (`plan/toml-tree-ops`): a profile is owned per key, so a
+   rule added by hand to a declared profile stays. A profile is plain data in
+   Codex's own spelling: `{:extends \":workspace\" :filesystem {path mode}
+   :network {:enabled true :domains {host \"allow\"}}}`."
+  [profiles file]
+  (mapcat (fn [[nm p]]
+            (let [nm (u/key-str nm)]
+              (plan/toml-tree-ops {:tool tool :kind :settings :file file
+                                   :table ["permissions" nm] :value (native p)
+                                   :summary (str "codex permission profile " nm)
+                                   :id-for #(op-id "profile-" (cons nm %))})))
+          (sort-by (comp str key) profiles)))
+
+(defn- default-permissions?
+  "Does config.toml already name a default profile? Codex will not start
+   with `[permissions]` tables and none."
+  []
+  (some? (get (try (toml/read-toml config-file) (catch Exception _ nil)) "default_permissions")))
+
 (def nested-settings
   "Declared settings with an op of their own rather than a root key."
-  [:keymap :presets :status-line])
+  [:keymap :presets :status-line :permission-profiles])
 
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
@@ -170,6 +198,12 @@
      bindings
      (preset-ops (:presets settings))
      (when footer? (keep identity [(status-line-op (:status-line settings))]))
+     (when-let [profiles (not-empty (:permission-profiles settings))]
+       (if (or (contains? settings :sandbox) (default-permissions?))
+         (permission-profile-ops profiles config-file)
+         [(plan/op {:action :noop :tool tool :kind :settings :id :permission-profiles :warn true
+                    :summary (str "permission profiles not written: codex will not start with them"
+                                  " and no default_permissions — declare :sandbox")})]))
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")

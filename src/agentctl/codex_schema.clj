@@ -74,6 +74,87 @@
       [:error where (str "unknown status-line item " (pr-str item) " — codex 0.169.0 accepts: "
                          (str/join ", " status-line-items))])))
 
+;; ---------------------------------------------------------------- permission profiles
+
+(def profile-fields
+  "`[permissions.<name>]` in 0.169.0 (`PermissionProfileToml`, five fields).
+   Keys inside a profile keep Codex's own spelling."
+  ["description" "extends" "workspace_roots" "filesystem" "network"])
+
+(def builtin-profiles
+  "What `extends` may name with a leading colon; anything else with one is a
+   load error (`cannot extend unsupported built-in profile`)."
+  #{":read-only" ":workspace"})
+
+(def filesystem-modes #{"read" "write" "none" "deny"})
+
+(defn- s-of [v] (when (or (keyword? v) (string? v)) (u/key-str v)))
+
+(defn- fs-root?
+  "Codex: `filesystem path … must be absolute, use ~/..., or start with :`."
+  [s]
+  (boolean (and s (re-find #"^(/|~/|:)" s))))
+
+(defn- filesystem-findings [fs where]
+  (if-not (map? fs)
+    [[:error where ":filesystem maps a path to \"read\", \"write\", \"none\" or \"deny\""]]
+    (for [[k v] fs
+          :let [path (s-of k)
+                w (conj where k)
+                mode? #(filesystem-modes (s-of %))]
+          msg (cond
+                (= "glob_scan_max_depth" path) (when-not (nat-int? v) ["glob_scan_max_depth must be a whole number"])
+                (not (fs-root? path)) [(str (pr-str k) " must be absolute, start with ~/ or name a :special root")]
+                (map? v) (for [[sub m] v :when (not (mode? m))]
+                           (str (pr-str sub) " under " path " must be read, write, none or deny"))
+                (not (mode? v)) [(str path " must be read, write, none or deny, or map subpaths to one")])]
+      [:error w msg])))
+
+(defn- network-findings [net where]
+  (if-not (map? net)
+    [[:error where ":network is a map of codex network settings"]]
+    (concat
+     (for [[k v] net :when (and (= "enabled" (s-of k)) (not (boolean? v)))]
+       [:error (conj where k) "enabled must be true or false"])
+     (for [[k v] net :when (= "domains" (s-of k))
+           msg (if (map? v)
+                 (for [[d a] v :when (not (#{"allow" "deny"} (s-of a)))]
+                   (str (pr-str d) " must be allow or deny"))
+                 ["domains maps a host to allow or deny"])]
+       [:error (conj where k) msg]))))
+
+(defn- profile-findings [profiles where]
+  (if-not (map? profiles)
+    [[:error where ":permission-profiles maps a profile name to its [permissions.<name>] table"]]
+    (for [[nm p] profiles
+          :let [w (conj where nm)
+                fields (when (map? p) (into {} (map (fn [[k v]] [(s-of k) [k v]])) p))]
+          [w msg] (cond
+                    (or (nil? (s-of nm)) (str/blank? (s-of nm)) (str/starts-with? (s-of nm) ":"))
+                    [[w (str "profile name " (pr-str nm) " must not be blank or start with : (those are built-ins)")]]
+                    (not (map? p)) [[w "a profile is a map: {:extends \":workspace\" :filesystem {…} :network {…}}"]]
+                    :else
+                    (concat
+                     (for [[s [k _]] fields :when (not (some #{s} profile-fields))]
+                       [(conj w k) (str "unknown profile field " (pr-str k) " — codex reads "
+                                        (str/join ", " profile-fields))])
+                     (when-let [[k v] (fields "extends")]
+                       (cond
+                         (not (string? v)) [[(conj w k) "extends must be a string: a profile name or :read-only / :workspace"]]
+                         (and (str/starts-with? v ":") (not (builtin-profiles v)))
+                         [[(conj w k) (str v " is no built-in profile — codex has :read-only and :workspace")]]))
+                     (when-let [[k v] (fields "description")]
+                       (when-not (string? v) [[(conj w k) "description must be a string"]]))
+                     (when-let [[k v] (fields "workspace_roots")]
+                       (if (map? v)
+                         (for [[r b] v :when (not (boolean? b))] [(conj w k r) "must be true or false"])
+                         [[(conj w k) "workspace_roots maps a root to true or false"]]))
+                     (when-let [[k v] (fields "filesystem")]
+                       (map rest (filesystem-findings v (conj w k))))
+                     (when-let [[k v] (fields "network")]
+                       (map rest (network-findings v (conj w k))))))]
+      [:error w msg])))
+
 ;; ---------------------------------------------------------------- findings
 
 (defn findings
@@ -84,7 +165,15 @@
      (when (contains? settings :presets)
        (preset-findings (:presets settings) (conj where :presets)))
      (when (status-line? (:status-line settings))
-       (status-line-findings (:status-line settings) (conj where :status-line))))))
+       (status-line-findings (:status-line settings) (conj where :status-line)))
+     (when (contains? settings :permission-profiles)
+       (concat
+        (profile-findings (:permission-profiles settings) (conj where :permission-profiles))
+        ;; codex refuses to start on [permissions] tables with no default
+        (when (and (seq (:permission-profiles settings)) (not (contains? settings :sandbox)))
+          [[:warn (conj where :permission-profiles)
+            (str "codex will not start with [permissions] profiles and no default_permissions"
+                 " — declare :sandbox (agentctl writes the profiles only if config.toml already names one)")]]))))))
 
 (defn errors
   "The error messages `findings` has for `settings`, joined, or nil."

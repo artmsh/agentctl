@@ -203,7 +203,9 @@
   (let [header (when (seq table-path) (header-for table-path))]
     (first (keep-indexed (fn [i s] (when (= (:header s) header) i)) segs))))
 
-(defn- has-key? [text table-path k]
+(defn has-key?
+  "Does table `table-path` hold `k` as a key of its own (not a sub-table)?"
+  [text table-path k]
   (let [segs (segments text)]
     (boolean (some->> (segment-index segs table-path) (nth segs) :lines (key-span k)))))
 

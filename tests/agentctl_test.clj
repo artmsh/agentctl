@@ -1101,6 +1101,99 @@
       (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
       (is (= [[:noop :status-line]] (map (juxt :action :id) (codex/settings-ops cfg)))))))
 
+(def codex-profile-on-disk
+  "A hand-written profile in the layout Codex and people write: sub-tables."
+  (str "default_permissions = \"dev\"\n\n"
+       "[permissions.dev]\nextends = \":workspace\"\n\n"
+       "[permissions.dev.network]\nallow_local_binding = true\nenabled = true\n\n"
+       "[permissions.dev.network.domains]\n\"127.0.0.1\" = \"allow\"\n\"localhost\" = \"allow\"\n"
+       "\"internal.example\" = \"allow\"\n\n"
+       "[hooks.state]\nopaque = \"do-not-touch\"\n"))
+
+(deftest codex-permission-profiles-write-key-by-key-converge-and-prune
+  (let [f (str (temp-dir) "/config.toml")
+        grant "~/Library/Application Support/Example/Profiles"
+        dev {:extends ":workspace"
+             :network {:enabled true :domains {"localhost" "allow"}}
+             :filesystem {grant :write ":project_roots" {"." "write"}}}
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "dev"
+                         :permission-profiles {:dev dev :net {:extends ":read-only"}}}]}]
+    (u/write-text! f codex-profile-on-disk)
+    (with-redefs [codex/config-file f]
+      (testing "one op per table; existing sub-tables are written into, not redefined"
+        (let [ops (codex-drift raw state/empty-state)]
+          (is (= #{["permissions" "dev" "filesystem"] ["permissions" "dev" "filesystem" ":project_roots"]
+                   ["permissions" "net"]}
+                 (set (map :path ops))))
+          (is (every? #(= :settings (:kind %)) ops))))
+      (let [{st1 :st} (converge-codex raw state/empty-state)
+            t (toml/read-toml f)]
+        (is (= {"extends" ":workspace"
+                "network" {"allow_local_binding" true "enabled" true
+                           "domains" {"127.0.0.1" "allow" "localhost" "allow" "internal.example" "allow"}}
+                "filesystem" {grant "write" ":project_roots" {"." "write"}}}
+               (get-in t ["permissions" "dev"]))
+            "declared keys added, hand-written rules kept")
+        (is (= {"extends" ":read-only"} (get-in t ["permissions" "net"])))
+        (is (= "do-not-touch" (get-in t ["hooks" "state" "opaque"])))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (testing "dropping a profile removes only what agentctl wrote"
+          (let [less (update-in raw [:settings 0 :permission-profiles] dissoc :net)
+                {st2 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["permissions" "net"])))
+            (is (not (str/includes? (slurp f) "[permissions.net]")))
+            (is (= "allow" (get-in t ["permissions" "dev" "network" "domains" "internal.example"])))
+            (is (empty? (codex-drift less st2)))
+            (testing "and dropping a rule inside a kept profile removes that rule only"
+              (let [fewer (update-in less [:settings 0 :permission-profiles :dev :filesystem] dissoc ":project_roots")
+                    {st3 :st} (converge-codex fewer st2)
+                    t (toml/read-toml f)]
+                (is (nil? (get-in t ["permissions" "dev" "filesystem" ":project_roots"])))
+                (is (= "write" (get-in t ["permissions" "dev" "filesystem" grant])))
+                (is (empty? (codex-drift fewer st3)))))))))))
+
+(deftest codex-permission-profiles-import-without-loss
+  (let [f (str (temp-dir) "/config.toml")]
+    (u/write-text! f codex-profile-on-disk)
+    (with-redefs [codex/config-file f]
+      (let [imported (:codex (imports/scan-settings))]
+        (is (= "dev" (:sandbox imported)))
+        (is (= {:extends ":workspace"
+                :network {:allow_local_binding true :enabled true
+                          :domains {"127.0.0.1" "allow" "localhost" "allow" "internal.example" "allow"}}}
+               (get-in imported [:permission-profiles :dev])))
+        (is (not (str/includes? (imports/render {:executors {:codex imported}}) ":127.0.0.1"))
+            "hosts and paths stay strings: `:127.0.0.1` is no EDN keyword")
+        (is (empty? (codex/settings-ops (config/normalize {:executors {:codex imported}} nil)))
+            "the imported profile plans nothing")))))
+
+(deftest codex-permission-profiles-validate-and-need-a-default
+  (doseq [[profiles msg] [[{:p {:extends :workspace}} #"extends must be a string"]
+                          [{:p {:extends ":danger-full-access"}} #"no built-in profile"]
+                          [{:p {:filesystem {"rel/path" "write"}}} #"must be absolute"]
+                          [{:p {:filesystem {"/x" "rw"}}} #"read, write, none or deny"]
+                          [{:p {:filesystem {"/x" {"." "rw"}}}} #"read, write, none or deny"]
+                          [{:p {:network {:enabled "yes"}}} #"true or false"]
+                          [{:p {:network {:domains {"h" "maybe"}}}} #"allow or deny"]
+                          [{:p {:writable_roots ["/x"]}} #"unknown profile field"]
+                          [{":workspace" {}} #"built-ins"]]]
+    (let [cfg (config/normalize {:executors {:codex {:sandbox "p" :permission-profiles profiles}}} nil)]
+      (is (some #(re-find msg (:message %)) (filter #(= :error (:level %)) (config/structural-findings cfg)))
+          (pr-str profiles))
+      (is (thrown? clojure.lang.ExceptionInfo (doall (codex/settings-ops cfg))))))
+  (testing "a valid profile passes; without :sandbox it warns and, with no default on disk, writes nothing"
+    (let [f (str (temp-dir) "/config.toml")
+          cfg (config/normalize {:executors {:codex {:permission-profiles
+                                                     {:p {:extends ":read-only" :description "d"
+                                                          :workspace_roots {"/w" true}
+                                                          :filesystem {"/x" "write" "glob_scan_max_depth" 3}}}}}} nil)]
+      (is (= [:warn] (map :level (config/structural-findings cfg))))
+      (with-redefs [codex/config-file f]
+        (is (= [[:noop true]] (map (juxt :action :warn) (codex/settings-ops cfg))))
+        (u/write-text! f "default_permissions = \"p\"\n")
+        (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough")))))
+
 (deftest codex-keymap-is-editable-as-edn
   (let [keymap {:global {:open_transcript "alt-t"}}
         m (form/model (pr-str {:executors {:codex {:keymap keymap}}}))

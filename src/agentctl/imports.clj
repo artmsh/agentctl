@@ -40,6 +40,20 @@
 
 ;; ---------------------------------------------------------------- settings
 
+(def ^:private keyed-by-data
+  "Profile tables whose keys are data (paths, hosts), not field names."
+  #{"filesystem" "domains" "workspace_roots" "unix_sockets"})
+
+(defn- import-profile
+  "A `[permissions.<name>]` table as agents.edn declares it: field names as
+   keywords, paths and hosts as the strings they are."
+  ([m] (import-profile m false))
+  ([m data-keys?]
+   (into {} (map (fn [[k v]]
+                   [(if data-keys? k (keyword k))
+                    (if (map? v) (import-profile v (or data-keys? (contains? keyed-by-data k))) v)]))
+         m)))
+
 (defn scan-settings []
   (u/prune-nils
    {:claude (let [s (u/read-json claude/settings-file)
@@ -55,6 +69,11 @@
                             t)
                 (seq (get-in t ["tui" "keymap"]))
                 (assoc :keymap (get-in t ["tui" "keymap"]))
+                (map? (get t "permissions"))
+                (assoc :permission-profiles (into (sorted-map-by #(compare (str %1) (str %2)))
+                                                  (for [[nm p] (get t "permissions") :when (map? p)]
+                                                    [(if (re-matches #"[A-Za-z][A-Za-z0-9_-]*" nm) (keyword nm) nm)
+                                                     (import-profile p)])))
                 (sequential? (get-in t ["tui" "status_line"]))
                 (assoc :status-line (mapv keyword (get-in t ["tui" "status_line"])))
                 ;; slots are digits; EDN reads best with them as numbers

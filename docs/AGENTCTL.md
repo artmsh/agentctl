@@ -358,6 +358,43 @@ and names the accepted ones on error. A map value is Claude Code's
 command-style status line; from a unified settings row it reaches codex as an
 unsupported setting, not an error. Import reads the list back as keywords.
 
+### Codex `:permission-profiles`
+
+`[permissions.<name>]` profiles, beside `:sandbox` (which writes
+`default_permissions`, the active one):
+
+```edn
+{:executors
+ {:codex {:sandbox "local-dev"
+          :permission-profiles
+          {:local-dev {:extends ":workspace"
+                       :filesystem {"~/Library/Application Support/Example" "write"
+                                    ":project_roots" {"." "write"}}
+                       :network {:enabled true :domains {"localhost" "allow"}}}}}}}
+```
+
+A profile is plain data in Codex's spelling (codex-cli 0.169.0):
+`description`, `extends` (`:read-only`, `:workspace` or another profile's
+name), `workspace_roots` (root → boolean), `filesystem` (path → `read` / `write`
+/ `none` / `deny`, or a map of subpaths; paths absolute, `~/…` or `:special`;
+`glob_scan_max_depth`) and `network` (`enabled`, `domains` host → `allow` /
+`deny`, and the rest of Codex's network keys, passed through). `validate`
+rejects anything else in a profile, a non-string or unknown built-in
+`extends`, a relative filesystem path or unknown mode, and a non-boolean
+`enabled`; Codex itself ignores an unknown field silently.
+
+`plan/toml-tree-ops` turns the nested map into one `toml-set-op` per table,
+each owning only its declared keys. A nested map becomes a sub-table, unless
+`config.toml` already holds that key as an inline table, which is then
+rewritten in place, so a write never defines a table twice. Ownership is key
+by key: under the entity DSL, removing a declared rule removes that key, a
+removed profile loses every key agentctl wrote and the tables they leave
+empty, and a rule added by hand is never touched. Codex will not start with
+`[permissions]` tables and no `default_permissions`; `validate` warns when
+profiles come without `:sandbox`, and the plan writes none unless
+`config.toml` already names a default. Import reads profiles back with field
+names as keywords and paths and hosts as strings.
+
 ### `:permissions`
 
 A mini-DSL that compiles to the rule strings Claude Code stores:

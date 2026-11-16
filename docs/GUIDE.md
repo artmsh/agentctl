@@ -116,6 +116,35 @@ unknown item silently and drops it at startup, so `validate` reports one by name
 and lists the items codex-cli 0.169.0 renders. A map value is Claude Code's
 command status line; codex reports it as unsupported rather than as an error.
 
+## Codex permission profiles
+
+`:sandbox` picks Codex's active profile (`default_permissions`);
+`:permission-profiles` declares the profiles themselves, as
+`[permissions.<name>]` tables in Codex's own spelling:
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :sandbox "local-dev"
+             :permission-profiles
+             {:local-dev {:extends ":workspace"
+                          :filesystem {"~/Library/Application Support/Example" "write"}
+                          :network {:enabled true :allow_local_binding true
+                                    :domains {"localhost" "allow" "127.0.0.1" "allow"}}}}}]}
+```
+
+Each table is written key by key, so a rule added to the profile by hand stays,
+and removing a declared rule or profile removes only what agentctl wrote. Paths
+and hosts are strings; field names are keywords. `extends` names `:read-only`,
+`:workspace` or another profile. Filesystem keys must be absolute, start with
+`~/` or name a `:special` root, and map to `read`, `write`, `none` or `deny`, or
+to a map of subpaths. Codex refuses to start when profiles exist without a
+default, so declare `:sandbox` too; without it agentctl writes no profile
+unless `config.toml` already names one. Import brings existing profiles in.
+
+`codex sandbox -P local-dev -- touch <path>/x` checks a grant without a model or
+login. `:workspace` already allows the temp directories, so test an undeclared
+path outside them, or extend `:read-only`.
+
 ## GUI
 
 ```sh

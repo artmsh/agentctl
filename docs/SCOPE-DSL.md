@@ -202,13 +202,16 @@ map becomes `{:settings {…} :tools [:claude] :in :all}`, and a project's
 `:in "projects/sample"`. Precedence: narrower `:in` wins over broader; among
 equally narrow, later wins; `:tools`-specific wins over unified.
 
-Codex's nested TUI settings ride in the same stanza and are user-wide only
-(`:in :all`); each writes its own `[tui.*]` table:
+Codex's nested settings ride in the same stanza and are user-wide only
+(`:in :all`); each writes its own `[tui.*]` or `[permissions.*]` table:
 
 ```edn
 {:settings {:keymap {:chat {:open_presets "alt-t"}}
             :presets {0 {:input "/model" :label "model picker"}}
-            :status-line [:model-with-reasoning :context-used :git-branch]}
+            :status-line [:model-with-reasoning :context-used :git-branch]
+            :sandbox "local-dev"
+            :permission-profiles {:local-dev {:extends ":workspace"
+                                              :filesystem {"~/data" "write"}}}}
  :tools [:codex] :in :all}
 ```
 
