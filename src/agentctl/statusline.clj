@@ -447,7 +447,9 @@
       (let [notes (remove nil?
                           [(when link
                              (str "replaces the symlink to " (u/tilde link) " with a regular file;"
-                                  " the file it points to is left as it is (its content backed up)"))
+                                  (if current
+                                    " the file it points to is left as it is (its content backed up)"
+                                    " the link was dangling, nothing to back up")))
                            (when (and exists? (not mine?) (not link))
                              "replaces a file agentctl did not write (backed up first)")
                            (when (= ::unparseable before) "the file on disk is not valid JSON")

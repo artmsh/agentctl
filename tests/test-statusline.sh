@@ -71,7 +71,8 @@ done
 
 declare_sl '{:defaults {:context-style :full :context_style :compact}}'
 validate
-[ "$code" = 1 ] && has "keep one" "two EDN spellings of one JSON key were not refused"
+[ "$code" = 1 ] || { cat "$SB/out.txt"; fail "exit $code, want 1: two EDN spellings of one JSON key were not refused"; }
+has "keep one" "two EDN spellings of one JSON key were not refused"
 
 # --- a valid config: validate, preview, write, converge
 declare_sl "$GOOD"
@@ -114,7 +115,8 @@ if grep -q STDIN "$STUB_LOG" 2>/dev/null; then fail "--check was fed stdin"; fi
 # --- a change previews as a field diff
 declare_sl "${GOOD/:warning-percent 50/:warning-percent 60}"
 plan
-[ "$code" = 2 ] && has "~ statusline/config" "no update planned"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: no update planned"; }
+has "~ statusline/config" "no update planned"
 has "warning_percent: 50 -> 60" "the update does not show the field diff"
 lacks "∅" "an unchanged null override reads as a change"
 apply
@@ -128,22 +130,26 @@ has ":context-style \"compact\"" "import did not read the file back in kebab-cas
 # --- a hand edit is drift
 python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['defaults']['color']='never'; json.dump(d, open(p,'w'))" "$FILE"
 plan
-[ "$code" = 2 ] && has 'color: "never" -> "auto"' "a hand edit was not reported as drift"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: a hand edit was not reported as drift"; }
+has 'color: "never" -> "auto"' "a hand edit was not reported as drift"
 apply
 
 # --- -k selects it; -t, which names CLIs, leaves it out
 declare_sl "${GOOD/:warning-percent 50/:warning-percent 55}"
 plan -k statusline
-[ "$code" = 2 ] && has "statusline/config" "-k statusline did not select it"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: -k statusline did not select it"; }
+has "statusline/config" "-k statusline did not select it"
 plan -t claude
 lacks "statusline/config" "-t claude planned the shared file"
 plan -k statusline -t claude
-[ "$code" = 2 ] && has "statusline/config" "-k statusline -t claude hid a pending write"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: -k statusline -t claude hid a pending write"; }
+has "statusline/config" "-k statusline -t claude hid a pending write"
 
 # --- dropping the declaration deletes the file agentctl owns, backed up
 echo '{}' > "$CFG"
 plan
-[ "$code" = 2 ] && has "- statusline/config" "no removal planned"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: no removal planned"; }
+has "- statusline/config" "no removal planned"
 apply
 [ ! -e "$FILE" ] || fail "the owned file was not removed"
 ls "$SB/.config/agentctl/backups"/*/*agent-statusline_config.json >/dev/null 2>&1 || fail "no backup of the removed file"
@@ -158,7 +164,8 @@ plan
 [ -f "$FILE" ] || fail "an unowned file was touched"
 declare_sl "$GOOD"
 plan
-[ "$code" = 2 ] && has "replaces a file agentctl did not write" "replacing an unowned file is not said"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: replacing an unowned file is not said"; }
+has "replaces a file agentctl did not write" "replacing an unowned file is not said"
 rm -rf "$SB/.config/agentctl/backups"
 apply
 grep -q never "$SB/.config/agentctl/backups"/*/*agent-statusline_config.json || fail "the hand-made file was not backed up"
@@ -178,7 +185,8 @@ has "not validated" "the plan does not say the write is unvalidated"
 printf '#!/bin/sh\necho "agent-statusline: UnknownArgument" >&2\nexit 1\n' > "$SB/bin/agent-statusline"
 chmod +x "$SB/bin/agent-statusline"
 validate
-[ "$code" = 0 ] && has "does not implement --check" "an old renderer was not recognised"
+[ "$code" = 0 ] || { cat "$SB/out.txt"; fail "exit $code, want 0: an old renderer was not recognised"; }
+has "does not implement --check" "an old renderer was not recognised"
 lacks "✗ config" "an old renderer's refusal was taken as invalid"
 rm "$SB/bin/agent-statusline"
 
@@ -195,10 +203,12 @@ has "DuplicateSegment" "the renderer a Claude :status-line command names was not
 # --- :bin and AGENT_STATUSLINE_BIN find a renderer that is not on PATH
 declare_sl "{:bin \"$RENDERER\" :defaults {:segments [:model :model]}}"
 validate
-[ "$code" = 1 ] && has "DuplicateSegment" ":bin was not used to validate"
+[ "$code" = 1 ] || { cat "$SB/out.txt"; fail "exit $code, want 1: :bin was not used to validate"; }
+has "DuplicateSegment" ":bin was not used to validate"
 declare_sl '{:defaults {:segments [:model]}}'
 set +e; AGENT_STATUSLINE_BIN="$RENDERER" run validate -f "$CFG" > "$SB/out.txt" 2>&1; code=$?; set -e
-[ "$code" = 0 ] && has "✓ config" "AGENT_STATUSLINE_BIN was not used"
+[ "$code" = 0 ] || { cat "$SB/out.txt"; fail "exit $code, want 0: AGENT_STATUSLINE_BIN was not used"; }
+has "✓ config" "AGENT_STATUSLINE_BIN was not used"
 declare_sl "{:bin \"$RENDERER\" :defaults {:segments [:model]}}"
 apply
 if grep -q '"bin"' "$FILE"; then fail ":bin was written into the JSON"; fi
@@ -211,7 +221,8 @@ XFILE="$SB/xdg/agent-statusline/config.json"
 mkdir -p "$(dirname "$XFILE")"
 printf '{"defaults": {"color": "always"}}\n' > "$XFILE"
 set +e; XDG_CONFIG_HOME="$SB/xdg" run apply -f "$CFG" --all > "$SB/out.txt" 2>&1; code=$?; set -e
-[ "$code" = 2 ] && has "replaces a file agentctl did not write" "a hand-made file at the new target reads as agentctl's"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: a hand-made file at the new target reads as agentctl's"; }
+has "replaces a file agentctl did not write" "a hand-made file at the new target reads as agentctl's"
 has "moved to ~/xdg/agent-statusline/config.json" "the file owned at the old path is not removed"
 rm -rf "$SB/.config/agentctl/backups"
 set +e; XDG_CONFIG_HOME="$SB/xdg" run apply! -f "$CFG" --all -y > "$SB/out.txt" 2>&1; set -e
@@ -238,7 +249,8 @@ printf '{"defaults": {"color": "never"}}\n' > "$SB/dotfiles/sl.json"
 ln -s "$SB/dotfiles/sl.json" "$FILE"
 declare_sl "$GOOD"
 plan
-[ "$code" = 2 ] && has "replaces the symlink to ~/dotfiles/sl.json" "replacing a symlink is not said"
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: replacing a symlink is not said"; }
+has "replaces the symlink to ~/dotfiles/sl.json" "replacing a symlink is not said"
 rm -rf "$SB/.config/agentctl/backups"
 apply
 [ -L "$FILE" ] && fail "the symlink was written through, not replaced"
@@ -295,7 +307,8 @@ cat > "$HOSTCFG" <<EDN
 EDN
 : > "$STUB_LOG"
 set +e; run validate -f "$HOSTCFG" > "$SB/out.txt" 2>&1; code=$?; set -e
-[ "$code" = 1 ] && has "DuplicateSegment" "fixture: the local run does not reject the config"
+[ "$code" = 1 ] || { cat "$SB/out.txt"; fail "exit $code, want 1: fixture: the local run does not reject the config"; }
+has "DuplicateSegment" "fixture: the local run does not reject the config"
 [ -n "${AGENTCTL_TEST_STATUSLINE_BIN:-}" ] || [ -s "$STUB_LOG" ] || fail "fixture: the local run did not ask the renderer"
 for cmd in apply validate; do
   : > "$STUB_LOG"
@@ -313,9 +326,11 @@ done
 rm -f "$FILE"
 declare_sl '{:defaults {:segments [:model :context :model]}}'
 plan -k statusline
-[ "$code" = 1 ] && has "DuplicateSegment" "-k statusline did not check the file it plans"
+[ "$code" = 1 ] || { cat "$SB/out.txt"; fail "exit $code, want 1: -k statusline did not check the file it plans"; }
+has "DuplicateSegment" "-k statusline did not check the file it plans"
 plan --only statusline/config
-[ "$code" = 1 ] && has "DuplicateSegment" "--only statusline/config did not check the file it plans"
+[ "$code" = 1 ] || { cat "$SB/out.txt"; fail "exit $code, want 1: --only statusline/config did not check the file it plans"; }
+has "DuplicateSegment" "--only statusline/config did not check the file it plans"
 plan --only mcps/x
 [ "$code" != 1 ] || { cat "$SB/out.txt"; fail "--only mcps/x refused a run that cannot write the status-line file"; }
 has "DuplicateSegment" "--only mcps/x hid the invalid status line instead of warning"
@@ -324,5 +339,15 @@ declare_sl '{:defaults {:segments [:model :context]}}'
 plan --only statusline/config
 [ "$code" = 2 ] || { cat "$SB/out.txt"; fail "--only statusline/config planned no write"; }
 lacks "nothing declared or owned" "--only statusline/config was reported unmatched"
+
+# a dangling config.json link: replaced by a regular file, with nothing to back up
+mkdir -p "$(dirname "$FILE")"; rm -f "$FILE"; ln -s "$SB/gone/sl.json" "$FILE"
+plan -k statusline
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "exit $code, want 2: a dangling link planned no write"; }
+has "the link was dangling, nothing to back up" "a dangling link was described as backed up"
+apply -k statusline
+[ "$code" = 0 ] && [ -f "$FILE" ] && [ ! -L "$FILE" ] || { cat "$SB/out.txt"; fail "a dangling link was not replaced by a regular file"; }
+[ ! -e "$SB/gone/sl.json" ] || fail "agentctl wrote through a dangling link"
+rm -f "$FILE"
 
 echo "all statusline e2e checks passed"
