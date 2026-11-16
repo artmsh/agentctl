@@ -1853,4 +1853,20 @@ for pair in "dsl projects entity-DSL" "old trust old-format"; do
     || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
 done
 
+echo "41. an unscoped run owns no skill whose pack failed to clone"
+(
+  H=$(fresh_home unsourced); export AGENTCTL_HOME="$H"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {:gone {:uri "file://$H/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}
+          :local {:path "$H/projects/shared/skills/local" :tools [:pi]}}}
+EDN
+  mkskill "$H/projects/shared/skills/local" local
+  (run apply! -f "$H/agents.edn" -y || true) > "$H/apply.txt" 2>&1
+  grep -q 'git clone exited' "$H/apply.txt" || { cat "$H/apply.txt"; fail "unsourced: the clone did not fail"; }
+  [ -L "$H/.pi/agent/skills/local" ] || { cat "$H/apply.txt"; fail "unsourced: the other skill was not linked"; }
+  grep -q '\[:pi :skills "local"\]' "$H/.config/agentctl/state.edn" || fail "unsourced: the linked skill is not owned"
+  ! grep -q 'gone-skill' "$H/.config/agentctl/state.edn" || fail "a skill never linked is owned, so a later prune would remove a path agentctl never wrote"
+)
+
 echo "all agentctl e2e checks passed"

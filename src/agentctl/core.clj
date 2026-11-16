@@ -728,15 +728,22 @@
          done-keys (set (map (fn [[t k id]] (state/key-for t k id)) done))
          stale (filter #(and (not (want %)) (not (failed-keys %))
                              (or (nil? done) (done-keys %))) (keys (:managed st)))
-         wrote? (fn [t k id] (or (nil? done) (contains? done [t k id])))
+         ;; a skill whose source is not on disk — its pack failed to clone,
+         ;; or is not fetched yet — was planned nothing because nothing could
+         ;; be linked, not because disk matches: it is not adopted
+         unsourced (set (for [[id s] (sources/all-skills cfg) :when (nil? (:source s))] id))
+         wrote? (fn [t k id data]
+                  (or (contains? done [t k id])
+                      (and (nil? done)
+                           (not (and (= :skills k) (unsourced id))))))
          data-for (fn [t k id data]
                     (cond
                       (empty? data) data
-                      (wrote? t k id) data
+                      (wrote? t k id data) data
                       :else (dissoc (state/entry st t k id) :at)))]
      (as-> st $
        (reduce (fn [s [t k id data]]
-                 (if (or (wrote? t k id) (state/managed? s t k id))
+                 (if (or (wrote? t k id data) (state/managed? s t k id))
                    (state/record s t k id (or (data-for t k id data) {})) s))
                $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)
