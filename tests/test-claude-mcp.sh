@@ -687,6 +687,12 @@ STUB_REFUSE=add apply -k mcps
 [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused add exited $code"; }
 grep -qF "Authorization: Bear…34" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the carried header is not shown masked"; }
 grep -q "handmade-token" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the carried header"; }
+# the remove went through and the add did not: the server is put back as it was
+grep -qF "failed: Error: refused by the stub" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the add's own error is not reported"; }
+grep -qF "the previous definition was restored" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the restore is not reported"; }
+[ "$(user_entry hdocs)" = '{"headers": {"Authorization": "'"$HAND"'", "api-key": "'$PLAIN'"}, "type": "http", "url": "https://mcp.example.com/h2"}' ] \
+  || { user_entry hdocs; fail "a refused add left the server removed"; }
+grep -q '\[:claude :mcps "hdocs"\]' "$SB/.config/agentctl/state.edn" || fail "the restored server is no longer owned"
 
 echo "32. an env var, file or command that yields nothing is missing, not an empty secret"
 export AGENTCTL_TEST_EMPTY=""

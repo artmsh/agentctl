@@ -328,6 +328,18 @@
      :headers headers
      :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))}))
 
+(defn- restore-user-mcp!
+  "Put back a user-wide server's entry as it was before the update removed
+   it, after `claude mcp add` refused the new one: otherwise a failed update
+   would uninstall the server. Says what happened, for the failure message."
+  [nm prev]
+  (try
+    (u/write-json! runtime-file (assoc-in (or (u/read-json runtime-file) {}) [:mcpServers (keyword nm)] prev))
+    "the previous definition was restored"
+    (catch Exception e
+      (str "restoring the previous definition failed too (" (ex-message e) "); ~/.claude.json is backed up in "
+           (u/tilde (u/backup-dir))))))
+
 (defn mcp-ops [cfg st]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
         current (current-mcps)
@@ -356,10 +368,12 @@
                    :diffs (plan/field-diffs (or have {}) want)
                    :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                    :exec! (fn []
-                            (when cur
-                              ;; the remove drops what the add may fail to put back
-                              (u/backup! runtime-file)
-                              (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                            (let [prev (when cur (get (current-mcps) (keyword nm)))]
+                              (when prev
+                                ;; the remove drops what the add may fail to put back
+                                (u/backup! runtime-file)
+                                (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                              (try
                             (claude-ok!
                              (vec (if (= :http (:transport m))
                                     (concat ["claude" "mcp" "add" "--scope" "user"
@@ -375,7 +389,12 @@
                              ;; whose origin nothing records
                              (concat (vals (select-keys (:values env) (declared-secret-keys (:env m))))
                                      (vals (select-keys (:values headers) (declared-secret-keys (:headers m))))
-                                     (vals carried))))})))
+                                     (vals carried)))
+                                (catch clojure.lang.ExceptionInfo e
+                                  (throw (if prev
+                                           (ex-info (str (ex-message e) " — " (restore-user-mcp! nm prev))
+                                                    (ex-data e))
+                                           e))))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed

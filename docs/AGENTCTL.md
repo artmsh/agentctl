@@ -494,7 +494,7 @@ the entire project declaration still prunes entries agentctl wrote there.
 
 A user-wide server is written with `claude mcp add`, which cannot edit an
 entry: an update removes the server and adds it again, after backing up
-`~/.claude.json`. Drift there is a declared env or header name the entry lacks,
+`~/.claude.json`, and puts the previous entry back if the add fails. Drift there is a declared env or header name the entry lacks,
 never a value and never a name added by hand, and the add carries every env var
 or header the declaration does not name, so a hand-added `Authorization`
 survives. A name agentctl declared and the declaration has since dropped is
