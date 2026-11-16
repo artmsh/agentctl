@@ -14,6 +14,7 @@
             [agentctl.edit :as edit]
             [agentctl.form :as form]
             [agentctl.plan :as plan]
+            [agentctl.refs :as refs]
             [agentctl.state :as state]
             [agentctl.statusline :as statusline]
             [agentctl.util :as u]
@@ -63,8 +64,13 @@
 
 (defn plan-for-text
   "Dry-run the buffer. Never throws: bad EDN is the normal state of a file
-   being typed into, and the answer to it is a message, not a stack trace."
+   being typed into, and the answer to it is a message, not a stack trace.
+
+   Each plan asks the vault again: this process outlives any one plan, and a
+   secret rotated or a vault unlocked since the last one must show. An apply
+   plans through here first, so it resolves once, and the same values."
   [text path opts]
+  (refs/forget!)
   (try
     (let [cfg (config/parse-config (buffer-text text) path)
           ;; the GUI plans this machine, so this machine's findings too; and

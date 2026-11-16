@@ -338,7 +338,8 @@ Every other change in the run still applies. `apply` exits 2 while such a server
 remains and `apply!` exits 1, listing what it held back, so a partial run is never
 reported as converged. A server held back this way is not recorded as owned: one
 that never got written cannot be pruned later, and a hand-made server of the same
-name stays the user's.
+name stays the user's. The GUI asks the vault again for every plan, so unlocking
+it or rotating a secret shows without restarting `agentctl gui`.
 
 For a user-wide server, whose secret `claude mcp add` stores and agentctl does
 not read back, drift is decided by the env and header *names*: a declared name

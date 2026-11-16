@@ -82,8 +82,12 @@ cat > "$SB/bin/bw" <<'STUB'
 #!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
+state = os.path.join(os.environ["HOME"], "bw-state")
 if a[:1] == ["status"]:
-    print(json.dumps({"status": os.environ.get("BW_STATE", "unlocked")})); sys.exit(0)
+    # a file can change the state under a running process (the GUI); the
+    # variable cannot
+    s = open(state).read().strip() if os.path.exists(state) else os.environ.get("BW_STATE", "unlocked")
+    print(json.dumps({"status": s})); sys.exit(0)
 if a[:2] == ["get", "item"]:
     items = json.load(open(os.path.join(os.environ["HOME"], "bw-items.json")))
     if a[2] not in items:
@@ -855,5 +859,21 @@ case "$cmd" in *"-e DOCS_KEY=plai…34"*) ;; *) echo "$line"; fail "the command 
 case "$out" in "Error: refused by the stub: mcp add --scope user rshort"*) ;; *) echo "$line"; fail "a short plain value garbled the CLI's output";; esac
 case "$out" in *"N=s"*) ;; *) echo "$line"; fail "a plain value was hidden in the CLI's output";; esac
 grep -q "$PLAIN" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the secret"; }
+
+echo "38. the gui sees the vault unlocked without a restart"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :glock :type :http :url "https://mcp.example.com/g" :headers {"x-key" "!bw://glock/KEY"} :in :all :acli [:claude]}]}
+EDN
+vault '{"glock": {"KEY": "'$PLAIN'"}}'
+echo locked > "$SB/bw-state"
+gui plan mcps > "$SB/gui.out"
+grep -q "bitwarden vault locked" "$SB/gui.out" || { cat "$SB/gui.out"; fail "the gui does not see the locked vault"; }
+echo unlocked > "$SB/bw-state"
+gui plan mcps > "$SB/gui.out"
+grep -q "secret unresolved" "$SB/gui.out" && { cat "$SB/gui.out"; fail "the gui kept the vault locked after an unlock"; }
+grep -q "glock" "$SB/gui.out" || { cat "$SB/gui.out"; fail "the gui plan does not create the server"; }
+gui apply mcps > "$SB/gui.out"
+[ "$(json "$SB/.claude.json" "d['mcpServers']['glock']['headers']['x-key']")" = "$PLAIN" ] || { cat "$SB/gui.out"; fail "the gui did not write the secret"; }
+rm "$SB/bw-state"
 
 echo "all claude mcp e2e checks passed"

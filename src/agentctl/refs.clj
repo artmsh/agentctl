@@ -115,12 +115,29 @@
   (let [{:keys [exit out]} (u/sh "bw" "status")]
     (and (zero? exit) (str/includes? out "\"unlocked\""))))
 
-(def bw-state
+(defn- probe-bw []
   (delay
     (cond
       (nil? (u/which "bw")) :absent
       (bw-unlocked?) :unlocked
       :else :locked)))
+
+(def ^:private bw-probe (atom (probe-bw)))
+
+(def bw-state
+  "The vault: `:absent`, `:locked` or `:unlocked`, asked once and then
+   remembered until `forget!`."
+  (reify clojure.lang.IDeref
+    (deref [_] @@bw-probe)))
+
+(defn forget!
+  "Drop every resolved value and the vault's state, so the next resolution
+   asks again. A CLI run resolves once; a long-lived process (the GUI) calls
+   this per request, or it would never see a rotated secret or an unlocked
+   vault."
+  []
+  (reset! cache {})
+  (reset! bw-probe (probe-bw)))
 
 (defn- bw-fetch [{:ref/keys [item field]}]
   (case @bw-state
