@@ -43,7 +43,8 @@ segment.
   agent's status line, and that renderer's own `--check` validates it before anything is written.
 - Claude Code plugins are installed through `claude plugin` from a GitHub, git, directory or
   hosted marketplace, user-wide or per project; a git marketplace can be pinned to a branch,
-  tag or commit with `:ref` ([Claude plugins](docs/GUIDE.md#claude-plugins)).
+  tag or commit with `:ref`, `:version :latest` upgrades a plugin when its marketplace moves,
+  and `:build` builds each new install ([Claude plugins](docs/GUIDE.md#claude-plugins)).
 - TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked

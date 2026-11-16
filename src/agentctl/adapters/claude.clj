@@ -5,6 +5,7 @@
    runtime state blob owned by the CLI: it is read for current state, and only
    ever mutated through `claude mcp` or narrowly-scoped project keys."
   (:require [agentctl.adapters.common :as common]
+            [agentctl.adapters.claude-plugins :as cp]
             [agentctl.plan :as plan]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
@@ -317,23 +318,10 @@
                     {:exit exit :argv argv})))
   true)
 
-(def installed-plugins-file (str home "/plugins/installed_plugins.json"))
-
-(defn- installed?
-  "Whether the CLI's own install record holds `key` at this scope — for a
-   project or local scope, at this project. Settings alone do not install a
-   plugin; an enabled entry with no install is drift."
-  [key scope project]
-  (let [rows (get-in (u/read-json installed-plugins-file) [:plugins (keyword key)])
-        want (plugin-scope scope)
-        canon #(str (fs/canonicalize (u/abs-path %)))
-        here (some-> project :path canon)]
-    (boolean
-     (some (fn [{s :scope p :projectPath}]
-             (and (= want s)
-                  (or (= "user" want)
-                      (= here (some-> p canon)))))
-           rows))))
+;; Whether the CLI's own install record holds a plugin at a scope is
+;; `cp/install-record`: settings alone do not install a plugin, and an enabled
+;; entry with no install is drift.
+(def installed-plugins-file cp/installed-file)
 
 (defn- not-installed? [{:keys [exit err out]}]
   (and (not (zero? exit)) (re-find #"is not installed" (str err " " out))))
@@ -344,7 +332,7 @@
    :cli-scope (plugin-scope scope)
    :key (plugin-key p)})
 
-(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key]}]
+(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key remote]}]
   (let [current (u/read-json file)
         marketplaces (or (:extraKnownMarketplaces current) {})
         enabled (or (:enabledPlugins current) {})
@@ -354,32 +342,46 @@
         before-e (get enabled (keyword key))
         desired-m (not= (u/norm before-m) (u/norm want-marketplace))
         desired-e (not= true before-e)
-        missing (not (installed? key scope project))
+        rec (cp/install-record key cli-scope (:path project))
+        missing (nil? rec)
         ;; settings already name this marketplace, from another source or ref
         switched (and before-m (not= (u/norm (:source before-m)) (u/norm (:source want-marketplace))))
+        ;; a source switch re-registers the marketplace, which then offers what
+        ;; it offers: the version on disk now says nothing about it
+        want (:version plugin)
+        offer (when (and want (not desired-m)) (cp/offered mname (:plugin plugin)))
+        ;; only `:latest` asks the network, and only of an installed plugin
+        moved (when (and (= :latest want) rec offer) (remote mname))
+        vdiff (when-not desired-m (cp/version-diff want rec offer moved))
         source (plugin-source plugin)
         cwd (:path project)
         argv-add ["claude" "plugin" "marketplace" "add" "--scope" cli-scope source]
         ;; the marketplace is registered by argv-add, so the install names it
         ;; once, in the key; the CLI rejects plugin@marketplace with --marketplace
-        argv-install ["claude" "plugin" "install" "--scope" cli-scope "-y" key]
+        steps (cp/steps {:key key :cli-scope cli-scope :installed? (not missing)
+                         :switched? (and switched (not missing)) :behind? (some? vdiff)})
         run (fn [argv] (ok! (if cwd (claude-sh-in cwd argv) (claude-sh argv)) argv))]
-    (when (or desired-m desired-e missing)
+    (when (or desired-m desired-e missing vdiff)
       (plan/op
        {:action (if (nil? current) :create :update)
         :tool tool :kind :plugins :id id :project (some-> (:id project) keyword)
         :project-path (some-> project :path) :target file
-        :path ["enabledPlugins" key] :cmds [argv-add argv-install]
+        :path ["enabledPlugins" key]
+        :cmds (vec (concat [argv-add] (when want [(cp/refresh-cmd mname)]) steps))
         :summary (str "Claude marketplace " mname "; enable " key
                       (when (and missing (not desired-m) (not desired-e))
                         " (enabled in settings but not installed)"))
-        :note (when (and switched (not missing))
-                (str "⚠ marketplace source changed: Claude keeps the installed " key
-                     " as it is until the new source offers another version"))
+        :note (or (when (and switched (not missing))
+                    (str "marketplace source changed: " key
+                         " is reinstalled, Claude would keep its cached copy at an unchanged version"))
+                  (cp/pin-note want mname offer))
         :diffs (cond-> []
                  desired-m (conj {:key :extraKnownMarketplaces :before before-m :after want-marketplace})
                  desired-e (conj {:key :enabledPlugins :before before-e :after true})
-                 missing (conj {:key :installed :before false :after true}))
+                 missing (conj {:key :installed :before false :after true})
+                 (and missing want) (conj {:key :version :before nil
+                                           :after (or (cp/wanted-version want offer nil) "latest")})
+                 vdiff (conj vdiff))
         :exec! (fn []
                  (let [before (u/slurp-safe file)]
                    (try
@@ -392,7 +394,9 @@
                                                      [:extraKnownMarketplaces (keyword mname)]
                                                      want-marketplace)))
                      (run argv-add)
-                     (run argv-install)
+                     (cp/converge! {:run run :key key :cli-scope cli-scope :project-path cwd
+                                    :mname mname :plugin (:plugin plugin) :want want
+                                    :switched? (boolean (and switched (not missing)))})
                      ;; a failed step leaves the settings file as it was
                      (catch Exception e
                        (if before (u/write-text! file before) (fs/delete-if-exists file))
@@ -455,7 +459,11 @@
                                  :marketplace (or (:marketplace e) (name id))}
                                 (when-let [p (:project-path e)] {:path p :id (some-> id namespace keyword)})
                                 (or (:scope e) :global)))]
-    (concat (keep plugin-install-op desired)
+    (concat (let [remote (memoize cp/remote-revision)]
+              ;; a plugin's build follows its install, which may move it
+              (mapcat (fn [e] (let [o (plugin-install-op (assoc e :remote remote))]
+                                (remove nil? [o (cp/build-op e (some? o))])))
+                      desired))
             (keep plugin-uninstall-op managed))))
 
 (defn- mcp-json-entry

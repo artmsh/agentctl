@@ -59,9 +59,11 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 
 A `:plugins` key is `[:gh "owner/repo" "plugin"]` or `[:uri "…" "plugin"]`. Its
 value takes `:marketplace` (the name the marketplace's own manifest gives it;
-default the plugin's name) and `:ref`, a branch, tag or commit of a git
-marketplace, written as `source.ref` and passed to the CLI as `owner/repo#ref`.
-See [GUIDE.md](GUIDE.md#claude-plugins).
+default the plugin's name), `:ref`, a branch, tag or commit of a git
+marketplace, written as `source.ref` and passed to the CLI as `owner/repo#ref`,
+`:version` (`:latest` or a pinned version string; without it only presence is
+checked) and `:build`, a shell command run in each new install path. See
+[GUIDE.md](GUIDE.md#claude-plugins) and [Plugin versions](GUIDE.md#plugin-versions).
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
 instructions file. Omp's context-file provider loads `AGENTS.md` from its

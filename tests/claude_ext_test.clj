@@ -3,18 +3,26 @@
    tests/test-plugins.sh inside a sandbox of its own (AGENTCTL_HOME), since
    they write Claude's files under that home."
   (:require [agentctl.adapters.claude :as claude]
+            [agentctl.adapters.claude-plugins :as cp]
             [agentctl.config :as config]
             [agentctl.imports :as imports]
             [agentctl.state :as state]
             [agentctl.util :as u]
             [babashka.fs :as fs]
+            [babashka.process :as p]
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests testing]]))
 
 (defn- cfg [decl] (config/parse-config (pr-str decl) (str u/home "/agents.edn")))
 
 (defn- clean! []
-  (doseq [d [".claude" "repo"]] (fs/delete-tree (str u/home "/" d))))
+  (doseq [d [".claude" "repo" "mkt" "remote.git"]] (fs/delete-tree (str u/home "/" d))))
+
+(defn- git! [dir & args]
+  (let [r @(p/process (into ["git" "-C" dir "-c" "user.email=t@example.com" "-c" "user.name=t"] args)
+                      {:out :string :err :string})]
+    (is (zero? (:exit r)) (:err r))
+    (str/trim (:out r))))
 
 (defn- findings [decl]
   (set (map (juxt :level :message) (config/structural-findings (cfg decl)))))
@@ -106,6 +114,93 @@
       (u/write-json! claude/installed-plugins-file
                      {:version 2 :plugins {"lint@market" [{:scope "user"}] "lp@localmkt" [{:scope "user"}]}})
       (is (empty? (claude/plugin-ops (cfg {:plugins rows}) state/empty-state))))))
+
+;; ---------------------------------------------------------------- versions
+
+(defn- marketplace! [entry manifest]
+  (let [loc (str u/home "/mkt")]
+    (u/write-json! (str loc "/.claude-plugin/marketplace.json") {:name "acme" :plugins [entry]})
+    (when manifest (u/write-json! (str loc "/lp/.claude-plugin/plugin.json") manifest))
+    (u/write-json! cp/known-file {:acme {:source {:source "directory" :path loc} :installLocation loc}})
+    loc))
+
+(deftest the-offered-version-is-the-one-claude-installs
+  ;; plugin.json, else the marketplace entry, else the commit: Claude's order
+  (clean!)
+  (marketplace! {:name "lp" :source "./lp" :version "2.0.0"} {:name "lp" :version "3.0.0"})
+  (is (= "3.0.0" (:version (cp/offered "acme" "lp"))))
+  (marketplace! {:name "lp" :source "./lp" :version "2.0.0"} {:name "lp"})
+  (is (= "2.0.0" (:version (cp/offered "acme" "lp"))))
+  (let [loc (marketplace! {:name "lp" :source "./lp"} {:name "lp"})]
+    (git! loc "init" "-q")
+    (git! loc "add" "-A")
+    (git! loc "commit" "-qm" "c")
+    (let [sha (git! loc "rev-parse" "HEAD")]
+      (is (= {:version (subs sha 0 12) :revision sha} (cp/offered "acme" "lp")))))
+  (testing "a plugin kept in another repository has no version until it is fetched"
+    (clean!)
+    (marketplace! {:name "lp" :source {:source "github" :repo "acme/lp"} :version "1.0.0"} nil)
+    (is (nil? (:version (cp/offered "acme" "lp")))))
+  (is (nil? (cp/offered "acme" "nope")))
+  (is (nil? (cp/offered "unknown" "lp"))))
+
+(deftest a-version-diff-says-what-the-row-asks-for
+  (let [rec {:version "1.0.0"}
+        fresh {:version "1.1.0" :revision "aaaaaaaaaaaa"}]
+    (is (= {:key :version :before "1.0.0" :after "1.1.0"} (cp/version-diff :latest rec fresh nil)))
+    (is (= {:key :version :before "1.0.0" :after "1.1.0"} (cp/version-diff :latest rec fresh "aaaaaaaaaaaa")))
+    (is (= {:key :version :before "1.0.0" :after "latest @ bbbbbbb"}
+           (cp/version-diff :latest rec {:version "1.0.0" :revision "aaaaaaa"} "bbbbbbbbbbbb"))
+        "a remote that moved offers what is not fetched yet")
+    (is (nil? (cp/version-diff :latest rec {:version "1.0.0" :revision "a"} "a")))
+    (is (nil? (cp/version-diff :latest rec {:version nil :revision "a"} nil)) "unknown is not drift")
+    (is (= {:key :version :before "1.0.0" :after "0.9.0"} (cp/version-diff "0.9.0" rec fresh nil)))
+    (is (nil? (cp/version-diff "1.0.0" rec fresh nil)) "a pin that holds needs nothing")
+    (is (nil? (cp/version-diff nil rec fresh nil)) "no :version, presence only")
+    (is (nil? (cp/version-diff :latest nil fresh nil)) "not installed is the install's drift")
+    (is (str/includes? (cp/pin-note "0.9.0" "acme" fresh) "offers 1.1.0"))
+    (is (nil? (cp/pin-note "1.1.0" "acme" fresh)))))
+
+(deftest the-steps-follow-what-is-installed
+  (let [s #(map (fn [argv] (str/join " " (drop 2 argv)))
+                (cp/steps (merge {:key "lp@acme" :cli-scope "user"} %)))]
+    (is (= ["install --scope user -y lp@acme"] (s {:installed? false})))
+    (is (= ["uninstall --scope user -y lp@acme" "install --scope user -y lp@acme"]
+           (s {:installed? true :switched? true :behind? true})))
+    (is (= ["update --scope user -y lp@acme"] (s {:installed? true :behind? true})))
+    (is (= [] (s {:installed? true :current? true :behind? false})))
+    (is (= ["install --scope user -y lp@acme"] (s {:installed? true})))))
+
+(deftest the-remote-revision-of-a-tag-is-its-commit
+  (clean!)
+  (let [work (str u/home "/repo") bare (str u/home "/remote.git")]
+    (fs/create-dirs work)
+    (git! work "init" "-q")
+    (spit (str work "/f") "x")
+    (git! work "add" "-A")
+    (git! work "commit" "-qm" "c")
+    (git! work "tag" "-a" "v1" "-m" "annotated")
+    (git! work "clone" "-q" "--bare" work bare)
+    (let [sha (git! work "rev-parse" "HEAD")
+          known! #(u/write-json! cp/known-file {:acme {:source (merge {:source "git" :url (str "file://" bare)} %)
+                                                       :installLocation (str u/home "/mkt")}})]
+      (known! {:ref "v1"})
+      (is (= sha (cp/remote-revision "acme")))
+      (known! {})
+      (is (= sha (cp/remote-revision "acme")))
+      (known! {:ref sha})
+      (is (nil? (cp/remote-revision "acme")) "a commit cannot move")
+      (u/write-json! cp/known-file {:acme {:source {:source "directory" :path work} :installLocation work}})
+      (is (nil? (cp/remote-revision "acme")) "a directory is read live"))))
+
+(deftest version-and-build-have-one-shape
+  (let [errors (fn [v] (set (keep (fn [[l m]] (when (= :error l) m))
+                                  (findings {:plugins {[:gh "acme/market" "lp"] (merge {:in :all :acli [:claude]} v)}}))))]
+    (is (empty? (errors {:version :latest :build "make"})))
+    (is (empty? (errors {:version "1.2.0"})))
+    (is (some #(str/includes? % ":version must be :latest") (errors {:version :newest})))
+    (is (some #(str/includes? % ":version must be :latest") (errors {:version ""})))
+    (is (some #(str/includes? % ":build is a shell command") (errors {:build ["make"]})))))
 
 (let [{:keys [fail error]} (run-tests 'claude-ext-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

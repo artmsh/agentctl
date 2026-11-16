@@ -282,6 +282,10 @@
       :uri (:uri decl)
       ;; the marketplace's git ref: a branch, tag or commit of its repository
       :ref (:ref decl)
+      ;; :latest follows the marketplace; a string pins one version
+      :version (:version decl)
+      ;; a shell command run in each new install path
+      :build (:build decl)
       :plugin (or (:plugin decl) (name id))
       :marketplace (or (:marketplace decl) (:plugin decl) (name id))
       :scope (or (:scope decl) :global)
@@ -798,8 +802,9 @@
 
 (defn- plugin-ref-findings
   "A `:ref` picks a revision of a git repository: a directory or a hosted
-   marketplace.json has none. One marketplace name is one registration in
-   Claude, so two rows naming it from different places fight over it."
+   marketplace.json has none. `:version` and `:build` have one shape each.
+   One marketplace name is one registration in Claude, so two rows naming it
+   from different places fight over it."
   [cfg]
   (concat
    (for [[id p] (:plugins cfg)
@@ -812,6 +817,14 @@
                               (name (plugin-marketplace-kind p)) " source has no revisions"))]
          :when msg]
      (finding :error [:plugins id :ref] msg))
+   (for [[id p] (:plugins cfg)
+         :let [v (:version p)]
+         :when (and (some? v) (not (or (= :latest v) (and (string? v) (not (str/blank? v))))))]
+     (finding :error [:plugins id :version] ":version must be :latest or a version string, e.g. \"1.2.0\""))
+   (for [[id p] (:plugins cfg)
+         :let [b (:build p)]
+         :when (and (some? b) (not (and (string? b) (not (str/blank? b)))))]
+     (finding :error [:plugins id :build] ":build is a shell command, run in the plugin's install path"))
    (for [[m ps] (group-by :marketplace (vals (:plugins cfg)))
          :let [sources (distinct (map (juxt :repo :uri :ref) ps))]
          :when (next sources)]

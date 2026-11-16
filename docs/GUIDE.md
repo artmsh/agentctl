@@ -521,9 +521,56 @@ source, so `apply!` writes the new entry first and puts the file back if the
 CLI then fails. A `:ref` on a directory or a hosted `marketplace.json` is an
 error: neither has revisions.
 
-When the source of a marketplace changes while its plugin is installed, the plan
-says so: Claude keeps the installed copy until the new source offers a
-different version, and `claude plugin update` does nothing at the same version.
+When the source of a marketplace changes while its plugin is installed, Claude
+keeps the installed copy until the new source offers a different version, and
+`claude plugin update` does nothing at the same version. `apply!` therefore
+reinstalls the plugin (`claude plugin uninstall`, then `install`), and the plan
+says why.
+
+### Plugin versions
+
+Without `:version` a plugin is converged once it is installed, whatever its
+version. `:version` adds a version check:
+
+```clojure
+{:plugins {[:gh "example/plugins" "lint"] {:in :all :acli [:claude] :version :latest}
+           [:gh "example/tools" "fmt"]   {:in :all :acli [:claude] :version "1.4.0" :ref "v1.4.0"}}}
+```
+
+- `:latest` follows the marketplace. `apply` compares the installed version
+  with the one the marketplace on disk offers, and asks the remote, read-only
+  (`git ls-remote`), whether the marketplace has moved since it was fetched; a
+  moved one shows as `version: "1.0.0" -> "latest @ <commit>"`. `apply!` runs
+  `claude plugin marketplace update <marketplace>` and `claude plugin update`
+  at the placement's scope.
+- A string pins a version. Claude has no command that installs a given
+  version: it installs what the marketplace offers. A pin the marketplace does
+  not offer fails `apply!` before anything is installed, and the plan says so.
+  Pin the marketplace too, with `:ref` on a tag that carries that version.
+
+The version is the one Claude computes for a plugin kept inside its
+marketplace: `plugin.json`'s, else the marketplace entry's, else the first 12
+hex digits of the marketplace commit. A plugin whose marketplace entry points
+at another repository has no version until Claude fetches it, so `:latest`
+then follows only the marketplace's commit. A directory marketplace has no
+remote; Claude reads it live.
+
+`:build` is a shell command run in the plugin's install path
+(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`), for a plugin that
+ships sources rather than a built tree:
+
+```clojure
+{:plugins {[:gh "example/plugins" "graph"]
+           {:in :all :acli [:claude] :version :latest
+            :build "pnpm install --frozen-lockfile && pnpm --filter core build"}}}
+```
+
+It runs once per install path, and again after an install or update moves the
+plugin. A stamp under `~/.agents/plugins/.built` records the path, the commit
+and the command. A failing build fails `apply!`, leaves no stamp, and agentctl
+claims no ownership of the plugin, so the next run builds again. Claude runs a
+plugin from a directory marketplace out of that directory, not the install
+path, so a build there does not change what Claude loads.
 
 Marketplace names are global to Claude: two declarations whose sources share a
 marketplace name re-register it, and every project follows the last one.

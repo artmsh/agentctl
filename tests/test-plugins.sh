@@ -190,6 +190,9 @@ market() { # market <home> <plugin version> [branch]: commit marketplace "acme" 
   [ -d "$1/remotes/acme/market.git" ] || git init -q --bare "$1/remotes/acme/market.git"
   git -C "$w" push -q --force "$1/remotes/acme/market.git" "HEAD:refs/heads/$b"
 }
+owned() { # owned <id>: exit 0 when the manifest owns Claude plugin <id>
+  bb -e "(System/exit (if (get-in (clojure.edn/read-string (slurp \"$SB/.config/agentctl/state.edn\")) [:managed [:claude :plugins \"$1\"]]) 0 1))" 2>/dev/null
+}
 record() { # record <python expr over the user-scope rows of lp@acme>
   python3 -c "import json,sys; d=json.load(open(sys.argv[1])); rows=[r for r in d['plugins'].get('lp@acme', []) if r['scope']=='user']; print($1)" "$SB/.claude/plugins/installed_plugins.json"
 }
@@ -228,6 +231,121 @@ EDN
   STUB_FAIL_ADD=1 apply
   [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a failed add exited $code"; }
   cmp -s "$SB/.claude/settings.json" "$SB/settings-before.json" || fail "a failed add left the settings changed"
+)
+
+echo "11. :version :latest follows the marketplace; a row without :version keeps presence only"
+(
+  SB="$SB/latest"; stub_home "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
+  market "$SB" 1.0.0
+  first=$(git -C "$SB/remotes/acme/market.git" rev-parse main)
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme" :version :latest}}}
+EDN
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt" "$SB/claude-calls.log"; fail "install with :version :latest failed: exit $code"; }
+  [ "$(record 'rows[0]["version"]')" = 1.0.0 ] || fail "not installed at 1.0.0"
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after install: exit $code"; }
+  market "$SB" 1.1.0
+  new=$(git -C "$SB/remotes/acme/market.git" rev-parse main)
+  plan
+  [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a newer marketplace is not drift: exit $code"; }
+  grep -q "version: \"1.0.0\" -> \"latest @ ${new:0:7}\"" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "no version diff"; }
+  grep -q "claude plugin marketplace update acme" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "no marketplace refresh planned"; }
+  grep -q "claude plugin update --scope user -y lp@acme" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "no plugin update planned"; }
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "update failed: exit $code"; }
+  [ "$(record 'rows[0]["version"]')" = 1.1.0 ] || { cat "$SB/.claude/plugins/installed_plugins.json"; fail "not updated to 1.1.0"; }
+  [ "$(record 'rows[0]["gitCommitSha"]')" = "$new" ] || fail "install record is not at the marketplace's new commit"
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after the update: exit $code"; }
+  # a catalog already refreshed on disk names the version itself
+  market "$SB" 1.2.0
+  (cd "$SB" && claude plugin marketplace update acme >/dev/null)
+  plan
+  grep -q 'version: "1.1.0" -> "1.2.0"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the refreshed catalog's version is not shown"; }
+
+  echo "12. a pinned :version installs exactly that version; one the marketplace lacks fails"
+  sed -i.bak 's/:version :latest/:version "1.1.0"/' "$SB/agents.edn"
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "a pin on the installed version is drift: exit $code"; }
+  sed -i.bak 's/:version "1.1.0"/:version "1.0.0"/' "$SB/agents.edn"
+  plan
+  [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a pin off the installed version is not drift"; }
+  grep -q 'version: "1.1.0" -> "1.0.0"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "no version diff for the pin"; }
+  grep -q "offers 1.2.0" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not say the marketplace lacks the pin"; }
+  apply
+  [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "installing an unoffered pin exited $code"; }
+  grep -q "pin it with :ref" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the failure does not say why"; }
+  [ "$(record 'rows[0]["version"]')" = 1.1.0 ] || fail "a refused pin changed the install"
+  git -C "$SB/remotes/acme/market.git" tag v1.0.0 "$first"
+  sed -i.bak 's/:version "1.0.0"}/:version "1.0.0" :ref "v1.0.0"}/' "$SB/agents.edn"
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "pinning through :ref failed: exit $code"; }
+  [ "$(record 'rows[0]["version"]')" = 1.0.0 ] || { cat "$SB/.claude/plugins/installed_plugins.json"; fail "not at the pinned version"; }
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "pinned install not converged: exit $code"; }
+
+  echo "13. without :version, a newer marketplace is not drift"
+  sed -i.bak 's/ :version "1.0.0" :ref "v1.0.0"}/}/' "$SB/agents.edn"
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "dropping :version and :ref failed: exit $code"; }
+  market "$SB" 1.3.0
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "a row without :version reported drift: exit $code"; }
+)
+
+echo "14. a source switch at an unchanged version reinstalls from the new source"
+(
+  SB="$SB/switch"; stub_home "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
+  market "$SB" 1.0.0
+  market "$SB" 1.0.0 dev
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme"}}}
+EDN
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "install failed: exit $code"; }
+  sed -i.bak 's/:marketplace "acme"}/:marketplace "acme" :ref "dev"}/' "$SB/agents.edn"
+  plan
+  grep -q "claude plugin uninstall --scope user -y lp@acme" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "no reinstall planned"; }
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "the switch failed: exit $code"; }
+  [ "$(record 'rows[0]["gitCommitSha"]')" = "$(git -C "$SB/remotes/acme/market.git" rev-parse dev)" ] \
+    || { cat "$SB/.claude/plugins/installed_plugins.json"; fail "the plugin still comes from the old source"; }
+  grep -q " dev " "$(record 'rows[0]["installPath"]')/README.md" || fail "the cached copy is the old one"
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after the switch: exit $code"; }
+)
+
+echo "15. :build runs once per new install path; a failing build fails apply! and claims nothing"
+(
+  SB="$SB/build"; stub_home "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
+  market "$SB" 1.0.0
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme" :version :latest :build "exit 3"}}}
+EDN
+  apply
+  [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a failing build exited $code"; }
+  owned lp && { cat "$SB/.config/agentctl/state.edn"; fail "ownership claimed for a failed build"; }
+  plan
+  [ "$code" = 2 ] && grep -q "sh -c exit 3" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the failed build is not planned again"; }
+  sed -i.bak 's/:build "exit 3"/:build "echo built >> BUILT"/' "$SB/agents.edn"
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "build failed: exit $code"; }
+  dir=$(record 'rows[0]["installPath"]')
+  [ "$(cat "$dir/BUILT")" = built ] || fail "the build did not run in the install path"
+  owned lp || { cat "$SB/.config/agentctl/state.edn"; fail "a built plugin is not owned"; }
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "a built plugin is drift: exit $code"; }
+  market "$SB" 1.1.0
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "update with a build failed: exit $code"; }
+  new=$(record 'rows[0]["installPath"]')
+  [ "$new" != "$dir" ] && [ "$(cat "$new/BUILT")" = built ] || fail "the new install path was not built once"
+  [ "$(cat "$dir/BUILT")" = built ] || fail "the old install path was built again"
 )
 
 echo "all plugin e2e checks passed"
