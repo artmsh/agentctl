@@ -41,28 +41,41 @@
           (str s)
           (sort-by (comp - count) (distinct (remove str/blank? (map str values))))))
 
+(defn- value-arg
+  "An argv element carrying an env or header value (`prefix` is `K=` or
+   `k: `), and what a message may show of it: the value masked where it
+   sits, never searched for elsewhere in the text."
+  [prefix v]
+  {:arg (str prefix v) :shown (str prefix (refs/mask v))})
+
+(defn- arg-text [a] (if (map? a) (:arg a) a))
+(defn- arg-shown [a] (if (map? a) (:shown a) a))
+
 (defn- ok!
   "Turn a non-zero CLI exit into a real failure, so apply! reports the op as
    failed and claims no ownership of what the CLI never wrote — a server it
    refused to add, a plugin it never installed.
 
    The message names the command, and `claude mcp add` carries its env and
-   header values on the command line, where the CLI may echo them back:
-   `secrets` are masked wherever they appear, since the message is printed,
-   and served to the GUI."
+   header values on the command line, where the CLI may echo them back. The
+   message is printed and served to the GUI, so a value in the command
+   (`value-arg`) is shown masked where it sits, and in the CLI's own output
+   each of `secrets` is masked wherever it appears. Only secrets are looked
+   for there: masking every value would turn a plain `s` into a row of
+   asterisks inside every word that holds one."
   ([result argv] (ok! result argv nil))
   ([{:keys [exit err out]} argv secrets]
    (when-not (zero? exit)
-     (let [argv (mapv #(hide % secrets) argv)]
-       (throw (ex-info (str (str/join " " argv) " failed: "
+     (let [shown (mapv arg-shown argv)]
+       (throw (ex-info (str (str/join " " shown) " failed: "
                             (hide (first (remove str/blank? [err out])) secrets))
-                       {:exit exit :argv argv}))))
+                       {:exit exit :argv shown}))))
    true))
 
 (defn- claude-ok!
   "Run the claude CLI and fail on a non-zero exit."
   ([argv] (claude-ok! argv nil))
-  ([argv secrets] (ok! (claude-sh argv) argv secrets)))
+  ([argv secrets] (ok! (claude-sh (mapv arg-text argv)) argv secrets)))
 
 (def setting-keys
   {:model :model
@@ -305,6 +318,8 @@
     :env (key-names (:env entry))
     :headers (key-names (:headers entry))}))
 
+(declare declared-secret-keys)
+
 (defn- resolve-mcp
   "A server's env and headers with every ref resolved, and the refs that did
    not resolve: a server holding one is not written, and not approved."
@@ -314,6 +329,18 @@
     {:env env
      :headers headers
      :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))}))
+
+(defn- restore-user-mcp!
+  "Put back a user-wide server's entry as it was before the update removed
+   it, after `claude mcp add` refused the new one: otherwise a failed update
+   would uninstall the server. Says what happened, for the failure message."
+  [nm prev]
+  (try
+    (u/write-json! runtime-file (assoc-in (or (u/read-json runtime-file) {}) [:mcpServers (keyword nm)] prev))
+    "the previous definition was restored"
+    (catch Exception e
+      (str "restoring the previous definition failed too (" (ex-message e) "); ~/.claude.json is backed up in "
+           (u/tilde (u/backup-dir))))))
 
 (defn mcp-ops [cfg st]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
@@ -343,21 +370,33 @@
                    :diffs (plan/field-diffs (or have {}) want)
                    :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                    :exec! (fn []
-                            (when cur
-                              ;; the remove drops what the add may fail to put back
-                              (u/backup! runtime-file)
-                              (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                            (let [prev (when cur (get (current-mcps) (keyword nm)))]
+                              (when prev
+                                ;; the remove drops what the add may fail to put back
+                                (u/backup! runtime-file)
+                                (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                              (try
                             (claude-ok!
                              (vec (if (= :http (:transport m))
                                     (concat ["claude" "mcp" "add" "--scope" "user"
                                              "--transport" "http" nm (:url m)]
-                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)])
+                                            (mapcat (fn [[k v]] ["--header" (value-arg (str k ": ") v)])
                                                     (merge carried (:values headers))))
                                     (concat ["claude" "mcp" "add" "--scope" "user" nm]
-                                            (mapcat (fn [[k v]] ["-e" (str k "=" v)])
+                                            (mapcat (fn [[k v]] ["-e" (value-arg (str k "=") v)])
                                                     (merge carried (:values env)))
                                             ["--"] [(:command m)] (:args m))))
-                             (concat (vals (:values env)) (vals (:values headers)) (vals carried))))})))
+                             ;; what the CLI may echo back: the values from a secret
+                             ;; ref or shaped like one, and every value carried over,
+                             ;; whose origin nothing records
+                             (concat (vals (select-keys (:values env) (declared-secret-keys (:env m))))
+                                     (vals (select-keys (:values headers) (declared-secret-keys (:headers m))))
+                                     (vals carried)))
+                                (catch clojure.lang.ExceptionInfo e
+                                  (throw (if prev
+                                           (ex-info (str (ex-message e) " — " (restore-user-mcp! nm prev))
+                                                    (ex-data e))
+                                           e))))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
@@ -730,10 +769,14 @@
     (concat
      ;; a copy left behind in .mcp.json still ships the server — and its token —
      ;; to everyone who clones the repo. Not ours to delete: agentctl never
-     ;; wrote it, and the file may hold servers it knows nothing about
+     ;; wrote it, and the file may hold servers it knows nothing about. A copy
+     ;; agentctl did write there is pruned by this same plan
+     ;; (`project-mcp-prune-ops`), and needs no warning
      (for [[mid m] (common/project-mcps cfg proj tool)
+           :let [oid (keyword (str (name id) "/" (name mid)))]
            :when (and (not= :project (:scope m))
-                      (contains? tracked (keyword (u/kw->str mid))))]
+                      (contains? tracked (keyword (u/kw->str mid)))
+                      (not= :project (:scope (state/entry st tool :mcps oid))))]
        (plan/op {:action :noop :warn true :tool tool :kind :mcps :project id
                  :id (keyword (str (name id) "/" (name mid)))
                  :summary (str "⚠ also declared in " (u/tilde (project-mcp-file proj))

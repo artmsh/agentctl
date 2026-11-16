@@ -27,18 +27,6 @@
 (def notes (atom []))
 (defn- note! [s] (swap! notes conj s) nil)
 
-(defn- redact-map
-  "Replace secret-shaped values with bw placeholders."
-  [scope m]
-  (into {}
-        (map (fn [[k v]]
-               [k (if (refs/secret-shaped? k v)
-                    (do (note! (str "redacted " scope "." (u/kw->str k)
-                                    " -> create bitwarden item `" scope "` field `" (u/kw->str k) "`"))
-                        (refs/redact scope k))
-                    v)]))
-        m))
-
 (defn- env-ref?
   "A whole `$VAR` reference: it names where a value lives, and is no secret."
   [v]
@@ -55,6 +43,39 @@
   (into {}
         (map (fn [[k v]]
                [k (if (env-ref? v)
+                    v
+                    (do (note! (str "redacted " scope "." (u/kw->str k)
+                                    " -> create bitwarden item `" scope "` field `" (u/kw->str k) "`"))
+                        (refs/redact scope k)))]))
+        m))
+
+(def ^:private plain-env-words
+  "Values common enough as settings, and short enough, to be no one's secret."
+  #{"true" "false" "yes" "no" "on" "off" "enabled" "disabled"
+    "trace" "debug" "info" "warn" "warning" "error" "fatal" "silent" "verbose" "quiet"
+    "fast" "slow" "dev" "development" "prod" "production" "test" "staging" "local"})
+
+(defn- plain-env-value?
+  "Whether an env value is provably no secret: a reference to where the value
+   lives, a small number, or a common settings word. agentctl writes env
+   resolved, so anything else read back may be a secret under any name."
+  [v]
+  (or (boolean? v)
+      (and (number? v) (< -100000 v 100000))
+      (and (string? v)
+           (or (env-ref? v)
+               (re-matches #"-?\d{1,5}" v)
+               (contains? plain-env-words (str/lower-case v))))))
+
+(defn- redact-env
+  "Every env value as a bw placeholder, unless it is provably no secret
+   (`plain-env-value?`). A credential-shaped name is the weak test: a token
+   under `DOCS_AUTH` or inside `UPSTREAM` looks like nothing, and import
+   writes a file people commit."
+  [scope m]
+  (into {}
+        (map (fn [[k v]]
+               [k (if (plain-env-value? v)
                     v
                     (do (note! (str "redacted " scope "." (u/kw->str k)
                                     " -> create bitwarden item `" scope "` field `" (u/kw->str k) "`"))
@@ -125,7 +146,7 @@
                                                         ;; next apply! prune it
                                                         (= :env dk)
                                                         (when (and (map? v) (seq v))
-                                                          [dk (redact-map "claude-env"
+                                                          [dk (redact-env "claude-env"
                                                                           (into (sorted-map) (map (fn [[ek ev]] [(u/key-str ek) ev])) v))])
                                                         (map? v) nil
                                                         :else [dk v]))))
@@ -224,7 +245,7 @@
       :command (or (:command t) (:command entry))
       :args (not-empty (vec (or (:args t) (:args entry))))
       :url (or (:url t) (:url entry))
-      :env (not-empty (redact-map nm (or (:env t) (:env entry))))
+      :env (not-empty (redact-env nm (or (:env t) (:env entry))))
       ;; an http server's whole credential rides in a header — left
       ;; unmodelled it would land in :extra verbatim
       :headers (not-empty (redact-headers nm (or (:headers t) (:http_headers t) (:headers entry))))

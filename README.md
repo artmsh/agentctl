@@ -15,8 +15,7 @@
 > **Alpha.** Config keys change without migration: `:#let` became `:#def` with no alias, and an
 > old file's `$name` references fall back to environment variables. 170 unit tests and five
 > end-to-end suites pass in CI, but no `apply!` over a whole config on a real home has been done
-> yet. Beta when that run is verified and no adapter drops an MCP secret silently when a
-> Bitwarden vault is locked (see [Limitations](#limitations)).
+> yet. Beta when that run is verified.
 
 ## Rationale
 
@@ -56,7 +55,8 @@ segment.
   Claude Code and Codex; vendor hooks in the same file are left alone ([hooks](docs/GUIDE.md#hooks)).
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
-  values and every MCP header; review its output before sharing a config.
+  values, every MCP header, and every env value it cannot show is no secret; review its output
+  before sharing a config.
 
 ## Comparison
 
@@ -161,11 +161,6 @@ releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describ
   server is skipped for them with a warning.
 - The DeepSeek Harness keeps settings, MCP servers and providers in Cordis patch files that
   agentctl does not write; `:dsh` entries there are reported by `validate` and the plan.
-- Pi, OMP, Kimi and Antigravity still write an MCP server without the header or env var whose
-  secret did not resolve (a locked vault, an unset variable), and the next `apply` shows no
-  drift. Codex leaves a project server, or a user-wide server's headers, untouched in that case
-  but still exits 0, and drops an unresolved `:env` from a user-wide server. Claude holds the
-  server back and `apply!` exits 1 ([unresolved secrets](docs/GUIDE.md#unresolved-secrets)).
 - Removing a project from the config leaves its project-scoped MCP entries behind.
 
 ## Development

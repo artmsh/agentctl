@@ -405,8 +405,9 @@ the private one.
 
 When a reference does not resolve — the vault is locked, the variable is unset,
 the Bitwarden field is empty or holds the text `null`, the variable, file or
-command yields nothing but whitespace, the reference is malformed — Claude's server, or the settings `env` object, is not written at
-all, in any scope. Writing the rest of it would leave a server that is
+command yields nothing but whitespace, the reference is malformed — the MCP server, the
+provider, or Claude's settings `env` object holding it is not written at all, in
+any scope and for every tool. Writing the rest of it would leave a server that is
 configured and cannot authenticate, and because the missing value would then be
 missing from the desired entry too, the next plan would report no drift. The plan
 names the server, the key and the reason instead:
@@ -420,14 +421,16 @@ Every other change in the run still applies. `apply` exits 2 while such a server
 remains and `apply!` exits 1, listing what it held back, so a partial run is never
 reported as converged. A server held back this way is not recorded as owned: one
 that never got written cannot be pruned later, and a hand-made server of the same
-name stays the user's.
+name stays the user's. The GUI asks the vault again for every plan, so unlocking
+it or rotating a secret shows without restarting `agentctl gui`.
 
 For a user-wide server, whose secret `claude mcp add` stores and agentctl does
 not read back, drift is decided by the env and header *names*: a declared name
 missing from `~/.claude.json` is drift, a changed value is not. A name added by
 hand, such as an `Authorization` header, is not drift either. `claude mcp add`
 cannot edit an entry, so an update removes the server and adds it again, after
-backing up `~/.claude.json`; the add carries every env var (stdio) or header
+backing up `~/.claude.json`. If the add fails, the previous entry is put back
+and the op fails, naming both. The add carries every env var (stdio) or header
 (http) the declaration does not name, so a hand-added one survives. A name
 agentctl declared and the declaration has since dropped is removed: the
 manifest records the names each server declares.

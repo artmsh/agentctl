@@ -658,7 +658,7 @@ the entire project declaration still prunes entries agentctl wrote there.
 
 A user-wide server is written with `claude mcp add`, which cannot edit an
 entry: an update removes the server and adds it again, after backing up
-`~/.claude.json`. Drift there is a declared env or header name the entry lacks,
+`~/.claude.json`, and puts the previous entry back if the add fails. Drift there is a declared env or header name the entry lacks,
 never a value and never a name added by hand, and the add carries every env var
 or header the declaration does not name, so a hand-added `Authorization`
 survives. A name agentctl declared and the declaration has since dropped is
@@ -739,7 +739,10 @@ Anything beyond that (env, cwd, per-tool selection) needs the map form.
 placeholder: agentctl writes headers resolved, and the value on disk says
 nothing about whether it was a secret. A whole `$VAR` header is kept. Env
 values, an MCP server's and Claude's settings `env` (`!bw://claude-env/<NAME>`),
-are redacted when they look like a credential.
+are redacted the same way unless they are provably no secret: a whole `$VAR`, a
+boolean, a number of up to five digits, or a common settings word such as
+`debug` or `fast`. A token under a plain name, `DOCS_AUTH` or `UPSTREAM`, is a
+placeholder too, and the import notes list each vault field to fill in.
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
@@ -960,7 +963,9 @@ A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
 `$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
 A field name the item does not have is missing too: a misspelt field never
-falls back to the login password. Claude's
+falls back to the login password. When the item has a login, `validate` and the
+plan say so — `did you mean item/password?` — since a ref that read the
+password through that fallback now needs the field named. Claude's
 settings `:env` takes the same forms as an MCP server's `:env`. A Claude MCP
 server or settings `env` with any ref that does not resolve is held back whole,
 as [GUIDE.md](GUIDE.md#unresolved-secrets) describes; a resolved one is printed

@@ -81,12 +81,14 @@
     (concat
      (keep (fn [[id m]]
              (let [secret? (common/holds-secret? (merge (:env m) (:headers m)))]
-               (plan/json-set-op {:tool tool :kind :mcps :id id
-                                  :file mcp-file
-                                  :path [:mcpServers (keyword (u/kw->str id))]
-                                  :value (mcp-entry m (get current (keyword (u/kw->str id))))
-                                  :risk (if secret? :secret :low)
-                                  :summary (common/mcp-summary m)})))
+               (if-let [issues (seq (common/mcp-issues m))]
+                 (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
+                 (plan/json-set-op {:tool tool :kind :mcps :id id
+                                    :file mcp-file
+                                    :path [:mcpServers (keyword (u/kw->str id))]
+                                    :value (mcp-entry m (get current (keyword (u/kw->str id))))
+                                    :risk (if secret? :secret :low)
+                                    :summary (common/mcp-summary m)}))))
            desired)
      (keep (fn [id]
              (when (and (nil? (namespace id))
