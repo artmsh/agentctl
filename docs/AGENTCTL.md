@@ -744,6 +744,8 @@ end up writing a resolved secret into a tool's config file are tagged
 -y, --yes          apply!: skip the confirmation prompt
     --port N       gui: listen on this port (default: any free one)
     --no-open      gui: do not open a browser
+    --debug        on an error, also print its stack trace to stderr (so does
+                   AGENTCTL_DEBUG=1); stdout keeps the one error line or document
 ```
 
 ### Reading a plan

@@ -658,7 +658,8 @@ stdout with that document, so `apply! --json` needs `-y`. An error is
 `{"error": …}` with exit 1 instead — a config with errors carries its
 `findings` too; an unknown command or option, or a config file missing,
 unreadable or not a file, only the message. Without `--json` the same errors
-are one `error: …` line.
+are one `error: …` line. `--debug`, or `AGENTCTL_DEBUG=1`, also prints the error's
+stack trace to stderr, leaving stdout as it is.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a

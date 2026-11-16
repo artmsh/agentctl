@@ -83,6 +83,8 @@
     "  -y, --yes            apply!: do not prompt before mutating"
     "      --port N         gui: listen on this port (default: any free one)"
     "      --no-open        gui: do not open a browser"
+    "      --debug          On an error, also print its stack trace to stderr"
+    "                       (so does AGENTCTL_DEBUG=1)"
     "  -h, --help           This message"
     ""
     "SCOPE"
@@ -113,6 +115,7 @@
         "--host" (recur (drop 2 args) (assoc opts :host (keyword (second args))))
         "--port" (recur (drop 2 args) (assoc opts :port (str (second args))))
         "--no-open" (recur (rest args) (assoc opts :no-open true))
+        "--debug" (recur (rest args) (assoc opts :debug true))
         ("-h" "--help") (recur (rest args) (assoc opts :help true))
         (cond
           ;; a mistyped flag must not fall through as an argument: `--onyl x`
@@ -430,6 +433,12 @@
                                                " leaves no " (name kind) " to select") {}))
                           :else [kind id]))))))
 
+(defn- debug?
+  "`--debug`, or `AGENTCTL_DEBUG` set to anything but empty, 0 or false."
+  [opts]
+  (or (:debug opts)
+      (not (contains? #{nil "" "0" "false"} (System/getenv "AGENTCTL_DEBUG")))))
+
 (def ^:private commands
   #{"apply" "plan" "apply!" "validate" "import" "import!" "state" "gui"})
 
@@ -475,4 +484,7 @@
             (println (if (:json opts)
                        (json/generate-string {:error msg} {:pretty true})
                        (str "error: " msg))))
+          ;; the one line is the answer; the trace is for whoever has to
+          ;; find out why, and goes where it cannot break stdout
+          (when (debug? opts) (.printStackTrace e))
           (System/exit 1))))))
