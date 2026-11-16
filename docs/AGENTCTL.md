@@ -674,6 +674,27 @@ or WSL's bash. Hence `powershell.exe` with an `-EncodedCommand` bootstrap that r
 stdin. Scripts are ASCII, with paths and contents in base64, since PowerShell 5.1 reads
 stdin in the OEM codepage. An operation that does not end with a final `OK` line failed.
 
+### `:statusline`
+
+```clojure
+{:statusline {:defaults {:segments [:model :context] :context-style :full
+                         :warning-percent 50 :critical-percent 80}
+              :agents {:pi {:segments [:model :context :cost]}}
+              :bin "~/.local/bin/agent-statusline"}}  ; optional, agentctl's own
+```
+
+The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
+`~/.config/agent-statusline/config.json`, written whole and owned like any other
+resource by path. Keys are the renderer's JSON keys in kebab-case, keyword values
+become strings and `nil` becomes `null` (shown `∅` in a plan). Nothing else is
+interpreted: the renderer's `--check` decides what is valid. Its ops are
+`agentctl statusline/config`, selected by `-k statusline` (which `-t` does not
+narrow) and never by `-t` alone. A symlinked file is replaced, never written through,
+and `import` reads the file back. An `:awl` override plans nothing for awl,
+which reads the same file only when built with `-Dstatusline`. `validate` and
+`apply` report whether the `awl` on `PATH` was built that way. See
+[the guide](GUIDE.md#shared-status-line) for validation, paths, ownership and awl.
+
 ### Secret references
 
 | Form | Meaning |
@@ -852,6 +873,15 @@ that cache and reports `unknown` if none exists yet. A violation in a key
 agentctl itself manages is an `error`; anything else in the file (it is
 otherwise hand-curated) is a `warn` and never fails the exit code.
 
+`STATUSLINE` is the renderer's own verdict on `:statusline`, from
+`agent-statusline --check` run on the candidate JSON. A rejection is an `error`
+that also stops `apply`, or a `warn` on a run narrowed so that it cannot write the
+file. A missing renderer, or one without `--check`, is
+`unknown`, and a renderer that would read a different file in this environment
+is a `warn`. With an `:awl` override it also says whether the `awl` on `PATH`
+links the renderer (`ok`), does not (`warn`), or cannot be inspected (`warn`).
+All of this describes this machine, so `validate --host` leaves it out.
+
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers
 only in part, is `unknown`, and its drift is not reported as clean.
@@ -902,6 +932,11 @@ tests/run.sh                       # unit, e2e, extensions and hosts, in a scrat
 (`AGENTCTL_SSH_CMD`). No runner has PowerShell, so the Windows scripts are unit-tested
 as text only and need a live pass against a Windows host, under a scratch `:home`,
 whenever they change.
+
+`tests/test-statusline.sh` validates through `tests/statusline-stub`, which answers
+`--check` with the renderer's diagnostic names for the inputs the tests feed it.
+`AGENTCTL_TEST_STATUSLINE_BIN=<built agent-statusline>` runs the same assertions
+against the real renderer.
 
 Use this runner even for local verification. It sets `AGENTCTL_HOME` before
 loading the code and supplies all six CLI stubs; running the unit file directly

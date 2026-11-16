@@ -184,6 +184,10 @@ every tool that supports the kind.
 | `:trust` | mark a path trusted | `{:trust true :in ["Brain" "projects"]}` |
 | `:hooks` | Claude Code hooks | `{:hooks {…} :tools [:claude] :in :all}` |
 
+`:extensions`, `:hosts` and `:statusline` are not entities. Each is placed once
+for the whole machine (or, for a host, for that machine), takes no `:in`, and is
+read off the file as written rather than lowered with the vectors above.
+
 `:settings` covers the unified-vs-per-CLI split the current `:executors` map
 handles by nesting. Unified keys (`:model`, `:thinking`, `:on`/`:off`) are
 translated per tool; a key one CLI does not know is still reported as an

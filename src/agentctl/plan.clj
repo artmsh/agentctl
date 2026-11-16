@@ -52,6 +52,16 @@
          :when (not= (u/norm b) (u/norm a))]
      {:key k :before b :after a})))
 
+(defn- map-fields
+  "The fields under a map in a diff. A map created whole lists every key it
+   holds, null ones included: a key set to null is a declaration (an override
+   that inherits its default), and `field-diffs` — which cannot tell an absent
+   key from a null one — would show the new map as empty."
+  [b a]
+  (if (nil? b)
+    (for [[k v] (u/norm (or a {}))] {:key k :before nil :after v})
+    (field-diffs (u/norm b) (u/norm (or a {})))))
+
 (defn- diff-action [b a]
   (cond (nil? b) :create (nil? a) :delete :else :update))
 
@@ -68,7 +78,7 @@
       (cons (colorize act (str indent (sigil act) " " (u/kw->str k)))
             (mapcat (fn [{:keys [key before after]}]
                       (render-diff (str indent "  ") key before after))
-                    (field-diffs (u/norm (or b {})) (u/norm (or a {})))))
+                    (map-fields b a)))
       [(colorize act
                  (str indent (sigil act) " " (u/kw->str k) ": "
                       (case act
@@ -135,7 +145,7 @@
              (= (u/kw->str (:key (first ds))) (name (:id o)))
              (plain-map? (:after (first ds))))
       (let [{:keys [before after]} (first ds)]
-        [true (field-diffs (u/norm (or before {})) (u/norm (or after {})))])
+        [true (map-fields before after)])
       [false ds])))
 
 (defn- render-cmd
@@ -151,7 +161,9 @@
         line (colorize (:action o) (head-line (:action o) o [(id-str (:id o))]))
         detail (when (and (:summary o) (not cmds)) (str "    " (:summary o)))
         note (when (:note o) (str "    " (:note o)))
-        diffs (when (or verbose (= :update (:action o)))
+        ;; `:preview` — an op whose diff *is* the change (a whole file
+        ;; written) shows it on create too, not only under -v
+        diffs (when (or verbose (= :update (:action o)) (:preview o))
                 (mapcat (fn [{:keys [key before after]}]
                           (render-diff "      " key before after))
                         (second (op-diffs o))))
@@ -413,7 +425,7 @@
       (cons {:action (name act) :depth depth :key (u/kw->str k)}
             (mapcat (fn [{:keys [key before after]}]
                       (diff-rows (inc depth) key before after))
-                    (field-diffs (u/norm (or b {})) (u/norm (or a {})))))
+                    (map-fields b a)))
       [{:action (name act) :depth depth :key (u/kw->str k)
         :before (when-not (= :create act) (render-val k b))
         :after (when-not (= :delete act) (render-val k a))}])))

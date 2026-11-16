@@ -17,6 +17,7 @@
             [agentctl.skills-cli :as skills-cli]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [babashka.fs :as fs]
             [clojure.string :as str]))
@@ -40,11 +41,12 @@
 
 (def kinds
   "Every kind an op can carry: the DSL's sections and every kind a tool is
-   provisioned with. An old-format config plans a project's trust and
-   settings as `:projects`, and extensions have no DSL section. `-k` and
+   provisioned with, plus the shared status-line file, which belongs to no
+   tool. An old-format config plans a project's trust and settings as
+   `:projects`, and extensions have no DSL section. `-k` and
    `--only` are checked against this, because a kind no op carries selects
    nothing, and an empty plan reads exactly like a converged machine."
-  (vec (sort (into (set scope/kinds) (mapcat val config/capabilities)))))
+  (vec (sort (conj (into (set scope/kinds) (mapcat val config/capabilities)) statusline/kind))))
 
 (defn kind-problem
   "Why `k` is no kind to select."
@@ -480,6 +482,7 @@
                                                        tool-ops))
                 ;; after the user-wide installs they check for
                 (:ops dups)
+                (statusline/plan-ops cfg st opts)
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
@@ -511,6 +514,9 @@
    so it can never be mistaken for the user-wide server of the same name and
    pruned out from under a tool that still uses it."
   [cfg]
+  (concat
+   ;; the status-line file belongs to no CLI, so no executor selects it
+   (statusline/inventory cfg)
   (filter
    (comp (set (config/active-tools cfg)) first)
    (concat
@@ -559,12 +565,12 @@
      [t :extensions id {:root (:root e) :default-tools (vec (:default-tools e))}])
    (for [[id m] (:memory cfg) t (:tools m)] [t :memory id])
    (for [[id p] (:projects cfg) t (:for-tools p)]
-     [t :projects id {:entity-id id :project-id id :project-path (:path p)}]))))
+     [t :projects id {:entity-id id :project-id id :project-path (:path p)}])))))
 
 (def ^:private field-kinds
   "Kinds whose op ids name a field or a file, not a declared entity, so there
    is no declaration to check an `--only` id against."
-  #{:settings :permissions :trust :projects})
+  #{:settings :permissions :trust :projects :statusline})
 
 (defn unmatched-only
   "`--only` selectors whose id names nothing declared or owned, as written.

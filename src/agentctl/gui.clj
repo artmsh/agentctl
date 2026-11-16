@@ -15,6 +15,7 @@
             [agentctl.form :as form]
             [agentctl.plan :as plan]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [cheshire.core :as json]
             [clojure.java.io :as io]
@@ -60,7 +61,8 @@
   [text path opts]
   (try
     (let [cfg (config/parse-config (buffer-text text) path)
-          findings (config/structural-findings cfg)
+          ;; the GUI plans this machine, so this machine's findings too
+          findings (concat (config/structural-findings cfg) (statusline/findings cfg opts))
           errors (filter #(= :error (:level %)) findings)]
       (if (seq errors)
         {:ok false

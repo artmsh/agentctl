@@ -8,6 +8,7 @@
             [agentctl.plan :as plan]
             [agentctl.remote :as remote]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [agentctl.validate :as validate]
             [cheshire.core :as json]
@@ -130,9 +131,11 @@
        " (--all for the whole config)")))
 
 (defn- check-config!
-  "Refuse a config with errors; say what is merely odd about one without."
-  [cfg]
-  (let [findings (config/structural-findings cfg)
+  "Refuse a config with errors; say what is merely odd about one without.
+   `findings` are the config's structural ones unless given: a local run
+   also checks what this machine says, once it knows its scope."
+  [cfg & [findings]]
+  (let [findings (or findings (config/structural-findings cfg))
         errors (filter #(= :error (:level %)) findings)]
     (when (seq errors)
       (println "config errors — refusing to plan:")
@@ -221,6 +224,9 @@
           scope (when-not (or (:all opts) (:user opts) (seq (:only opts)) (seq (:projects opts)))
                   (core/cwd-scope cfg (System/getProperty "user.dir")))
           opts (cond-> opts scope (assoc :projects (:projects scope)))
+          ;; this machine's verdict on the status-line file; a run that
+          ;; cannot write the file gets it as a warning
+          _ (check-config! cfg (vec (statusline/findings cfg opts)))
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)
