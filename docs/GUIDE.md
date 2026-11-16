@@ -142,7 +142,9 @@ format has, `--help` marks `projects` as legacy, `--host` runs are held to the
 same rule, and the GUI refuses the same kinds for the buffer it plans. A
 config with nothing that decides the format yet — `{}`, or only `:statusline`,
 `:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
-and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+and is reported with `⚠`, naming no format. Such a config declares nothing,
+so a DSL config emptied to `{}` prunes what it wrote — trust, settings,
+permissions — as `{:mcps []}` does. An `--only` or `-p` that nothing
 declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
 because a run narrowed to a typo plans nothing and would otherwise read as
 converged.
@@ -921,7 +923,8 @@ stdout with that document, so `apply! --json` needs `-y`. An error is
 `{"error": …}` with exit 1 instead — a config with errors carries its
 `findings` too; an unknown command or option, or a config file missing,
 unreadable or not a file, only the message. Without `--json` the same errors
-are one `error: …` line.
+are one `error: …` line. `--debug`, or `AGENTCTL_DEBUG=1`, also prints the error's
+stack trace to stderr, leaving stdout as it is.
 
 A skill whose source is not on disk, such as a `:per-tool :path` into a
 project copy that has since gone, is not linked: the plan says `source

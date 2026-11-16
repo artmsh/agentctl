@@ -47,10 +47,22 @@
       (set (keep (fn [k] (when-let [native (get mapping k)]
                           (u/kw->str (if (vector? native) (last native) native)))) (keys settings))))))
 
+(defn- tracked?
+  "Does `cfg` answer for the writes recorded here? An entity-DSL config does:
+   its placements say what it still declares. So does a config that declares
+   nothing in either format (`{}`, only format-neutral keys): it is read the
+   old way, but it declares none of what a DSL config wrote, and every such
+   write is one to prune. An old-format config has no placements to compare
+   with — it would disown everything, including what it declares the old
+   way — so it leaves them alone."
+  [cfg]
+  (or (:entity-dsl? cfg)
+      (and (contains? cfg :format) (nil? (:format cfg)))))
+
 (defn record
   "Keep the exact destinations of successful writes; planning never claims ownership."
   [st cfg failed done]
-  (if-not (:entity-dsl? cfg) st
+  (if-not (tracked? cfg) st
     (let [st (assoc st :placements (merge (:placements st) (placements cfg)))]
       (reduce
        (fn [s o]
@@ -75,7 +87,7 @@
              :else s))) st (:planned-ops cfg)))))
 
 (defn prune-ops [cfg st]
-  (when (:entity-dsl? cfg)
+  (when (tracked? cfg)
     (keep
      (fn [[_ o]]
        (when (or (empty? (owners cfg o))

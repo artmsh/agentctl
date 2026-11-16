@@ -327,4 +327,33 @@ grep -q 'clone' "$SB/out" || fail "pack of an awl-only skill not fetched: $(cat 
 expect 0 apply! $W -y
 converged
 
+echo "25. apply! --host --json -y prints one document with what it applied"
+JH="$SB/json-host"; JFAR="$JH/far"
+mkdir -p "$JH/pack/one" "$JFAR"
+printf -- '---\nname: one\ndescription: O.\n---\n' > "$JH/pack/one/SKILL.md"
+cat > "$JH/agents.edn" <<EDN
+{:hosts {:jbox {:ssh "jbox" :os :linux :home "$JFAR"
+                :skill-packs {[:uri "file://$JH/pack"] {:acli [:codex]}}}}}
+EDN
+jh_json() { # jh_json <out>: apply! --json -y on jbox exits 0
+  set +e
+  AGENTCTL_HOME="$JH" run apply! -f "$JH/agents.edn" --host jbox --json -y > "$1" 2> "$1.err"; local code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$1" "$1.err" >&2; fail "apply! --host --json -y exited $code"; }
+}
+jh_json "$JH/first.json"
+python3 - "$JH/first.json" <<'PY' || { cat "$JH/first.json" >&2; fail "apply! --host --json did not report what it applied"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["host"] == "jbox", d
+assert any(o["kind"] == "skills" and o["id"] == "one" and o["action"] == "create" for o in d["ops"]), d
+assert d["applied"]["failed"] == [], d
+assert any(o["tool"] == "codex" and o["kind"] == "skills" and o["id"] == "one" for o in d["applied"]["done"]), d
+assert d["backups"] and d["summary"] and d["findings"] == [] and d["warnings"] == [], d
+PY
+[ -f "$JFAR/.codex/skills/one/SKILL.md" ] || fail "apply! --host --json -y did not copy the skill"
+jh_json "$JH/again.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["applied"] == {"done": [], "failed": []} else 1)' "$JH/again.json" \
+  || { cat "$JH/again.json" >&2; fail "a converged apply! --host --json reported something applied"; }
+
 echo "hosts e2e OK"
