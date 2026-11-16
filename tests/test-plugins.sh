@@ -154,4 +154,80 @@ installed "lp@localmkt" "$SB/local" || fail "removal took a plugin that is still
 plan
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after removal"; }
 
+echo "8. unit: marketplace refs, source switches and import (claude_ext_test.clj)"
+(
+  SB="$SB/unit"; mkdir -p "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB"
+  bb -cp "$ROOT/src" "$ROOT/tests/claude_ext_test.clj"
+)
+
+# Sections from here on run tests/claude-plugin-stub, which serves a `[:gh …]`
+# marketplace from a local bare repository through git's insteadOf, so each
+# one gets a home of its own: HOME, AGENTCTL_HOME, gitconfig and remotes.
+stub_home() { # stub_home <dir>: a scratch home with the richer stub on PATH
+  mkdir -p "$1/bin" "$1/remotes"
+  ln -sf "$ROOT/tests/claude-plugin-stub" "$1/bin/claude"
+  cat > "$1/.gitconfig" <<EOF
+[url "file://$1/remotes/"]
+	insteadOf = https://github.com/
+[user]
+	email = test@example.com
+	name = test
+[init]
+	defaultBranch = main
+EOF
+}
+market() { # market <home> <plugin version> [branch]: commit marketplace "acme" carrying plugin lp
+  local w="$1/work" b="${3:-main}"
+  mkdir -p "$w/.claude-plugin" "$w/lp/.claude-plugin"
+  [ -d "$w/.git" ] || git -C "$w" init -q
+  git -C "$w" checkout -q -B "$b"
+  echo '{"name":"acme","owner":{"name":"t"},"plugins":[{"name":"lp","source":"./lp"}]}' > "$w/.claude-plugin/marketplace.json"
+  echo "{\"name\":\"lp\",\"version\":\"$2\"}" > "$w/lp/.claude-plugin/plugin.json"
+  echo "$2 $b $RANDOM" > "$w/lp/README.md"
+  git -C "$w" add -A
+  git -C "$w" commit -qm "lp $2"
+  [ -d "$1/remotes/acme/market.git" ] || git init -q --bare "$1/remotes/acme/market.git"
+  git -C "$w" push -q --force "$1/remotes/acme/market.git" "HEAD:refs/heads/$b"
+}
+record() { # record <python expr over the user-scope rows of lp@acme>
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); rows=[r for r in d['plugins'].get('lp@acme', []) if r['scope']=='user']; print($1)" "$SB/.claude/plugins/installed_plugins.json"
+}
+
+echo "9. a marketplace ref is part of its source: argv, settings, drift, and a re-point at user scope"
+(
+  SB="$SB/ref"; stub_home "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
+  market "$SB" 1.0.0
+  market "$SB" 1.0.0 dev
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme"}}}
+EDN
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt" "$SB/claude-calls.log"; fail "install from a github marketplace failed: exit $code"; }
+  [ "$(record 'rows[0]["version"]')" = 1.0.0 ] || fail "plugin not installed at user scope"
+  sed -i.bak 's/:marketplace "acme"}/:marketplace "acme" :ref "dev"}/' "$SB/agents.edn"
+  plan
+  [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a ref change is not drift: exit $code"; }
+  grep -q "claude plugin marketplace add --scope user acme/market#dev" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "add argv lacks the ref"; }
+  grep -q '+ ref: "dev"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the diff does not show the ref"; }
+  grep -q "marketplace source changed" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "a switch with the plugin installed is not called out"; }
+  # Claude refuses to re-point a marketplace its user settings name from
+  # another source, so apply! has to write the entry before adding
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "re-pointing the marketplace failed: exit $code"; }
+  [ "$(setting "$SB/.claude/settings.json" "s['extraKnownMarketplaces']['acme']['source'].get('ref')")" = dev ] || fail "settings do not carry the ref"
+  [ "$(setting "$SB/.claude/plugins/known_marketplaces.json" "s['acme']['source'].get('ref')")" = dev ] || fail "Claude's registration does not carry the ref"
+  [ "$(git -C "$SB/.claude/plugins/marketplaces/acme" rev-parse HEAD)" = "$(git -C "$SB/remotes/acme/market.git" rev-parse dev)" ] || fail "the clone is not at the ref"
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after the ref change: exit $code"; }
+
+  echo "10. a failed re-point leaves the settings file as it was"
+  sed -i.bak 's/:ref "dev"/:ref "main"/' "$SB/agents.edn"
+  cp "$SB/.claude/settings.json" "$SB/settings-before.json"
+  STUB_FAIL_ADD=1 apply
+  [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a failed add exited $code"; }
+  cmp -s "$SB/.claude/settings.json" "$SB/settings-before.json" || fail "a failed add left the settings changed"
+)
+
 echo "all plugin e2e checks passed"

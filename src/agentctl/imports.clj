@@ -374,13 +374,18 @@
 
 (declare scan-projects)
 
-(defn- marketplace-source [m]
+(defn- marketplace-source
+  "`[key ref]` for a declared marketplace: the keyed-section selector and the
+   git ref it is pinned to, if any. A directory is declared as `file://`, the
+   spelling agentctl adds by path again."
+  [m]
   (let [source (:source m)]
     (cond
-      (and (= "github" (:source source)) (:repo source)) [:gh (:repo source)]
-      (and (= "url" (:source source)) (:url source)) [:uri (:url source)]
-      (:repo source) [:gh (:repo source)]
-      (:url source) [:uri (:url source)]
+      (and (= "github" (:source source)) (:repo source)) [[:gh (:repo source)] (:ref source)]
+      (and (= "directory" (:source source)) (:path source)) [[:uri (str "file://" (u/tilde (:path source)))] nil]
+      (and (= "url" (:source source)) (:url source)) [[:uri (:url source)] nil]
+      (:repo source) [[:gh (:repo source)] (:ref source)]
+      (:url source) [[:uri (:url source)] (:ref source)]
       :else nil)))
 
 (defn- plugin-declarations [settings placement at]
@@ -389,10 +394,13 @@
     (keep (fn [[raw enabled?]]
             (when (not= false enabled?)
               (let [[plugin marketplace] (str/split (u/key-str raw) #"@" 2)
-                    source (marketplace-source (get marketplaces (keyword marketplace)))]
+                    [source ref] (marketplace-source (get marketplaces (keyword marketplace)))]
                 (when (and (not (str/blank? plugin)) (not (str/blank? marketplace)) source)
                   [(conj source plugin)
                    (cond-> {:acli [:claude] :in placement}
+                     ;; the marketplace name defaults to the plugin's
+                     (not= plugin marketplace) (assoc :marketplace marketplace)
+                     ref (assoc :ref ref)
                      at (assoc :at at))]))))
           enabled)))
 

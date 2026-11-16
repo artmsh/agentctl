@@ -277,13 +277,19 @@
 
 (defn- uri-path [uri] (u/abs-path (str/replace (u/expand uri) #"^file://" "")))
 
+(defn- with-ref
+  "The CLI reads a git ref after `#`: `owner/repo#ref`, `<git-url>#ref`."
+  [source ref]
+  (if ref (str source "#" ref) source))
+
 (defn- plugin-source
   "The source as `claude plugin marketplace add` takes it: owner/repo, a URL,
-   or a path. The CLI rejects `file://`, so a local URI becomes its path."
+   or a path, a git one with its ref. The CLI rejects `file://`, so a local
+   URI becomes its path."
   [p]
-  (cond (:repo p) (:repo p)
+  (cond (:repo p) (with-ref (:repo p) (:ref p))
         (local-uri? (:uri p)) (uri-path (:uri p))
-        :else (:uri p)))
+        :else (with-ref (:uri p) (:ref p))))
 
 (defn- plugin-key [p]
   (str (:plugin p) "@" (:marketplace p)))
@@ -291,13 +297,15 @@
 (defn- plugin-marketplace
   "The `extraKnownMarketplaces` entry the CLI itself writes for this source:
    github for owner/repo, directory for a local path, url for a hosted
-   marketplace.json, and git for any other remote."
+   marketplace.json, and git for any other remote. The two git kinds carry
+   the ref."
   [p]
   (let [uri (:uri p)]
-    {:source (cond (:repo p) {:source "github" :repo (:repo p)}
-                   (local-uri? uri) {:source "directory" :path (uri-path uri)}
-                   (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
-                   :else {:source "git" :url uri})}))
+    {:source (u/prune-nils
+              (cond (:repo p) {:source "github" :repo (:repo p) :ref (:ref p)}
+                    (local-uri? uri) {:source "directory" :path (uri-path uri)}
+                    (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
+                    :else {:source "git" :url uri :ref (:ref p)}))}))
 
 (defn- ok!
   "Turn a non-zero CLI exit into a real failure so apply! reports it instead
@@ -347,6 +355,8 @@
         desired-m (not= (u/norm before-m) (u/norm want-marketplace))
         desired-e (not= true before-e)
         missing (not (installed? key scope project))
+        ;; settings already name this marketplace, from another source or ref
+        switched (and before-m (not= (u/norm (:source before-m)) (u/norm (:source want-marketplace))))
         source (plugin-source plugin)
         cwd (:path project)
         argv-add ["claude" "plugin" "marketplace" "add" "--scope" cli-scope source]
@@ -363,13 +373,30 @@
         :summary (str "Claude marketplace " mname "; enable " key
                       (when (and missing (not desired-m) (not desired-e))
                         " (enabled in settings but not installed)"))
+        :note (when (and switched (not missing))
+                (str "⚠ marketplace source changed: Claude keeps the installed " key
+                     " as it is until the new source offers another version"))
         :diffs (cond-> []
                  desired-m (conj {:key :extraKnownMarketplaces :before before-m :after want-marketplace})
                  desired-e (conj {:key :enabledPlugins :before before-e :after true})
                  missing (conj {:key :installed :before false :after true}))
         :exec! (fn []
-                 (run argv-add)
-                 (run argv-install)
+                 (let [before (u/slurp-safe file)]
+                   (try
+                     ;; Claude refuses to re-point a marketplace whose
+                     ;; user-settings entry names another source, so the
+                     ;; entry is written first
+                     (when desired-m
+                       (u/backup! file)
+                       (u/write-json! file (assoc-in (or (u/read-json file) {})
+                                                     [:extraKnownMarketplaces (keyword mname)]
+                                                     want-marketplace)))
+                     (run argv-add)
+                     (run argv-install)
+                     ;; a failed step leaves the settings file as it was
+                     (catch Exception e
+                       (if before (u/write-text! file before) (fs/delete-if-exists file))
+                       (throw e))))
                  ;; Keep the JSON deterministic even when the CLI is stubbed,
                  ;; unavailable in a test harness, or writes a different
                  ;; ordering than the settings file expects.

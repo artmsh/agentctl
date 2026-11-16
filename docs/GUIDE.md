@@ -506,8 +506,28 @@ marketplace; other URLs are `git`, or `url` for a hosted `marketplace.json`.
 Dropping a placement uninstalls the plugin there and removes its
 `enabledPlugins` entry; the marketplace declaration stays.
 
+`:ref` pins a git marketplace (`[:gh …]` or a git URL) to a branch, tag or
+commit:
+
+```clojure
+{:plugins {[:gh "example/plugins" "lint"] {:in :all :acli [:claude] :ref "next"}}}
+```
+
+It becomes `source.ref` in `extraKnownMarketplaces`, and `apply!` adds the
+marketplace as `example/plugins#next` (`<git-url>#ref` for a git URL), the
+spelling the CLI reads a ref from. A changed ref is drift on the marketplace
+entry. Claude refuses to re-point a marketplace whose user settings name another
+source, so `apply!` writes the new entry first and puts the file back if the
+CLI then fails. A `:ref` on a directory or a hosted `marketplace.json` is an
+error: neither has revisions.
+
+When the source of a marketplace changes while its plugin is installed, the plan
+says so: Claude keeps the installed copy until the new source offers a
+different version, and `claude plugin update` does nothing at the same version.
+
 Marketplace names are global to Claude: two declarations whose sources share a
 marketplace name re-register it, and every project follows the last one.
+`validate` warns when rows name one marketplace from different sources or refs.
 
 ## Project skills
 

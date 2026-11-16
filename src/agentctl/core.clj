@@ -549,7 +549,7 @@
    ;; the manifest so a later removal can uninstall only what agentctl owns.
    (for [[id p] (:plugins cfg) :when (and (= :global (:scope p)) (contains? (:tools p) :claude))]
      [:claude :plugins id {:scope :global :plugin (:plugin p) :marketplace (:marketplace p)
-                           :repo (:repo p) :uri (:uri p)}])
+                           :repo (:repo p) :uri (:uri p) :ref (:ref p)}])
    (for [[pid proj] (:projects cfg)
          :when (contains? (:for-tools proj) :claude)
          id (:plugins proj)
@@ -557,7 +557,7 @@
          :when (and p (contains? (:tools p) :claude))]
      [:claude :plugins (keyword (str (name pid) "/" (name id)))
       {:scope (:scope p) :plugin (:plugin p) :marketplace (:marketplace p)
-       :repo (:repo p) :uri (:uri p) :project-id pid :project-path (:path proj)}])
+       :repo (:repo p) :uri (:uri p) :ref (:ref p) :project-id pid :project-path (:path proj)}])
    (for [[id p] (:providers cfg) t (:tools p)] [t :providers id])
    ;; `defaultTools` is an array shared with the user; what an extension put
    ;; in it has to be remembered to be taken out again

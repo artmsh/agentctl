@@ -55,6 +55,13 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
 | `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
+| `:plugins` | `claude plugin marketplace add` + `install`, then `extraKnownMarketplaces` / `enabledPlugins` in the placement's settings file | — | — | — | — | — | — | — |
+
+A `:plugins` key is `[:gh "owner/repo" "plugin"]` or `[:uri "…" "plugin"]`. Its
+value takes `:marketplace` (the name the marketplace's own manifest gives it;
+default the plugin's name) and `:ref`, a branch, tag or commit of a git
+marketplace, written as `source.ref` and passed to the CLI as `owner/repo#ref`.
+See [GUIDE.md](GUIDE.md#claude-plugins).
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
 instructions file. Omp's context-file provider loads `AGENTS.md` from its

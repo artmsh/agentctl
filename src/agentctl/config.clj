@@ -280,6 +280,8 @@
       :kind :plugins
       :repo (:repo decl)
       :uri (:uri decl)
+      ;; the marketplace's git ref: a branch, tag or commit of its repository
+      :ref (:ref decl)
       :plugin (or (:plugin decl) (name id))
       :marketplace (or (:marketplace decl) (:plugin decl) (name id))
       :scope (or (:scope decl) :global)
@@ -785,6 +787,38 @@
           (finding :warn (conj where k) (str (name k) " is not provisioned on hosts yet — ignored"))))))
    (:hosts cfg)))
 
+(defn- plugin-marketplace-kind
+  "Which kind of marketplace source a plugin row names, as Claude reads it."
+  [{:keys [repo uri]}]
+  (cond repo :github
+        (str/blank? uri) nil
+        (scope/local-uri? uri) :directory
+        (re-find #"(?i)\.json$" uri) :url
+        :else :git))
+
+(defn- plugin-ref-findings
+  "A `:ref` picks a revision of a git repository: a directory or a hosted
+   marketplace.json has none. One marketplace name is one registration in
+   Claude, so two rows naming it from different places fight over it."
+  [cfg]
+  (concat
+   (for [[id p] (:plugins cfg)
+         :when (some? (:ref p))
+         :let [ref (:ref p)
+               msg (cond (not (and (string? ref) (not (str/blank? ref))))
+                         ":ref must be a branch, tag or commit, as a string"
+                         (#{:directory :url} (plugin-marketplace-kind p))
+                         (str ":ref needs a git marketplace ([:gh …] or a git URL) — a "
+                              (name (plugin-marketplace-kind p)) " source has no revisions"))]
+         :when msg]
+     (finding :error [:plugins id :ref] msg))
+   (for [[m ps] (group-by :marketplace (vals (:plugins cfg)))
+         :let [sources (distinct (map (juxt :repo :uri :ref) ps))]
+         :when (next sources)]
+     (finding :warn [:plugins (keyword m)]
+              (str "marketplace " m " is declared from " (count sources)
+                   " different sources or refs — Claude keeps one per name, the last one added")))))
+
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]
     (concat
@@ -893,6 +927,7 @@
                      (str/blank? (or (:plugin p) "")))]
        (finding :error [:plugins id]
                 "plugin needs a marketplace source and plugin name"))
+     (plugin-ref-findings cfg)
      (provider-model-findings cfg)
      (for [[pid proj] (:projects cfg)
            mid (:mcp proj)
