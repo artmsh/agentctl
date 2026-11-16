@@ -280,10 +280,23 @@
                                 (str "[skill: " (str/join ", " skills) "]"))
                               (when alias (str "[" alias "]"))])))
 
+(defn- link-line
+  "What one link op changes, for `--verbose`: where the link is and what it
+   points at, before and after. It starts with a word, not a path: a line
+   whose first character is `~` would read as a change sigil."
+  [o]
+  (for [{:keys [key before after]} (:diffs o)
+        :when (= :target key)]
+    (str "    link " (u/tilde (:target o)) " -> " (u/tilde (str after))
+         (when before (str " (was " (u/tilde (str before)) ")")))))
+
 (defn- render-skill-blocks
-  "One line per entity and action in each scope, however many tools it
-   reaches; a project line ends with the commands it runs."
-  [ops]
+  "One line per entity, action and source in each scope, however many tools
+   it reaches; a project line ends with the commands it runs, and with
+   `--verbose` every line does, followed by what each link points at. Two
+   tools linking one skill from different places are two lines: folded into
+   one, the line would name only the first one's source."
+  [ops {:keys [verbose]}]
   (let [placed (mapcat (fn [o]
                          (let [ps (get-in o [:display :in-projects])]
                            (if (and (seq ps) (not (:project-path o)))
@@ -301,11 +314,12 @@
           :let [scope-ops (get by-scope path)]
           :when (seq scope-ops)
           s (cons (str "\n" (scope-heading path))
-                  (for [[[_ _ action warn] g] (sort-by (fn [[[k e a] _]] [(str e) k (str a)])
+                  (for [[[_ _ action warn] g] (sort-by (fn [[[k e a _ s] _]] [(str e) k (str a) (str s)])
                                                        (group-by (fn [o] [(get-in o [:display :kind])
                                                                           (get-in o [:display :entity])
                                                                           (:action o)
-                                                                          (when (:warn o) (:summary o))])
+                                                                          (when (:warn o) (:summary o))
+                                                                          (get-in o [:display :source])])
                                                                  scope-ops))
                         :let [d (:display (first g))
                               agents (sort (distinct (concat (:agents d) (keep #(get-in % [:display :agent]) g))))
@@ -313,9 +327,10 @@
                               cmds (distinct (mapcat op-cmds g))]]
                     (str/join "\n" (concat [(colorize action (skill-line action (assoc d :skills skills) agents))]
                                             (when warn [(str "    " warn)])
-                                            (when path
+                                            (when (or path verbose)
                                               (map #(str "exec: '" (str/join " " (map (comp shell-word u/tilde str) (remove nil? (flatten %)))) "'")
-                                                   cmds))))))]
+                                                   cmds))
+                                            (when verbose (mapcat link-line g))))))]
       s)))
 
 (defn render-plan
@@ -332,7 +347,7 @@
     (str/join
      "\n"
      (concat
-      (render-skill-blocks skill-ops)
+      (render-skill-blocks skill-ops opts)
       (for [tool (sort-by name (keys by-tool))
             :let [tool-ops (sort-by (juxt (comp name :kind) (comp u/kw->str :id)) (get by-tool tool))]
             s (cons (str "\n" (str/upper-case (name tool)))

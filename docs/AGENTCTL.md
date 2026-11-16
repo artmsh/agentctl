@@ -559,6 +559,11 @@ different value, override just that field:
 `import` writes these automatically wherever it finds a resource configured
 differently per tool, preserving those differences in the emitted declaration.
 
+The plan names the source each tool actually links: a skill whose `:per-tool
+:path` differs from its base source is its own line for that tool, and
+`--verbose` adds the `ln` command and `link <dest> -> <source> (was <old>)`
+under every skill line, user-wide ones included.
+
 ### Fields agentctl does not model
 
 Tool-native MCP keys (`lifecycle`, `idleTimeout`, `directTools`, …) are merged
@@ -695,7 +700,8 @@ end up writing a resolved secret into a tool's config file are tagged
                    project owns, whatever its kind (its servers and skills are
                    :mcps / :skills ops, so --kind projects would miss them)
     --json         machine-readable output
--v, --verbose      per-field diffs and target paths
+-v, --verbose      per-field diffs and target paths; for skills, the link
+                   commands and what each link points at, before and after
     --show-noop    include unchanged and informational entries
     --deep         validate: probe the network (provider /models, git remotes)
     --replace      import!: overwrite instead of merging into the existing file

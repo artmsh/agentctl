@@ -3140,5 +3140,34 @@
       (is (not (u/exists? link)))
       (is (fs/directory? src) "the committed source stays"))))
 
+(deftest a-per-tool-path-is-the-source-the-plan-shows
+  (let [root (temp-dir) shared (str root "/shared/wrap-up") pinned (str root "/sample/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri shared] {:in :all :acli [:pi :claude]
+                                                        :per-tool {:pi {:path pinned}}}}} "test")]
+    (skill-dir! shared "wrap-up")
+    (skill-dir! pinned "wrap-up")
+    (with-redefs [pi/skills-dir (str root "/pi-skills") claude/skills-dir (str root "/claude-skills")]
+      (let [pi-dest (str pi/skills-dir "/wrap-up")
+            _ (fs/create-dirs pi/skills-dir)
+            ;; pi still links the base source: the override repoints it
+            _ (fs/create-sym-link pi-dest shared)
+            ops (filter #(= :skills (:kind %)) (core/build-plan (cfg) state/empty-state {:tools #{:pi :claude}}))
+            {[pi-op] :pi [claude-op] :claude} (group-by :tool ops)
+            quiet (plan/render-plan ops {})
+            loud (plan/render-plan ops {:verbose true})]
+        (is (= (u/tilde pinned) (get-in pi-op [:display :source]) (:from pi-op)) "display matches what is linked")
+        (is (= (u/tilde shared) (get-in claude-op [:display :source])))
+        (is (str/includes? quiet (str "~ skill [agents: pi] " (u/tilde pinned))))
+        (is (str/includes? quiet (str "+ skill [agents: claude-code] " (u/tilde shared)))
+            "two sources are two lines, not one line naming the first")
+        (is (not (str/includes? quiet "exec:")) "user-wide commands are for --verbose")
+        (is (str/includes? loud (str "exec: 'ln -sfn " (u/tilde pinned) " " (u/tilde pi-dest) "'")))
+        (is (str/includes? loud (str "    link " (u/tilde pi-dest) " -> " (u/tilde pinned)
+                                     " (was " (u/tilde (u/real-path shared)) ")")))
+        (is (not-any? #(re-find #"^[~+\-!]" (str/triml %))
+                      (remove #(re-find #"^\S*[~+\-] skill" (str/triml (str/replace % #"\u001b\[[0-9;]*m" "")))
+                              (str/split-lines loud)))
+            "verbose detail never starts with a change sigil")))))
+
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

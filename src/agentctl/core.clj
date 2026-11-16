@@ -292,6 +292,9 @@
                    :in-projects (when-not global? (not-empty ps))))))
       :skills
       (let [s (get-in cfg [:skills sid])
+            ;; what this tool's link actually points at: the line must name
+            ;; the source the op links, or a repointed link reads as converged
+            override (get-in s [:per-tool (:tool o) :path])
             from (or (:from s)
                      (when-let [proj (get-in cfg [:projects (:project o)])]
                        (some #(when (and (get-in cfg [:skill-packs %])
@@ -301,6 +304,7 @@
                              (:skills proj))))
             pack (get-in cfg [:skill-packs from])]
         (cond
+          override {:kind "skill" :entity sid :source (u/tilde (u/abs-path override))}
           (and (nil? s) (get-in cfg [:skill-packs sid])) (pack-line sid [])
           (and pack (or (nil? s) (:via-pack s))) (pack-line from [(name sid)])
           (and pack (:implicit pack)) {:kind "skill" :entity sid :source (sources/source-label pack)}

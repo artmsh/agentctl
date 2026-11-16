@@ -985,4 +985,32 @@ EDN
   [ -z "$(git -C "$P" status --porcelain)" ] || { git -C "$P" status; fail "git status is not clean"; }
 )
 
+echo "24. a per-tool path is the source the plan shows, and --verbose shows the link"
+(
+  H=$(fresh_home per-tool-path); export AGENTCTL_HOME="$H"
+  for d in "$H/projects/shared/skills/wrap-up" "$H/projects/sample/.agents/skills/wrap-up"; do
+    mkdir -p "$d"
+    printf -- '---\nname: wrap-up\ndescription: Demo.\n---\n' > "$d/SKILL.md"
+  done
+  cat > "$H/base.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}}}
+EDN
+  run apply! -f "$H/base.edn" --all -t pi -k skills -y > /dev/null
+  sed 's#:acli \[:pi\]}#:acli [:pi] :per-tool {:pi {:path "~/projects/sample/.agents/skills/wrap-up"}}}#' \
+    "$H/base.edn" > "$H/agents.edn"
+  (run apply -f "$H/agents.edn" --all -t pi -k skills || true) > "$H/plan.txt" 2>&1
+  grep -q '~ skill \[agents: pi\] ~/projects/sample/.agents/skills/wrap-up' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the plan names the base source, not the per-tool path"; }
+  (run apply -f "$H/agents.edn" --all -t pi -k skills --verbose || true) > "$H/plan-v.txt" 2>&1
+  grep -q "^exec: 'ln -sfn ~/projects/sample/.agents/skills/wrap-up ~/.pi/agent/skills/wrap-up'" "$H/plan-v.txt" \
+    && grep -q '^    link ~/.pi/agent/skills/wrap-up -> ~/projects/sample/.agents/skills/wrap-up (was ~/projects/shared/skills/wrap-up)' "$H/plan-v.txt" \
+    || { cat "$H/plan-v.txt"; fail "--verbose does not show the user-wide link it changes"; }
+  (run apply -f "$H/agents.edn" --all -t pi -k skills --json || true) 2>/dev/null | python3 -c '
+import json, sys
+o = [o for o in json.load(sys.stdin)["ops"] if o.get("kind") == "skills"][0]
+assert o["display"]["source"] == o["from"] == "~/projects/sample/.agents/skills/wrap-up", o
+' || fail "the JSON display source disagrees with from"
+)
+
 echo "all agentctl e2e checks passed"
