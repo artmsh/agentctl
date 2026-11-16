@@ -367,6 +367,7 @@
                  :edn (edn-str v)))
       :options (not-empty options)
       :suggest (not-empty (vec suggest))
+      :always (:always field)
       :hint hint})))
 
 (defn- entry->data [section id decl]
@@ -425,6 +426,182 @@
                       (assoc (entry->data section id (get declared id))
                              :declared (contains? declared id))))})))
 
+;; ---------------------------------------------------------------- entity DSL
+
+(def ^:private in-hint
+  ":all user-wide; \"projects/x\" or [\"projects\" \"!projects/old\"] for the repositories under it; :none declares without placing")
+
+(defn- placement
+  "Where a row lands and for which CLIs. Always shown: a row without them is
+   placed everywhere, and that is worth seeing. `:tools` is the older spelling
+   of `:acli`, so a row written either way edits the key it already has."
+  [kind & {:keys [acli-alias?] :or {acli-alias? true}}]
+  [(f :in :edn :always true :hint in-hint)
+   (cond-> (f :acli :kw-set :always true
+              :hint "every CLI that supports this kind when unset")
+     ;; subagents are Claude Code's alone; no capability names them
+     (= kind :agents) (assoc :options [:claude])
+     (not= kind :agents) (assoc :of kind)
+     acli-alias? (assoc :aliases [:tools]))])
+
+(defn- all-settings
+  "Every setting some CLI understands; a row's `:acli` picks which ones apply."
+  []
+  (vec (sort (distinct (mapcat val settings-catalog)))))
+
+(defn- all-flags []
+  (vec (sort (distinct (mapcat bool-settings config/all-tools)))))
+
+(defn- dsl-schema
+  "One section per DSL kind. Vector kinds are rows (`:id-kind :row`), keyed
+   kinds are maps whose keys are selectors written as EDN (`:id-kind :edn`)."
+  [raw]
+  (let [pack-ids (vec (sort (keep (fn [[k v]] (some-> (:alias v) str symbol)) (:skill-packs raw))))
+        row (fn [m] (merge {:id-kind :row :entry "row" :template "{:in :all}"} m))
+        keyed (fn [m] (merge {:id-kind :edn :entry "entry" :template "{:in :all}"} m))]
+    [{:key :#def :title "Bindings" :entry "binding" :id-kind :symbol
+      :doc "$name expands anywhere below. Root level only."
+      :template "\"\"" :value-only true :layout :table
+      :fields [(f :value :edn)]}
+
+     (row {:key :settings :title "Settings"
+           :doc "Per-CLI settings. :acli picks the CLIs; a project row overrides the user-wide one."
+           :fields (concat (placement :settings)
+                           [(f :id :edn)
+                            (f :features :flags :options (all-flags)
+                               :hint "the tool's own default applies to anything left unset")]
+                           (for [k (all-settings)] (setting-field nil k)))})
+
+     (row {:key :permissions :title "Permissions"
+           :doc "Claude Code permission rules."
+           :fields (concat (placement :permissions)
+                           [(f :id :edn) (f :allow :edn) (f :ask :edn) (f :deny :edn)
+                            (f :default-mode :scalar)])})
+
+     (row {:key :mcps :title "MCP servers" :template "{:id :server :cmd \"\" :in :all}"
+           :doc "A row placed in projects provisions the server there; :all is user-wide."
+           :fields (concat (placement :mcps)
+                           [(f :id :edn)]
+                           (remove #(#{:tools :scope} (:key %)) (mcp-fields)))})
+
+     (keyed {:key :skill-packs :title "Skill packs" :template "{:alias pack}"
+             :doc "Key: [:gh \"owner/repo\"] or [:uri \"file:///dir\"]. :in :none (the default) declares a source for :skills and :agents."
+             :fields (concat (placement :skills)
+                             [(f :alias :scalar) (f :dir :scalar) (f :ref :scalar)
+                              (f :type :enum :options [:git :file])])})
+
+     (keyed {:key :skills :title "Skills"
+             :doc "Key: [pack \"skill\"], [pack [\"a\" \"b\"]], [:gh \"owner/repo\"] or [:uri \"file:///dir\"]."
+             :fields (concat (placement :skills)
+                             [(f :alias :scalar) (f :mode :enum :options [:symlink :copy])])
+             :packs pack-ids})
+
+     (row {:key :providers :title "Providers" :template "{:id :provider :url \"\" :in :all}"
+           :doc "Extra model providers and per-model overrides."
+           :fields (concat (placement :providers)
+                           [(f :id :edn) (f :url :scalar)
+                            (f :key :scalar :hint "$ENV_VAR or !bw://folder/item/field")
+                            (f :key-name :scalar)
+                            (f :api :edn :suggest ["openai-completions" "responses" "anthropic-messages"])
+                            (f :headers :edn) (f :models :edn) (f :overrides :edn) (f :per-tool :edn)])})
+
+     (row {:key :memory :title "Memory" :template "{:from \"~/notes/AGENTS.md\" :in :all}"
+           :doc "One memory file, linked into every agent the row selects."
+           :fields (concat (placement :memory)
+                           [(f :id :edn) (f :from :scalar) (f :mode :enum :options [:symlink :copy])])})
+
+     (row {:key :trust :title "Trust" :template "{:in \"projects\" :trusted true}"
+           :doc "Trusted project trees, per CLI."
+           :fields (concat (placement :projects) [(f :id :edn) (f :trusted :bool)])})
+
+     (row {:key :hooks :title "Hooks" :template "{:id :hook :event :pre-tool-use :cmd \"\" :in :all}"
+           :doc "Claude Code hooks: one row per command, or :hooks grouped by event."
+           :fields (concat (placement :hooks)
+                           [(f :id :edn) (f :event :edn) (f :matcher :scalar) (f :cmd :scalar)
+                            (f :timeout :scalar) (f :hooks :edn)])})
+
+     (keyed {:key :plugins :title "Claude plugins" :template "{:in :all :acli [:claude]}"
+             :doc "Key: [:gh \"owner/repo\" \"plugin\"] or [:uri \"…\" \"plugin\"]."
+             :fields (concat (placement :plugins)
+                             [(f :at :enum :options [:machine :repo]) (f :marketplace :scalar)
+                              (f :ref :scalar) (f :version :edn :hint ":latest, or a pinned \"1.2.0\"")
+                              (f :build :scalar)])})
+
+     (keyed {:key :agents :title "Claude subagents" :template "{:in :all}"
+             :doc "Key: [pack \"name\"] or [pack [\"a\" \"b\"]] — <pack>/agents/<name>.md."
+             :fields (concat (placement :agents) [(f :alias :scalar)])})
+
+     (keyed {:key :extensions :title "Extensions" :template "{:acli [:pi]}"
+             :doc "Key: [:gh \"owner/repo\"] or [:uri \"file:///dir\"]. A checkout a CLI loads code from."
+             :fields (concat (placement :extensions :acli-alias? false)
+                             [(f :alias :scalar) (f :type :enum :options [:git :file]) (f :ref :scalar)
+                              (f :build :scalar) (f :tools :edn :hint "tool names the CLI switches on by default")])})
+
+     {:key :hosts :title "Hosts" :entry "host" :id-kind :free :template "{:ssh \"\"}"
+      :only-if-present true
+      :doc "Machines `--host` plans against, over SSH."
+      :fields [(f :ssh :scalar) (f :os :enum :options [:linux :macos :windows]) (f :home :scalar)]}]))
+
+(defn- row-label
+  "A row has no key of its own: its :id when it names one, else its position,
+   with where it lands beside it."
+  [i decl]
+  (let [id (when (map? decl) (:id decl))
+        in (when (map? decl) (:in decl))]
+    (str (if id (u/kw->str id) (str "#" (inc i)))
+         (when (some? in) (str "  · " (edn-str in))))))
+
+(defn- dsl-section->data [raw section]
+  (let [declared (get raw (:key section))
+        rows? (= :row (:id-kind section))
+        ids (cond
+              rows? (if (vector? declared) (range (count declared)) [])
+              (map? declared) (sort-by path-str (keys declared))
+              :else [])]
+    (u/prune-nils
+     {:key (path-str (:key section))
+      :title (:title section)
+      :doc (:doc section)
+      :entry (:entry section)
+      :layout (some-> (:layout section) name)
+      :id-kind (name (:id-kind section))
+      :template (:template section)
+      ;; a section written in a shape the rows cannot show is edited whole
+      :raw (when (and (some? declared) (not (if rows? (vector? declared) (map? declared))))
+             {:key (name (:key section)) :path [(path-str (:key section))] :type "edn"
+              :present true :value (edn-str declared)})
+      :entries (vec (for [id ids
+                          :let [decl (get declared id)]]
+                      (cond-> (assoc (entry->data section id decl) :declared true)
+                        rows? (assoc :label (row-label id decl))
+                        (= :edn (:id-kind section)) (assoc :label (edn-str id)))))})))
+
+(defn- dsl-model [text raw]
+  (let [targets (try (:entities (config/parse-config text config/default-path))
+                     (catch Exception _ nil))
+        schema (dsl-schema raw)
+        handled (into #{:statusline} (map :key schema))]
+    {:ok true
+     :dsl true
+     :sections (vec (concat
+                     (for [s schema
+                           :when (or (not (:only-if-present s)) (contains? raw (:key s)))]
+                       (if (:value-only s) (section->data raw s) (dsl-section->data raw s)))
+                     ;; one file for every agent's status line: its keys are the
+                     ;; renderer's, and are edited as the map they are
+                     [{:key ":statusline" :title "Status line" :id-kind "fixed" :entries []
+                       :doc "The shared status-line file. Edited whole, as EDN."
+                       :raw {:key "statusline" :path [":statusline"] :type "edn"
+                             :present (contains? raw :statusline)
+                             :value (when (contains? raw :statusline) (edn-str (:statusline raw)))}}]))
+     :unknown (vec (for [[k v] raw
+                         :when (not (or (handled k) (config/known-top-keys k)))]
+                     {:key (path-str k) :path [(path-str k)]
+                      :type "edn" :present true :value (edn-str v)}))
+     :targets (vec (for [e targets]
+                     {:kind (name (:kind e)) :id (u/kw->str (:id e))
+                      :selector (pr-str (:in e)) :paths (:targets e)}))}))
+
 (defn model
   "The whole left pane: what the buffer declares, and what it could declare.
    Unparseable text is a message, not an exception — that is the normal state
@@ -433,15 +610,7 @@
   (try
     (let [raw (edit/parse text)]
       (cond
-        (scope/dsl? raw)
-        (let [cfg (config/parse-config text config/default-path)]
-          {:ok true :unknown []
-           :sections (vec (for [k (cons :#def scope/kinds)]
-                            {:key (path-str k) :title (name k) :layout "entities" :entries []
-                             :fields [{:key (name k) :path [(path-str k)] :type "edn"
-                                       :present (contains? raw k) :value (edn-str (get raw k (if (or (= k :#def) (scope/keyed-kinds k)) {} [])))}]}))
-           :targets (mapv (fn [e] {:kind (name (:kind e)) :id (name (:id e))
-                                   :selector (pr-str (:in e)) :paths (:targets e)}) (:entities cfg))})
+        (scope/dsl? raw) (dsl-model text raw)
         (not (map? raw))
         {:ok false :error "agents.edn must contain a map"}
         :else
@@ -481,6 +650,8 @@
                                     (str (pr-str nk) " is not a usable name"))
                                   {})))
                 {:op :rename :path path :value (edn/read-string nk)})
+              (= "append" (name (or op "set")))
+              {:op :append :path path :value (edn/read-string (str (or edn "{}")))}
               edn {:op (keyword (name (or op "set"))) :path path
                    :value (edn/read-string (str edn))}
               :else (let [v (coerce (or type :scalar) value)]

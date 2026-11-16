@@ -122,7 +122,7 @@
                           (plan/json-set-op (assoc args :value (vec (remove (set added) current)))))
                         (plan/json-unset-op args)))
                     (str/ends-with? target ".toml")
-                    (let [current (toml/read-toml-lenient target)
+                    (let [current (toml/read-toml target)
                           desired (desired-fields cfg o)
                           ;; a table owned whole goes whole once nothing in it
                           ;; is declared — keys Codex saved there included

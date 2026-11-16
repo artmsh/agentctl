@@ -427,7 +427,10 @@ otherwise what is on disk, unless agentctl wrote it and will prune it. A
 violation is an error in `validate` and refuses `apply` before any op, with the
 declared, kept and built-in names listed. It is checked only when agentctl
 touches permissions, so a file broken by hand does not block an unrelated
-setting. Import reads profiles back with field
+setting. The refusal applies only to a run whose plan, after `-t`, `-k`, `-p`,
+`--only` and `--user`, still writes Codex settings. Any other run, such as
+`-k mcps -t codex`, cannot change permissions, so it shows the finding as a
+warning and goes on. Import reads profiles back with field
 names as keywords and paths and hosts as strings.
 
 ### `:permissions`
@@ -487,7 +490,9 @@ similar tools inject their own entries directly. An array carries no keys, so
 agentctl locates *its* element by value, not by index or position, and never
 touches an entry it did not write: declaring a hook here never disturbs
 what another tool put in the same array, and dropping one from agents.edn
-prunes only that element. Declare only hooks you actually authored; a
+prunes only that element. Changing a hook's `:event` moves it: the same
+apply removes the element from the old event's array and adds it to the new
+one, in Claude's `settings.json` and Codex's `hooks.json` alike. Declare only hooks you actually authored; a
 third party's own hook does not belong in agents.edn and reproducing it
 here would fight that tool's own writes to the file.
 
@@ -519,6 +524,8 @@ reaches Codex only when its `:acli` names `:codex`; a row without `:acli`, with
 `:acli :all`, or a `:hooks` key in a `:settings` row that does not name `:codex`
 stays Claude's, because events and tool-name matchers differ between the two. Codex
 hooks are user-wide only: a row placed in a project is reported, not written.
+A `:settings` row's `:hooks` and the `:hooks` rows for the same tool add up,
+hook by hook. Declaring one id in both with different bodies is an error.
 
 ```clojure
 {:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"
@@ -1057,7 +1064,11 @@ need python3 3.11+. agentctl uses `AGENTCTL_PYTHON` when set, with no fallback,
 and otherwise the first of `python3.15` … `python3.11`, `python3` on `PATH`
 that has `tomllib`. With none, a run that has to read or write one of those
 files stops before its first op. Reading the file as empty instead would plan
-what exists as new, and apply would never converge.
+what exists as new, and apply would never converge. For the same reason, a
+file this python's `tomllib` cannot parse is an error that names the file, the
+interpreter and the parse error. Codex reads TOML 1.1 (for example, a
+multi-line inline table), and `tomllib` reads TOML 1.1 only from python 3.15. Point
+`AGENTCTL_PYTHON` at such a python, or rewrite the construct as TOML 1.0.
 
 ### gui
 

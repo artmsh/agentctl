@@ -281,6 +281,18 @@ same buffer:
   - **Skills** lists each declared pack with every skill it has on disk as a
     switch: on when the file installs it, off when it does not. A pack
     agentctl has not fetched yet says so rather than showing an empty list.
+
+  On an entity-DSL config the cards are the DSL's sections instead: settings,
+  permissions, MCP servers, providers, memory, trust and hooks list one card
+  per row, labelled by its `:id` or position and where it lands; skill packs,
+  skills, plugins, subagents and extensions list one card per key, labelled
+  by the selector (`[team "reviewer"]`). Every card carries its placement:
+  `:in` as EDN and `:acli` as chips of the CLIs that support the kind (a row
+  written with `:tools` keeps that spelling). `+ Add row` appends a starter row
+  (`:in :all` for most kinds); a keyed section adds under the selector typed. `:statusline`, and a
+  section written in a shape the cards cannot show, are edited whole as EDN.
+  An edit rewrites only the node it names, so every other section stays
+  byte-for-byte as written.
 - **agents.edn** — the text, editable directly.
 
 Both write to the same buffer and re-plan on every change, so the plan answers

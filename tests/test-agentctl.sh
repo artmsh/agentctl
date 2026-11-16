@@ -2122,4 +2122,55 @@ EDN
   ! grep -q 'gone-skill' "$H/.config/agentctl/state.edn" || fail "a skill never linked is owned, so a later prune would remove a path agentctl never wrote"
 )
 
+echo "52. a Claude settings.json that does not parse is refused, never rewritten"
+(
+  H=$(fresh_home broken-json); export AGENTCTL_HOME="$H"
+  P="$H/projects/app"; mkdir -p "$P/.claude" "$H/.claude"; git -C "$P" init -q
+  broken='{"env": {"KEEP": "1"}, "model": "m-a",}'
+  printf '%s\n' "$broken" > "$H/.claude/settings.json"
+  printf '%s\n' "$broken" > "$P/.claude/settings.json"
+  cp "$H/.claude/settings.json" "$H/user.before"; cp "$P/.claude/settings.json" "$H/proj.before"
+  cat > "$H/agents.edn" <<'EDN'
+{:settings [{:id :user-claude :acli [:claude] :in :all :model "m-b"}
+            {:id :app-claude :acli [:claude] :in "projects/app" :model "m-c"}]}
+EDN
+  (run apply -f "$H/agents.edn" --all -t claude || true) > "$H/plan.txt" 2>&1
+  [ "$(grep -c 'settings.json is not valid JSON' "$H/plan.txt")" -ge 2 ] \
+    || { cat "$H/plan.txt"; fail "the plan does not report both broken settings files"; }
+  set +e
+  run apply! -f "$H/agents.edn" --all -t claude -y > "$H/apply.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || { cat "$H/apply.txt"; fail "apply! on broken settings.json exited $code, not 1"; }
+  cmp -s "$H/.claude/settings.json" "$H/user.before" || fail "user settings.json was rewritten"
+  cmp -s "$P/.claude/settings.json" "$H/proj.before" || fail "project settings.json was rewritten"
+)
+
+echo "53. a hook whose :event changes moves: the old element goes in the same apply!"
+(
+  H=$(fresh_home hook-move); export AGENTCTL_HOME="$H"
+  P="$H/projects/app"; mkdir -p "$P/.claude" "$H/.claude"; git -C "$P" init -q
+  printf '%s\n' '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "vendor-stop"}]}]}}' > "$H/.claude/settings.json"
+  for ev in Stop SessionStart; do
+    cat > "$H/agents.edn" <<EDN
+{:hooks [{:id :note :event :$ev :command "note" :acli [:claude] :in :all}
+         {:id :app-note :event :$ev :command "app-note" :acli [:claude] :in "projects/app"}]}
+EDN
+    run apply! -f "$H/agents.edn" --all -t claude -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "hook-move: apply! ($ev) failed"; }
+  done
+  set +e
+  run apply -f "$H/agents.edn" --all -t claude > "$H/plan2.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$H/plan2.txt"; fail "a moved hook does not converge ($code)"; }
+  for f in "$H/.claude/settings.json" "$P/.claude/settings.json"; do
+    python3 - "$f" <<'PY' || { cat "$f"; fail "a moved hook left its old element in $f"; }
+import json, sys
+h = json.load(open(sys.argv[1]))["hooks"]
+cmds = lambda ev: [x["command"] for g in h.get(ev, []) for x in g["hooks"]]
+assert not any(c in ("note", "app-note") for c in cmds("Stop")), h
+assert any(c in ("note", "app-note") for c in cmds("SessionStart")), h
+PY
+  done
+  grep -q vendor-stop "$H/.claude/settings.json" || fail "the vendor's Stop hook went with the moved one"
+)
+
 echo "all agentctl e2e checks passed"
