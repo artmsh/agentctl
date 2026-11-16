@@ -3700,7 +3700,25 @@
     (is (str/includes? (edit {:op "append" :path [":mcps"] :edn "{:in :all}"}) ":mcps [{:in :all}]")
         "a section not in the file yet is created")
     (is (thrown? Exception (edit {:op "set" :path [":settings" "5" ":model"] :type "scalar" :value "x"}))
-        "a row that is not there is refused, not appended")))
+        "a row that is not there is refused, not appended")
+    (testing "a stale or negative row index is refused on unset too, not a silent no-op"
+      (is (thrown? Exception (edit {:op "unset" :path [":settings" "5"]})))
+      (is (thrown? Exception (edit {:op "unset" :path [":settings" "-1"]})))
+      (is (thrown? Exception (edit {:op "unset" :path [":settings" "5" ":model"]}))))
+    (testing "a row index steps into a vector only; into a map it is refused, not written as a key"
+      (is (thrown? Exception (edit {:op "set" :path [":agents" "0"] :type "edn" :value "{}"})))
+      (is (thrown? Exception (edit {:op "set" :path [":agents" "0" ":in"] :type "edn" :value ":all"})))
+      (is (thrown? Exception (edit {:op "unset" :path [":agents" "0"]})))
+      (is (thrown? Exception (edit {:op "set" :path [":settings" ":model"] :type "scalar" :value "x"}))
+          "a vector takes no map key"))
+    (testing "a row goes with the comment ending its line; the next row takes its place"
+      (is (= (str/replace text "[{:model \"a\" :in :all} ; first\n  {:in" "[{:in")
+             (edit {:op "unset" :path [":settings" "0"]})))
+      (let [three (str "{:settings\n [{:a 1} ; one\n  {:b 2} ; two\n  {:c 3}]}\n")]
+        (is (= "{:settings\n [{:a 1} ; one\n  {:c 3}]}\n"
+               (edit/apply-ops three [{:op :unset :path [:settings 1]}])))
+        (is (= "{:settings\n [{:b 2} ; two\n  {:c 3}]}\n"
+               (edit/apply-ops three [{:op :unset :path [:settings 0]}])))))))
 
 (deftest entity-partial-settings-prune
   (let [root (temp-dir) file (str root "/config.toml")]

@@ -95,14 +95,22 @@
 
 (defn- coll-node? [zl] (or (z/map? zl) (z/vector? zl)))
 
+(defn- check-step
+  "A row index steps into a vector and names a row it holds; any other key
+   steps into a map. Anything else would write a key nobody asked for."
+  [zl k]
+  (cond
+    (z/vector? zl) (when-not (and (int? k) (< -1 k (count (z/sexpr zl))))
+                     (throw (ex-info (str "no row " (pr-str k) " in this vector") {})))
+    (int? k) (throw (ex-info (str "row " k " names no vector") {}))))
+
 (defn- zset-in [zl [k & ks] v]
+  (check-step zl k)
   (if (empty? ks)
     (if (z/vector? zl)
-      (if (and (int? k) (< -1 k (count (z/sexpr zl))))
-        (z/assoc zl k (node v))
-        (throw (ex-info (str "no row " k " to set") {})))
+      (z/assoc zl k (node v))
       (zassoc zl k v))
-    (if-let [sub (and (or (z/map? zl) (int? k)) (zget zl k))]
+    (if-let [sub (zget zl k)]
       (if (coll-node? sub)
         (z/up (zset-in sub ks v))
         ;; the node in the way is a scalar — a shorthand spelling the caller
@@ -122,18 +130,40 @@
   (let [u (z/up zl)]
     (if (and u (not= :forms (z/tag u))) (recur u) zl)))
 
+(defn- spaces? [nd]
+  (and (= :whitespace (n/tag nd)) (not (str/includes? (n/string nd) "\n"))))
+
+(defn- remove-row
+  "Remove vector element `el`. A comment ending its line goes with it, and so
+   does its indentation, so the next row takes its place; a row with no such
+   comment goes as `z/remove` takes it."
+  [el]
+  (let [parent (z/up el)
+        kids (vec (n/children (z/node parent)))
+        i (dec (count (take-while some? (iterate z/left* el))))
+        j (loop [j (inc i)] (if (and (< j (count kids)) (spaces? (kids j))) (recur (inc j)) j))]
+    (if (and (< j (count kids)) (= :comment (n/tag (kids j))))
+      (let [first? (not-any? n/sexpr-able? (subvec kids 0 i))
+            lo (loop [lo i] (if (and (pos? lo) (spaces? (kids (dec lo)))) (recur (dec lo)) lo))
+            hi (cond->> (inc j)
+                 first? (#(loop [hi %] (if (and (< hi (count kids)) (spaces? (kids hi))) (recur (inc hi)) hi))))]
+        (z/replace parent (n/replace-children (z/node parent) (into (subvec kids 0 lo) (subvec kids hi)))))
+      (z/remove el))))
+
 (defn- zunset-in [zl path]
   (let [ks (butlast path)
         k (last path)]
     (loop [cur zl ks (seq ks)]
       (cond
-        ks (if-let [sub (when (or (z/map? cur) (int? (first ks))) (zget cur (first ks)))]
-             (if (coll-node? sub) (recur sub (next ks)) zl)
-             zl)
+        ;; a missing map key is already unset; a row that is not there is a
+        ;; stale index, and refused like a set of one
+        ks (do (check-step cur (first ks))
+               (if-let [sub (zget cur (first ks))]
+                 (if (coll-node? sub) (recur sub (next ks)) zl)
+                 zl))
         ;; a row of a vector is one node; a map entry is a key and its value
-        (z/vector? cur) (if (and (int? k) (< -1 k (count (z/sexpr cur))))
-                          (top (z/remove (zget cur k)))
-                          zl)
+        (z/vector? cur) (do (check-step cur k) (top (remove-row (zget cur k))))
+        (int? k) (check-step cur k)
         (nil? (zget cur k)) zl
         ;; the value goes first; `z/remove` then leaves the cursor at the
         ;; node before it, which for a vector key is inside the key, so the
