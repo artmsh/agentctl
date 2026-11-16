@@ -357,10 +357,8 @@ apply -k mcps
 plan -k mcps
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "approvals not converged: exit $code"; }
 # the earlier sections' settings are gone from agents.edn: converge the whole
-# config, so the plans below speak for the approvals alone. Twice, because
-# pruning the last setting removes settings.json's $schema and the next run
-# writes it back
-apply; apply
+# config, so the plans below speak for the approvals alone
+apply
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "full apply! exited $code"; }
 
 echo "15. a Claude run that migrates a legacy approval leaves nothing to apply"
@@ -446,5 +444,22 @@ done
 apply
 [ "$(json "$SB/.claude/settings.json" "'env' in d")" = False ] || fail "the settings env was not pruned"
 [ "$(json "$SB/proj/.mcp.json" "'mrepo' in d['mcpServers']")" = False ] || fail "the .mcp.json server was not pruned"
+
+echo "21. dropping the last setting converges in one apply!, and settings.json keeps its \$schema"
+cat > "$SB/agents.edn" <<EDN
+{:settings [{:model "sonnet" :acli [:claude] :in :all}]}
+EDN
+apply
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "settings apply! exited $code"; }
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}]}
+EDN
+apply
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! after dropping the last setting exited $code"; }
+plan
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "dropping the last setting took more than one apply!: exit $code"; }
+[ "$(json "$SB/.claude/settings.json" "'model' in d")" = False ] || fail "the dropped setting was not pruned"
+[ "$(json "$SB/.claude/settings.json" "d['\$schema']")" = https://json.schemastore.org/claude-code-settings.json ] \
+  || fail "settings.json lost its \$schema"
 
 echo "all claude mcp e2e checks passed"
