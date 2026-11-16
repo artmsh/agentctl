@@ -68,22 +68,28 @@
       (throw (ex-info (str "TOML parse failed: " (last (remove str/blank? (str/split-lines (str err)))))
                       {:err err})))))
 
+(defn- python-version [py]
+  (let [{:keys [exit out]} (run-python py "import sys;print('%d.%d' % sys.version_info[:2])" "")]
+    (if (zero? exit) (str/trim out) "?")))
+
 (defn read-toml
   "Parse a TOML file into a keywordless nested map. nil when absent; throws
-   when it does not parse, or when there is no interpreter to parse it with."
+   when there is no interpreter, and when the file does not parse — with
+   the cause and the fix, because Codex reads TOML 1.1 (a multi-line inline
+   table), which tomllib reads only from python 3.15. Read as empty instead,
+   the plan shows what exists as new and apply never converges."
   [path]
   (when (u/exists? path)
     (try (parse-text (u/slurp-safe path))
          (catch clojure.lang.ExceptionInfo e
-           (if (no-python? e) (throw e)
-               (throw (ex-info (str "TOML parse failed: " path) (ex-data e))))))))
-
-(defn read-toml-lenient
-  "`read-toml`, but nil for a file that does not parse. A missing interpreter
-   still throws."
-  [path]
-  (try (read-toml path)
-       (catch Exception e (if (no-python? e) (throw e) nil))))
+           (if (no-python? e)
+             (throw e)
+             (let [py (python!)]
+               (throw (ex-info (str (u/tilde path) " does not parse with " py " " (python-version py)
+                                    " (" (str/replace (ex-message e) #"^TOML parse failed: " "") ")."
+                                    " Codex also reads TOML 1.1, which tomllib reads only from python 3.15:"
+                                    " point AGENTCTL_PYTHON at one, or rewrite that construct as TOML 1.0")
+                               (assoc (ex-data e) :type ::unparseable :path path)))))))))
 
 (defn get-path
   "Look up a dotted path in a parsed TOML map, e.g. [\"mcp_servers\" \"slack\"]."

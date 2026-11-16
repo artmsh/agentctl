@@ -130,7 +130,7 @@
                                                         (map? v) nil
                                                         :else [dk v]))))
                                s)))
-    :codex (let [t (toml/read-toml-lenient codex/config-file)
+    :codex (let [t (toml/read-toml codex/config-file)
                  inv (invert codex/setting-keys)
                  hooks (scan-codex-hooks)]
              (not-empty
@@ -170,7 +170,7 @@
                    (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
                                                            (when (or (string? v) (boolean? v)) [dk v]))))
                                     s)))
-    :kimi (let [t (toml/read-toml-lenient kimi/config-file)
+    :kimi (let [t (toml/read-toml kimi/config-file)
                 inv (invert kimi/setting-keys)]
             (not-empty
              (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
@@ -313,8 +313,8 @@
        models))))
 
 (defn scan-providers []
-  (let [codex-cfg (toml/read-toml-lenient codex/config-file)
-        kimi-cfg (toml/read-toml-lenient kimi/config-file)
+  (let [codex-cfg (toml/read-toml codex/config-file)
+        kimi-cfg (toml/read-toml kimi/config-file)
         kimi-models (kimi-provider-models kimi-cfg)
         entries (concat
                  (for [[nm p] (get codex-cfg "model_providers")]
@@ -515,7 +515,7 @@
           (concat global project-rows))))
 
 (defn scan-projects []
-  (let [codex-cfg (toml/read-toml-lenient codex/config-file)
+  (let [codex-cfg (toml/read-toml codex/config-file)
         codex-projects (for [[path v] (get codex-cfg "projects")]
                          [path (= "trusted" (get v "trust_level")) :codex])
         pi-trust (for [[k v] (u/read-json pi/trust-file)] [(u/key-str k) (boolean v) :pi])

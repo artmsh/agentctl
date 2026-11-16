@@ -65,7 +65,7 @@
                                        :http_headers (get t "http_headers")
                                        :bearer_token_env_var (get t "bearer_token_env_var")}
                            :enabled (get t "enabled" true)}]))
-            (get (toml/read-toml-lenient config-file) "mcp_servers")))))
+            (get (toml/read-toml config-file) "mcp_servers")))))
 
 ;; ---------------------------------------------------------------- settings
 
@@ -143,7 +143,7 @@
    declared fields (`whole-table?`). Codex writes its own state into `[tui]`
    (`model_availability_nux`), so nothing above the slot is replaced."
   [presets]
-  (let [current (toml/read-toml-lenient config-file)]
+  (let [current (toml/read-toml config-file)]
     (for [[k p] (sort-by (comp str key) presets)
           :let [n (schema/preset-slot k)
                 table ["tui" "presets" n]
@@ -208,7 +208,7 @@
    anything agentctl did not write, and under the legacy `:executors` form,
    which never prunes, everything."
   [settings st entity-dsl?]
-  (let [current (toml/read-toml-lenient config-file)
+  (let [current (toml/read-toml config-file)
         owned (if entity-dsl? (vec (owned-paths st)) [])
         owned? (fn [leaf] (some #(and (<= (count %) (count leaf)) (= % (subvec leaf 0 (count %)))) owned))
         declared (set (map u/key-str (keys (:permission-profiles settings))))
@@ -433,12 +433,12 @@
    trust is the one `project-ops` writes."
   [proj]
   (or (true? (:trusted proj))
-      (= "trusted" (get-in (toml/read-toml-lenient config-file)
+      (= "trusted" (get-in (toml/read-toml config-file)
                            ["projects" (:path proj) "trust_level"]))))
 
 (defn- project-mcp-ops [cfg pid proj]
   (let [file (project-config-file proj)
-        servers (get (toml/read-toml-lenient file) "mcp_servers")
+        servers (get (toml/read-toml file) "mcp_servers")
         ms (common/project-mcps cfg proj tool)]
     (concat
      (when (and (seq ms) (not (trusted? proj)))
@@ -503,7 +503,7 @@
     (for [[id p] desired
           :let [key-ref (:key p)
                 env-var (when (= :env (:ref/kind key-ref)) (:ref/var key-ref))
-                current-name (get-in (toml/read-toml-lenient config-file)
+                current-name (get-in (toml/read-toml config-file)
                                      ["model_providers" (u/kw->str id) "name"])
                 kvs (u/prune-nils
                      {"base_url" (:url p)

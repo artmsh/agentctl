@@ -815,7 +815,7 @@
 (defn toml-set-op
   "Set scalar keys inside a TOML table via surgical edit."
   [{:keys [tool kind id file table kvs summary note risk project field-prefix]}]
-  (let [current (toml/read-toml-lenient file)
+  (let [current (toml/read-toml file)
         before (if (seq table) (get-in current (vec (map u/kw->str table))) current)
         diffs (field-diffs (into {} (map (fn [[k v]] [(u/kw->str k) v])) before)
                            (into {} (map (fn [[k v]] [(u/kw->str k) v])) kvs)
@@ -855,7 +855,7 @@
 
 (defn toml-remove-table-op
   [{:keys [tool kind id file table summary project]}]
-  (let [current (toml/read-toml-lenient file)
+  (let [current (toml/read-toml file)
         before (get-in current (vec (map u/kw->str table)))]
     (when (some? before)
       (op {:project project :action :delete :tool tool :kind kind :id id :target file

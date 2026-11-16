@@ -137,14 +137,17 @@
       (is (nil? (toml/find-python old-py)))
       (is (nil? (toml/find-python (str dir "/no-such-python"))))
       (is (some? (toml/find-python nil)) "this suite runs with a python3 3.11+ on PATH")))
-  (testing "a file that does not parse reads as nil leniently, but a missing interpreter is never swallowed"
+  (testing "a file this python cannot parse is an error naming the cause and the fix, never an empty table"
     (let [f (str (temp-dir) "/c.toml")]
       (u/write-text! f "a = 1\na = 2\n")
-      (is (nil? (toml/read-toml-lenient f)))
-      (is (nil? (toml/read-toml-lenient (str f ".absent"))))
+      (doseq [read [toml/read-toml]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"(?s)c\.toml does not parse.*TOML 1\.1.*3\.15.*AGENTCTL_PYTHON"
+                              (read f))))
+      (is (nil? (toml/read-toml (str f ".absent"))))
       (with-redefs [toml/python! (fn [] (throw (ex-info "no python" {:type :agentctl.toml/no-python})))]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml-lenient f)))
-        (is (nil? (toml/read-toml-lenient (str f ".absent"))) "an absent file needs no interpreter")))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml f)))
+        (is (nil? (toml/read-toml (str f ".absent"))) "an absent file needs no interpreter")))))
 
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)

@@ -1023,7 +1023,11 @@ need python3 3.11+. agentctl uses `AGENTCTL_PYTHON` when set, with no fallback,
 and otherwise the first of `python3.15` … `python3.11`, `python3` on `PATH`
 that has `tomllib`. With none, a run that has to read or write one of those
 files stops before its first op. Reading the file as empty instead would plan
-what exists as new, and apply would never converge.
+what exists as new, and apply would never converge. For the same reason, a
+file this python's `tomllib` cannot parse is an error that names the file, the
+interpreter and the parse error. Codex reads TOML 1.1 (for example, a
+multi-line inline table), and `tomllib` reads TOML 1.1 only from python 3.15. Point
+`AGENTCTL_PYTHON` at such a python, or rewrite the construct as TOML 1.0.
 
 ### gui
 
