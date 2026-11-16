@@ -45,7 +45,8 @@ segment.
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
-  values and every MCP header; review its output before sharing a config.
+  values, every MCP header, and every env value it cannot show is no secret; review its output
+  before sharing a config.
 
 ## Comparison
 

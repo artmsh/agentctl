@@ -575,7 +575,10 @@ Anything beyond that (env, cwd, per-tool selection) needs the map form.
 placeholder: agentctl writes headers resolved, and the value on disk says
 nothing about whether it was a secret. A whole `$VAR` header is kept. Env
 values, an MCP server's and Claude's settings `env` (`!bw://claude-env/<NAME>`),
-are redacted when they look like a credential.
+are redacted the same way unless they are provably no secret: a whole `$VAR`, a
+boolean, a number of up to five digits, or a common settings word such as
+`debug` or `fast`. A token under a plain name, `DOCS_AUTH` or `UPSTREAM`, is a
+placeholder too, and the import notes list each vault field to fill in.
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to

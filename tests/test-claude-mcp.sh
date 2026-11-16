@@ -726,31 +726,37 @@ apply -k mcps
 grep -q "$PLAIN" "$SB/.claude.json" && fail "the login password was written for a misspelt field"
 
 echo "34. import brings settings env and every header back as placeholders, and apply! keeps the env"
-python3 - "$SB" "$SECRET" "$PLAIN" <<'PY'
+python3 - "$SB" "$SECRET" "$PLAIN" "$PLAIN2" <<'PY'
 import json, sys
-sb, secret, plain = sys.argv[1:]
+sb, secret, plain, plain2 = sys.argv[1:]
 f = sb + "/.claude/settings.json"
 d = json.load(open(f))
-d["env"] = {"API_TOKEN": secret, "MODE": "fast"}
+d["env"] = {"API_TOKEN": secret, "DOCS_AUTH": plain2, "MODE": "fast"}
 json.dump(d, open(f, "w"), indent=2)
 f = sb + "/.claude.json"
 d = json.load(open(f))
 d["mcpServers"]["hx"] = {"type": "http", "url": "https://mcp.example.com/x", "headers": {"x-docs": plain}}
+d["mcpServers"]["sx"] = {"type": "stdio", "command": "/bin/echo", "args": [], "env": {"UPSTREAM": plain2, "PORT": "8080", "HOME_VAR": "$HOME"}}
 json.dump(d, open(f, "w"), indent=2)
 PY
 run import -f "$SB/none.edn" | grep -v '^;;' > "$SB/imported.edn"
-grep -qE "$SECRET|$PLAIN" "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import wrote a secret in plaintext"; }
+grep -qE "$SECRET|$PLAIN|$PLAIN2" "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import wrote a secret in plaintext"; }
+# a secret under a name that says nothing about one is a placeholder too
+grep -qF '"DOCS_AUTH" "!bw://claude-env/DOCS_AUTH"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain-named settings env secret is not a placeholder"; }
+grep -qF '!bw://sx/UPSTREAM' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain-named MCP env secret is not a placeholder"; }
+grep -qF '"8080"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a small number was redacted"; }
+grep -qF '"$HOME"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a \$VAR reference was redacted"; }
 grep -qF '"API_TOKEN" "!bw://claude-env/API_TOKEN"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "the settings env secret is not a placeholder"; }
 grep -qF '"MODE" "fast"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain settings env value was not imported"; }
 grep -qF '!bw://hx/x-docs' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a header with a plain-looking value is not a placeholder"; }
-vault '{"claude-env": {"API_TOKEN": "'$SECRET'"}, "hx": {"x-docs": "'$PLAIN'"}}'
+vault '{"claude-env": {"API_TOKEN": "'$SECRET'", "DOCS_AUTH": "'$PLAIN2'"}, "hx": {"x-docs": "'$PLAIN'"}}'
 set +e; run apply! -f "$SB/imported.edn" --all -t claude -k settings -y > "$SB/apply.txt" 2>&1; code=$?; set -e
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the imported config exited $code"; }
-[ "$(json "$SB/.claude/settings.json" "d.get('env')")" = "{'API_TOKEN': '$SECRET', 'MODE': 'fast'}" ] \
+[ "$(json "$SB/.claude/settings.json" "d.get('env')")" = "{'API_TOKEN': '$SECRET', 'DOCS_AUTH': '$PLAIN2', 'MODE': 'fast'}" ] \
   || { cat "$SB/apply.txt"; fail "apply! of the imported config changed or pruned the env"; }
 set +e; run apply -f "$SB/imported.edn" --all -t claude -k settings > "$SB/plan.txt" 2>&1; code=$?; set -e
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "the imported settings env is not converged: exit $code"; }
-grep -qE "$SECRET|$PLAIN" "$SB/apply.txt" && fail "apply! printed an imported secret"
+grep -qE "$SECRET|$PLAIN|$PLAIN2" "$SB/apply.txt" && fail "apply! printed an imported secret"
 
 for scope in local project; do
   echo "35. $scope: a header or env var the declaration drops is removed, one added by hand is kept"
