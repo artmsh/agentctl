@@ -1037,7 +1037,7 @@ echo "25. pi reads a project's skills in the project, and is told where one shad
 EDN
   { sed '$ s/}$//' "$H/untrusted.edn"; echo ' :trust [{:in "projects/proj" :acli [:pi]}]}'; } > "$H/agents.edn"
   (run apply -f "$H/untrusted.edn" --all -t pi || true) > "$H/plan0.txt" 2>&1
-  grep -q 'pi reads project skills only in a project it trusts' "$H/plan0.txt" \
+  grep -q 'pi asks before reading project skills here' "$H/plan0.txt" \
     && ! grep -q 'in place of the user-wide' "$H/plan0.txt" \
     || { cat "$H/plan0.txt"; fail "an untrusted project: no trust warning, or a collision pi never sees"; }
   set +e
@@ -1048,7 +1048,7 @@ EDN
     && grep -q "^exec: 'rm -r ~/projects/proj/.pi/skills/audit'" "$H/plan.txt" \
     && grep -q 'pi loads ~/projects/proj/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
     && ! grep -q '\.pi/agent/skills/review' "$H/plan.txt" \
-    && ! grep -q 'only in a project it trusts' "$H/plan.txt" \
+    && ! grep -q 'pi asks before reading' "$H/plan.txt" \
     || { cat "$H/plan.txt"; fail "the plan does not place review in the project, drop the audit copy and report the wrap-up collision"; }
   run apply! -f "$H/agents.edn" --all -t pi -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed"; }
   [ -f "$P/.agents/skills/review/SKILL.md" ] || fail "review is not in the project's .agents/skills"
@@ -1081,6 +1081,46 @@ EDN
   grep -q 'project copy ~/projects/game/.agents/skills/wrap-up kept — it is tracked by git' "$H/plan.txt" \
     && grep -q 'pi loads ~/projects/game/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
     || { cat "$H/plan.txt"; fail "the kept copy's collision report is missing"; }
+)
+
+echo "27. a shared project copy stays while an agent that reads it has no user-wide skill"
+(
+  # pi_copy NAME OTHER-ACLI TRUST: wrap-up user-wide for pi only, beside an
+  # identical, untracked copy in the project's shared .agents/skills
+  pi_copy() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    K="$H/projects/shared/skills"; P="$H/projects/proj"
+    mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+    mkdir -p "$P/.agents/skills"; cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+    git -C "$P" init -q
+    cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}
+          [shared "other"] {:in "projects/proj" :acli [$2]}}
+ $3}
+EDN
+    (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+  }
+  trust=':trust [{:in "projects/proj" :acli [:pi]}]'
+  rm_line="exec: 'rm -r ~/projects/proj/.agents/skills/wrap-up'"
+
+  pi_copy codex-reads ":codex :pi" "$trust"
+  ! grep -q "$rm_line" "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/proj/.agents/skills/wrap-up kept — codex reads it here and has no user-wide wrap-up' "$H/plan.txt" \
+    && grep -q 'pi loads ~/projects/proj/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the copy codex reads is planned for removal, or not reported"; }
+  [ -f "$P/.agents/skills/wrap-up/SKILL.md" ] || fail "pi removed the copy codex reads"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-reads: not converged"; }
+
+  pi_copy pi-asks ":codex :pi" ""
+  ! grep -q "$rm_line" "$H/plan.txt" && grep -q 'pi asks before reading project skills here' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "an untrusted project's copy is planned for removal"; }
+  [ -f "$P/.agents/skills/wrap-up/SKILL.md" ] || fail "pi removed a copy in a project it does not trust"
+
+  pi_copy pi-alone ":pi" "$trust"
+  grep -q "$rm_line" "$H/plan.txt" || { cat "$H/plan.txt"; fail "the copy only pi reads is not removed"; }
+  [ ! -e "$P/.agents/skills/wrap-up" ] || fail "the copy only pi reads is still there"
 )
 
 echo "all agentctl e2e checks passed"

@@ -349,6 +349,16 @@
              o))
          ops)))
 
+(defn- skill-readers
+  "The agents that read project `p`'s shared `.agents/skills`: those placed
+   there, pi unless it never reads the project's skills. A copy there is
+   theirs as much as the agent's whose user-wide skill it repeats."
+  [p]
+  (let [as-pi (cond-> p (:trust-by-tool p) (assoc :trusted (get (:trust-by-tool p) :pi)))]
+    (set (filter #(and (contains? sources/shared-readers %)
+                       (or (not= :pi %) (not= :untrusted (pi/trust as-pi))))
+                 (:for-tools p)))))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -366,6 +376,7 @@
                                        #(merge {:id pid :path p :tools {}} %
                                                {:for-tools (conj (set (:for-tools %)) t)})) c)) c))
                     cfg (:managed st))
+        cfg (update cfg :projects #(into {} (map (fn [[id p]] [id (assoc p :skill-readers (skill-readers p))])) %))
         tool-ops (mapcat (fn [t]
                            (let [tcfg (tool-cfg cfg t)]
                              (concat

@@ -43,7 +43,7 @@
   "Tools that read the CLI's shared `.agents/skills` copy rather than a
    directory of their own. Pi has `.pi/skills` as well, but the CLI's `pi`
    agent installs into the shared directory, and so does agentctl."
-  #{:codex :antigravity :kimi :dsh :pi})
+  sources/shared-readers)
 
 (defn command
   "The CLI invocation. `AGENTCTL_SKILLS_CMD` replaces it (tests run offline)."
@@ -448,7 +448,10 @@
                     :let [present (filter u/exists? paths)]]
                 {:pid pid :dir dir :sid sid :n n :src src :ts ts :paths paths :live live
                  :stale (empty? live)
-                 :kept (keep #(some->> (sources/kept-because cfg dir %) (vector %)) present)
+                 :kept (keep #(some->> (or (sources/kept-because cfg dir %)
+                                            (when (u/resolves? %) (sources/needed-by proj % s n)))
+                                        (vector %))
+                             present)
                  :links (distinct (concat (filter fs/sym-link? present)
                                           (mapcat #(sources/links-into dir %) (remove fs/sym-link? present))))})
         [kept gone] ((juxt filter remove) (comp seq :kept) found)]

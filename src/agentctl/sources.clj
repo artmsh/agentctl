@@ -261,6 +261,43 @@
       (when (some #(git-tracked? root %) (when-not (fs/sym-link? p) (links-into root p)))
         "a link tracked by git leads into it")))
 
+(def shared-readers
+  "Agents that read a repository's shared `.agents/skills`."
+  #{:codex :antigravity :kimi :dsh :pi})
+
+(defn- readers
+  "The agents that read skills from the project directory `dir` is: the
+   shared `.agents/skills` serves every agent placed in the project
+   (`:skill-readers`, which leaves out pi where it reads no project skills),
+   `.claude/skills` serves claude and `.pi/skills` pi."
+  [proj dir]
+  (let [root (:path proj)
+        shared (set (or (:skill-readers proj) (filter shared-readers (:for-tools proj))))
+        at #(= (leaf-path dir) (leaf-path (str root "/" %)))]
+    (cond (at ".agents/skills") shared
+          (at ".claude/skills") #{:claude}
+          (at ".pi/skills") (set (filter #{:pi} shared))
+          :else #{})))
+
+(defn needed-by
+  "Why the copy at `p` in project `proj` must stay for agents that read it
+   and have no user-wide `s` (named `n`), or nil: removing it would take the
+   skill from them. A link is only a way in; the copy is what they read, and
+   claude, where it is placed, reads one its `.claude/skills/<n>` link leads
+   into, which goes with the copy."
+  [proj p s n]
+  (let [root (:path proj)
+        claude-link (leaf-path (str root "/.claude/skills/" (fs/file-name p)))
+        readers (when-not (fs/sym-link? p)
+                  (cond-> (readers proj (str (fs/parent (u/abs-path p))))
+                    (and (contains? (set (:for-tools proj)) :claude)
+                         (some #(= claude-link (leaf-path %)) (links-into root p)))
+                    (conj :claude)))
+        missing (sort (remove #(contains? (set (:tools s)) %) readers))]
+    (when (seq missing)
+      (str (str/join ", " (map name missing)) (if (next missing) " read" " reads")
+           " it here and " (if (next missing) "have" "has") " no user-wide " n))))
+
 (defn lock-names
   "Names the `skills` CLI recorded as installed in the repository at `root`."
   [root]
@@ -278,7 +315,8 @@
    local directory, including ones predating the ownership manifest — only
    when it is byte-identical to the skill's source. One that differs is
    another skill of the same name: reported, kept. So is one some placement
-   still needs (`kept-because`). A directory goes with the links into it,
+   still needs (`kept-because`), and one an agent reads that has no
+   user-wide copy of its own (`needed-by`). A directory goes with the links into it,
    after a backup. A copy the `skills` CLI installed is left to
    `skills-cli/global-duplicate-ops`, which takes its lock entry with it.
    Check the global install again at execution time before removing."
@@ -294,7 +332,9 @@
         :let [root (get-in cfg [:projects pid :path])
               id (keyword (name pid) (name sid))
               base {:tool tool :kind :skills :project pid :id id}
-              kept (kept-because cfg root dest)
+              kept (or (kept-because cfg root dest)
+                       (when-not (dangling?)
+                         (needed-by (get-in cfg [:projects pid]) dest s (name sid))))
               links (when-not link? (links-into root dest))
               o (cond
                   kept (kept-op base dest kept)

@@ -185,11 +185,31 @@
                  (take-while some? (iterate #(some-> (fs/parent %) str)
                                             (or (u/real-path dir) (u/abs-path dir))))))))
 
-(defn trusted?
-  "Does pi trust the project? It discovers project skills only then. A
-   decision this config makes is the one the run writes, so it counts first."
+(defn- default-trust
+  "Pi's `defaultProjectTrust`, from its own settings: what it does in a
+   project trust.json holds no decision for. \"always\" trusts it, \"never\"
+   does not, and \"ask\" — the default, and what pi makes of any other
+   value — asks at startup, and reads nothing when it cannot ask."
+  []
+  (let [v (:defaultProjectTrust (u/read-json settings-file))]
+    (if (#{"always" "never"} v) v "ask")))
+
+(defn trust
+  "How pi treats the project: `:trusted`, `:untrusted`, or `:ask`. A
+   decision this config makes is the one the run writes, so it counts
+   first; then trust.json's nearest decision; then `defaultProjectTrust`.
+   (Pi trusts outright a project with no project resources at all, but one
+   with skills in it has some.)"
   [proj]
-  (true? (if (some? (:trusted proj)) (:trusted proj) (some-> (trust-decision (:path proj)) val))))
+  (let [d (if (some? (:trusted proj)) (:trusted proj) (some-> (trust-decision (:path proj)) val))]
+    (cond (true? d) :trusted
+          (false? d) :untrusted
+          :else (case (default-trust) "always" :trusted "never" :untrusted :ask))))
+
+(defn trusted?
+  "Does pi read the project's skills without asking first?"
+  [proj]
+  (= :trusted (trust proj)))
 
 (defn- repo-root [dir]
   (some #(when (u/exists? (str % "/.git")) %)
@@ -247,25 +267,31 @@
                             " — pi keeps the one in ~/.pi/agent/skills and warns of the collision")})))))
 
 (defn- untrusted-ops
-  "Skills placed in a project pi does not trust are never read by it."
+  "Skills placed in a project pi does not trust yet: it asks before reading
+   them, or never reads them."
   [cfg]
   (for [[pid proj] (:projects cfg)
+        :let [t (trust proj)]
         :when (and (contains? (:for-tools proj) tool)
                    (seq (:skills (sources/project-skills cfg proj)))
-                   (not (trusted? proj)))]
+                   (not= :trusted t))]
     (plan/op {:action :noop :warn true :conflict true :tool tool :kind :skills :project pid
               :id (keyword (name pid) "skills") :project-path (:path proj)
               :display {:kind "skills" :entity pid :agents ["pi"]}
-              :summary "pi reads project skills only in a project it trusts — place :trust for pi there, or trust it in pi"})))
+              :summary (str (if (= :ask t)
+                              "pi asks before reading project skills here"
+                              "pi does not trust this project and reads none of its skills")
+                            " — place :trust for pi there, or trust it in pi")})))
 
 (defn project-skill-ops
   "Installing a project's skills is the `skills` CLI's job (`skills-cli`).
    What is left here: dropping a project copy of a user-wide skill from
    either directory pi reads, and saying where pi would still load a
-   project skill in place of a user-wide one."
+   project skill in place of a user-wide one. Pi asks for none of that in a
+   project whose skills it does not read without asking."
   [cfg]
   (let [unlinks (for [[pid proj] (:projects cfg)
-                      :when (contains? (:for-tools proj) tool)
+                      :when (and (contains? (:for-tools proj) tool) (trusted? proj))
                       dir [(project-skills-dir proj) (own-project-skills-dir proj)]
                       o (sources/global-project-unlink-ops cfg tool pid dir skills-dir)]
                   o)

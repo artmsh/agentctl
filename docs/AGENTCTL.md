@@ -503,8 +503,9 @@ what the clone brought — one run, not two.
 For current entity-first declarations, a repository placement uses the skills
 CLI. Claude reads `<project>/.claude/skills`, while Codex, Antigravity, Kimi,
 Pi and the DeepSeek Harness share `<project>/.agents/skills`. Pi reads it only
-in a project it trusts; see [Pi](GUIDE.md#pi) for how it settles a skill name
-found both there and user-wide. The legacy project registry is kept for
+in a project it trusts; see [Pi](GUIDE.md#pi) for how that is decided and how
+it settles a skill name found both there and user-wide. A copy there is kept
+while an agent placed in the project reads it and has no user-wide copy. The legacy project registry is kept for
 existing files; see [`SCOPE-DSL.md`](SCOPE-DSL.md) for current placement rules.
 
 ### MCP shorthand
@@ -856,8 +857,8 @@ only in part, is `unknown`, and its drift is not reported as clean.
 
 `SKILLS` also repeats the plan's reports that hold once it has converged: a
 project copy kept beside a user-wide skill and why, one pi loads in place of a
-user-wide skill of the same name, and skills placed in a project pi does not
-trust. They are warnings and never fail the exit code.
+user-wide skill of the same name, and skills placed in a project pi asks
+about first or does not read. They are warnings and never fail the exit code.
 
 ## Import is lossy w.r.t. sugar
 

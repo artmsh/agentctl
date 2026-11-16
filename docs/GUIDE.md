@@ -46,7 +46,11 @@ A project copy is kept, and the plan says why, when:
 - it differs from the user-wide source, because it is another skill of the same name;
 - git tracks it, or a link git tracks leads into it, because it is the project's own;
 - a declared placement needs it: a `:per-tool :path`, another skill's source,
-  or a pack that lives there. Removing it would leave that tool's link dangling.
+  or a pack that lives there. Removing it would leave that tool's link dangling;
+- an agent placed in the project reads it and has no user-wide copy of that
+  skill: every agent placed there reads the shared `.agents/skills` (pi only
+  where it reads the project's skills), and claude reads a copy its
+  `.claude/skills/<name>` link leads into.
 
 A kept copy that the `skills` CLI installed keeps its lock entry, since
 `skills remove` would delete the copy as well. A redundant link into a kept
@@ -438,14 +442,18 @@ there.
 ### Pi
 
 Pi reads a project's skills from `.pi/skills` and from `.agents/skills` in the
-working directory and each directory above it, up to the repository root. It
-reads them only in a project it trusts: place `:trust` for pi on the project
-(or trust it in pi) or the plan says pi will never see what it installs there.
-Pi's own `~/.pi/agent/skills` and `~/.agents/skills` are its user-wide
-directories. Earlier versions of agentctl installed a project's skills for pi
-user-wide; `apply!` now moves each one into the project, removing the
-user-wide link it made. In a project pi does not trust, that takes the skill
-away from pi until the project is trusted.
+working directory and each directory above it, up to the repository root,
+once it trusts the project. Trust is the project's `:trust` for pi when the
+config places one, else the nearest decision in pi's `trust.json`, else pi's
+`defaultProjectTrust` setting: `"always"` trusts every project, `"never"`
+none, and `"ask"` (the default) asks at startup and reads nothing until the
+project is trusted. The plan says when a project's skills sit where pi asks
+first or does not read them. Pi's own `~/.pi/agent/skills` and
+`~/.agents/skills` are its user-wide directories. Earlier versions of
+agentctl installed a project's skills for pi user-wide; `apply!` now moves
+each one into the project, removing the user-wide link it made. In a project
+pi does not trust, that takes the skill away from pi until the project is
+trusted.
 
 Pi keys a skill on the `name:` in its SKILL.md, keeps the first one it finds —
 a trusted project's before the user's, `~/.pi/agent/skills` before
@@ -455,12 +463,14 @@ So for pi agentctl:
 
 - removes a project copy, in `.agents/skills` or `.pi/skills`, that is
   identical to a skill installed user-wide for pi, as it does for the other
-  agents (and keeps it in the cases listed above);
+  agents, and only in a project pi trusts (and keeps it in the cases listed
+  above — a copy codex also reads stays until codex has the skill user-wide);
 - reports a project skill that differs from a user-wide one of the same name:
   pi loads the project's one there and warns of the collision. Rename one, or
   leave `:pi` out of the user-wide skill to keep the project's quietly;
 - reports a skill in `~/.agents/skills` that has the name of a user-wide one;
-- says when a project's skills are placed where pi does not trust it.
+- says when a project's skills are placed where pi asks before reading them,
+  or does not read them at all. Removals and collisions are left alone there.
 
 These reports are warnings: `apply` shows them while it has changes to make,
 and `validate` repeats them under SKILLS once the plan has converged.

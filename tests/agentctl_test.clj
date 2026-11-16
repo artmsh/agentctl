@@ -3097,6 +3097,24 @@
         (is (not (u/exists? link)) "no link is left dangling")
         (is (fs/directory? src))))))
 
+(deftest a-copy-claude-reads-through-its-link-stays-while-claude-has-no-user-wide-one
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up") link (str repo "/.claude/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex :claude]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs (str repo "/.git"))
+    (fs/copy-tree src copy)
+    (fs/create-dirs (fs/parent link))
+    (fs/create-sym-link link "../../.agents/skills/wrap-up")
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= copy (:target %)) (plan/mutating? %)) ops))
+        (is (some #(and (= copy (:target %))
+                        (str/includes? (str (:summary %)) "claude reads it here and has no user-wide wrap-up"))
+                  ops))))))
+
 (deftest a-skill-committed-in-the-project-is-linked-not-moved
   (doseq [acli [[:claude] [:claude :codex]]]
     (testing (str acli)
@@ -3184,7 +3202,7 @@
             "linked where pi and the skills CLI's pi agent read")
         (is (not-any? #(str/starts-with? (str (:target %)) pi/skills-dir) skills) "not user-wide")
         (is (not-any? #(str/includes? (str (:summary %)) "not installed") ops))
-        (is (some #(str/includes? (str (:summary %)) "only in a project it trusts") skills)
+        (is (some #(str/includes? (str (:summary %)) "pi asks before reading project skills here") skills)
             "an untrusted project's skills are never read by pi")))))
 
 (deftest pi-trust-is-the-nearest-trust-json-decision
@@ -3197,6 +3215,19 @@
       (u/write-json! file {(str root "/work") true (u/real-path repo) false})
       (is (false? (pi/trusted? {:path repo})) "the nearest decision wins")
       (is (true? (pi/trusted? {:path repo :trusted true})) "the config's own decision counts first"))))
+
+(deftest pi-default-project-trust-decides-where-trust-json-does-not
+  (let [root (temp-dir) repo (str root "/repo") settings (str root "/settings.json")
+        trust-file (str root "/trust.json")]
+    (fs/create-dirs repo)
+    (with-redefs [pi/settings-file settings pi/trust-file trust-file]
+      (is (= :ask (pi/trust {:path repo})) "pi asks by default")
+      (doseq [[v want] [["always" :trusted] ["never" :untrusted] ["sometimes" :ask]]]
+        (u/write-json! settings {:defaultProjectTrust v})
+        (is (= want (pi/trust {:path repo})) v))
+      (u/write-json! settings {:defaultProjectTrust "always"})
+      (u/write-json! trust-file {(u/real-path repo) false})
+      (is (= :untrusted (pi/trust {:path repo})) "a decision for the project beats the default"))))
 
 (deftest pi-collisions-between-user-and-project-skills
   (let [root (temp-dir) repo (str root "/repo") sub (str repo "/app") pack (str root "/pack")
