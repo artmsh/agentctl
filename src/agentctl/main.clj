@@ -130,19 +130,34 @@
                     " — the projects under " (u/tilde path)))
        " (--all for the whole config)")))
 
+(defn- finding->data
+  "A finding as `validate --json` prints one."
+  [f]
+  {:level (name (:level f)) :where (mapv u/kw->str (:where f)) :message (:message f)})
+
 (defn- check-config!
-  "Refuse a config with errors; say what is merely odd about one without.
-   `findings` are the config's structural ones unless given: a local run
-   also checks what this machine says, once it knows its scope."
-  [cfg & [findings]]
+  "Refuse a config with errors; say what is merely odd about one without, and
+   return those findings. `findings` are the config's structural ones unless
+   given: a local run also checks what this machine says, once it knows its
+   scope. Under --json nothing is printed beside the document: the refusal is
+   a document of its own, and the warnings are the caller's to put in
+   `findings` — a line of text above the JSON is output no parser reads."
+  [cfg opts & [findings]]
   (let [findings (or findings (config/structural-findings cfg))
-        errors (filter #(= :error (:level %)) findings)]
+        errors (filter #(= :error (:level %)) findings)
+        warnings (filter #(= :warn (:level %)) findings)]
     (when (seq errors)
-      (println "config errors — refusing to plan:")
-      (doseq [f errors] (println "  ✗" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))
+      (if (:json opts)
+        (println (json/generate-string {:error "config errors — refusing to plan"
+                                        :findings (mapv finding->data (concat errors warnings))}
+                                       {:pretty true}))
+        (do (println "config errors — refusing to plan:")
+            (doseq [f errors] (println "  ✗" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))))
       (System/exit 1))
-    (doseq [f findings :when (= :warn (:level f))]
-      (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))))
+    (when-not (:json opts)
+      (doseq [f warnings]
+        (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f))))
+    warnings))
 
 (defn- confirm!
   "Ask before a mutating run, unless told not to. Declining exits."
@@ -170,7 +185,7 @@
   (when (seq (:only opts))
     (throw (ex-info "--only does not apply with --host: a host is planned as a whole" {})))
   (let [cfg (load! opts)
-        _ (check-config! cfg)
+        findings (check-config! cfg opts)
         host (hosts/lookup cfg (:host opts))
         st (state/load-host-state (:id host))
         planned (hosts/plan-host host st opts)
@@ -180,6 +195,7 @@
       (println (json/generate-string {:host (name (:id host))
                                       :ops (map op->data ops)
                                       :skipped (map name (:skipped planned))
+                                      :findings (mapv finding->data findings)
                                       :summary (plan/summary-line ops)}
                                      {:pretty true}))
       (do
@@ -214,8 +230,8 @@
 
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
-        st (state/load-state)]
-    (check-config! cfg)
+        st (state/load-state)
+        findings (check-config! cfg opts)]
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
@@ -226,7 +242,7 @@
           opts (cond-> opts scope (assoc :projects (:projects scope)))
           ;; this machine's verdict on the status-line file; a run that
           ;; cannot write the file gets it as a warning
-          _ (check-config! cfg (vec (statusline/findings cfg opts)))
+          findings (concat findings (check-config! cfg opts (vec (statusline/findings cfg opts))))
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)
@@ -241,6 +257,7 @@
         (println (json/generate-string
                   (cond-> {:ops (map op->data ops)
                            :warnings (vec warnings)
+                           :findings (mapv finding->data findings)
                            :summary (plan/summary-line ops)}
                     scope (assoc :scope {:where (u/kw->str (:where scope))
                                          :path (:path scope)
@@ -388,5 +405,8 @@
             "state" (cmd-state opts)
             "gui" (cmd-gui opts)))
         (catch clojure.lang.ExceptionInfo e
-          (println (str "error: " (ex-message e)))
+          ;; a script reading --json gets its error as JSON too
+          (println (if (:json opts)
+                     (json/generate-string {:error (ex-message e)} {:pretty true})
+                     (str "error: " (ex-message e))))
           (System/exit 1))))))

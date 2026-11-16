@@ -1105,4 +1105,70 @@ assert not [o for o in ops if o["action"] in ("create", "update", "delete")], op
 assert any(o.get("warn") and "bogus-setting" in o["summary"] for o in ops), ops
 PY
 
+echo "24. --json prints one JSON document: config findings and refusals included"
+JO="$SB/json-out"
+mkdir -p "$JO"
+jo() { (cd "$JO" && AGENTCTL_HOME="$JO" run "$@"); }
+# jo_json <want-exit> <out-file> <args…>: the run exits as wanted and its
+# stdout parses as JSON on its own
+jo_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  jo "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$JO/warn.edn" <<'EDN'
+{:cli-code {:pi {:model "m"}}}
+EDN
+cat > "$JO/error.edn" <<'EDN'
+{:mcps {:x {:cmd "a"}} :projects {:p {:mcp [:nope]}}}
+EDN
+# a structural warning travels in `findings`, beside the plan
+jo_json 2 "$JO/warn.json" apply -f "$JO/warn.edn" -t pi
+python3 - "$JO/warn.json" <<'PY' || { cat "$JO/warn.json"; fail "--json lost the config warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ops"], d
+assert any(f["level"] == "warn" and f["where"] == ["cli-code"] and ":cli-code" in f["message"]
+           for f in d["findings"]), d["findings"]
+PY
+jo_json 0 "$JO/validate.json" validate -f "$JO/warn.edn" -t pi
+# so does this machine's word on the status line, checked once the scope is known
+cat > "$JO/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+AGENT_STATUSLINE_CONFIG="$JO/elsewhere.json" jo_json 2 "$JO/statusline.json" apply -f "$JO/statusline.edn" --all
+python3 - "$JO/statusline.json" <<'PY' || { cat "$JO/statusline.json"; fail "--json lost the status-line warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and f["where"] == ["statusline", "env"] for f in d["findings"]), d["findings"]
+PY
+# a config with errors is refused as JSON, and plans nothing
+for cmd in apply apply!; do
+  jo_json 1 "$JO/error-$cmd.json" "$cmd" -f "$JO/error.edn" -y
+  python3 - "$JO/error-$cmd.json" <<'PY' || { cat "$JO/error-$cmd.json"; fail "$cmd --json refused a config without saying why"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "refusing to plan" in d["error"], d
+assert "ops" not in d, d
+assert any(f["level"] == "error" and f["where"] == ["projects", "p", "mcp"] for f in d["findings"]), d
+PY
+done
+# so is every other error: a selector, a missing file
+jo_json 1 "$JO/kind.json" apply -f "$JO/warn.edn" -k bogus-kind
+python3 -c 'import json,sys; sys.exit(0 if "unknown kind" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/kind.json" \
+  || { cat "$JO/kind.json"; fail "-k bogus-kind --json lost the error"; }
+jo_json 1 "$JO/missing.json" apply -f "$JO/nowhere.edn"
+python3 -c 'import json,sys; sys.exit(0 if "not found" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/missing.json" \
+  || { cat "$JO/missing.json"; fail "a missing config under --json lost the error"; }
+# text output is unchanged
+set +e
+jo apply -f "$JO/warn.edn" -t pi > "$JO/warn.txt"; code=$?
+set -e
+[ "$code" = 2 ] && grep -q '⚠ cli-code — :cli-code is the old name' "$JO/warn.txt" \
+  || { cat "$JO/warn.txt"; fail "the text plan stopped printing config warnings"; }
+
 echo "all agentctl e2e checks passed"

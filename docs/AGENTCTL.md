@@ -725,7 +725,10 @@ end up writing a resolved secret into a tool's config file are tagged
                    :mcps / :skills ops, so --kind projects would miss them)
     --only KIND/ID apply/apply!: one entity wherever it is placed (repeatable)
     --user         apply/apply!: user scope only, no project
-    --json         machine-readable output
+    --json         machine-readable output: apply and validate print one JSON
+                   document, apply with config warnings in `findings`; an
+                   error, a refused config included, is {"error": …} with
+                   exit 1 (apply! adds its prompt and result as text)
 -v, --verbose      per-field diffs and target paths
     --show-noop    include unchanged and informational entries
     --deep         validate: probe the network (provider /models, git remotes)
