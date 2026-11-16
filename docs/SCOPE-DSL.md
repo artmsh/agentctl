@@ -16,7 +16,7 @@ pruning after a selector loses a repository. Version 1 remains readable, but
 cannot recover paths it never recorded. `:at :machine` is the default;
 `:at :repo` opts MCPs into the repository file. `:scope` is a deprecated alias.
 Tool capabilities still apply: unsupported project placements report warnings.
-The GUI edits the section vectors and shows a read-only resolved-targets pane.
+The GUI edits each row and keyed entry, with its `:in` and `:acli`, and shows a read-only resolved-targets pane.
 
 One MCP server can be placed differently per tool by repeating its `:id` with
 disjoint `:acli`: write the definition once and leave the other rows as bare

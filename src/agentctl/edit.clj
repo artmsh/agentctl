@@ -7,10 +7,13 @@
    go through a zipper and touch only the node named — the same rule the codex
    adapter follows for config.toml.
 
-   An op is {:op :set|:unset|:expand|:rename :path [k …] :value v}. Paths are
-   keywords, except a `:#def` binding, whose keys are symbols."
+   An op is {:op :set|:unset|:expand|:rename|:append :path [k …] :value v}.
+   A path step is a map key — a keyword, a `:#def` symbol, or a keyed
+   section's vector selector — or an index into a vector of entity rows.
+   `:append` adds `value` as the last element of the vector at `path`."
   (:require [clojure.string :as str]
             [rewrite-clj.node :as n]
+            [rewrite-clj.parser :as p]
             [rewrite-clj.zip :as z]))
 
 ;; ---------------------------------------------------------------- reading
@@ -23,6 +26,40 @@
   (z/sexpr (z/of-string (if (str/blank? text) "{}" text))))
 
 ;; ---------------------------------------------------------------- writing
+
+(defn- edn-text
+  "`v` as the file writes EDN: `pr-str` puts a comma between map entries,
+   which nobody types."
+  [v]
+  (let [join #(str/join " " (map edn-text %))]
+    (cond
+      (map? v) (str "{" (str/join " " (map (fn [[k x]] (str (edn-text k) " " (edn-text x))) v)) "}")
+      (vector? v) (str "[" (join v) "]")
+      (set? v) (str "#{" (join v) "}")
+      (seq? v) (str "(" (join v) ")")
+      :else (binding [*print-length* nil] (pr-str v)))))
+
+(defn- node [v] (p/parse-string (edn-text v)))
+
+(defn- zget-key
+  "The key node for `k` in a map."
+  [zl k]
+  (loop [kn (z/down zl)]
+    (when kn
+      (if (= k (z/sexpr kn)) kn (recur (some-> kn z/right z/right))))))
+
+(defn- zget
+  "The value node for key `k` of a map, or element `k` of a vector. A keyed
+   section's key is a vector selector such as `[team \"review\"]`, which
+   `z/get` does not find, so map keys are compared as data."
+  [zl k]
+  (if (z/map? zl)
+    (loop [kn (z/down zl)]
+      (when kn
+        (if (= k (z/sexpr kn))
+          (z/right kn)
+          (recur (some-> kn z/right z/right)))))
+    (z/get zl k)))
 
 (defn- separator
   "How this map already breaks between entries: the line break and indent in
@@ -42,7 +79,7 @@
   "A new key appended to a map that is written one-per-line belongs on its own
    line too; `assoc` alone leaves it trailing the last entry."
   [zmap k sep]
-  (if-let [kn (some-> (z/get zmap k) z/left)]
+  (if-let [kn (some-> (zget zmap k) z/left)]
     (let [ws (z/left* kn)]
       (z/up (if (and ws (z/whitespace? ws))
               (z/replace* ws (n/whitespace-node sep))
@@ -50,16 +87,23 @@
     zmap))
 
 (defn- zassoc [zmap k v]
-  (let [new? (nil? (z/get zmap k))
-        sep (when new? (separator zmap))]
-    (cond-> (z/assoc zmap k v)
-      (and new? sep) (newline-before-key k sep))))
+  (if-let [old (zget zmap k)]
+    (z/up (z/replace old (node v)))
+    (let [sep (separator zmap)]
+      (cond-> (z/assoc zmap k (node v))
+        sep (newline-before-key k sep)))))
+
+(defn- coll-node? [zl] (or (z/map? zl) (z/vector? zl)))
 
 (defn- zset-in [zl [k & ks] v]
   (if (empty? ks)
-    (zassoc zl k v)
-    (if-let [sub (z/get zl k)]
-      (if (z/map? sub)
+    (if (z/vector? zl)
+      (if (and (int? k) (< -1 k (count (z/sexpr zl))))
+        (z/assoc zl k (node v))
+        (throw (ex-info (str "no row " k " to set") {})))
+      (zassoc zl k v))
+    (if-let [sub (and (or (z/map? zl) (int? k)) (zget zl k))]
+      (if (coll-node? sub)
         (z/up (zset-in sub ks v))
         ;; the node in the way is a scalar — a shorthand spelling the caller
         ;; wanted to keep would have been expanded before this op
@@ -69,7 +113,7 @@
 (defn- znav
   "The node at `path`, or nil if the way there is not a map."
   [zl path]
-  (reduce (fn [z k] (when (and z (z/map? z)) (z/get z k))) zl path))
+  (reduce (fn [z k] (when (and z (or (z/map? z) (and (z/vector? z) (int? k)))) (zget z k))) zl path))
 
 (defn- top
   "Back to the outermost *form*. `z/up` does not stop there: above it sits the
@@ -83,11 +127,34 @@
         k (last path)]
     (loop [cur zl ks (seq ks)]
       (cond
-        ks (if-let [sub (z/get cur (first ks))]
-             (if (z/map? sub) (recur sub (next ks)) zl)
+        ks (if-let [sub (when (or (z/map? cur) (int? (first ks))) (zget cur (first ks)))]
+             (if (coll-node? sub) (recur sub (next ks)) zl)
              zl)
-        (nil? (z/get cur k)) zl
-        :else (top (-> (z/get cur k) z/remove z/remove))))))
+        ;; a row of a vector is one node; a map entry is a key and its value
+        (z/vector? cur) (if (and (int? k) (< -1 k (count (z/sexpr cur))))
+                          (top (z/remove (zget cur k)))
+                          zl)
+        (nil? (zget cur k)) zl
+        ;; the value goes first; `z/remove` then leaves the cursor at the
+        ;; node before it, which for a vector key is inside the key, so the
+        ;; key is found again from the top
+        :else (let [root (top (z/remove (zget cur k)))
+                    parent (if (seq (butlast path)) (znav root (vec (butlast path))) root)]
+                (top (z/remove (zget-key parent k))))))))
+
+(defn- zappend
+  "Add `v` as the last row of the vector at `path`, broken and indented like
+   the rows above it; a missing vector is created holding just `v`."
+  [zl path v]
+  (let [zv (znav zl path)]
+    (cond
+      (nil? zv) (top (zset-in zl path [v]))
+      (not (z/vector? zv)) (throw (ex-info (str (pr-str (last path)) " is not a vector of rows") {}))
+      (nil? (z/down zv)) (top (z/append-child zv (node v)))
+      :else (let [sep (or (separator zv) " ")]
+              (top (-> zv
+                       (z/append-child* (n/whitespace-node sep))
+                       (z/append-child* (node v))))))))
 
 (defn- zrename
   "Rename the key at `path`, leaving its value, its position in the map and the
@@ -106,15 +173,15 @@
       (or (nil? parent) (not (z/map? parent)))
       (throw (ex-info (str "nothing to rename at " (pr-str (vec path))) {}))
 
-      (nil? (z/get parent k))
+      (nil? (zget parent k))
       (throw (ex-info (str (pr-str k) " is not declared") {}))
 
       (= k new-key) zl
 
-      (some? (z/get parent new-key))
+      (some? (zget parent new-key))
       (throw (ex-info (str (pr-str new-key) " is already declared here") {}))
 
-      :else (top (z/replace (z/left (z/get parent k)) new-key)))))
+      :else (top (z/replace (z/left (zget parent k)) new-key)))))
 
 (defn apply-ops
   "Run ops against `text`, returning the new text. Throws on unparseable text —
@@ -137,6 +204,7 @@
                                 acc
                                 (top (zset-in acc path value)))
                       :rename (zrename acc path value)
+                      :append (zappend acc path value)
                       (throw (ex-info (str "unknown edit op " op) {})))))
                 zl ops)
         z/root-string)))
