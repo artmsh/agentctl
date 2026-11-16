@@ -197,6 +197,17 @@
                           (throw (ex-info "project skill changed since planning" {:path dest})))
                         ((:exec! o)))))))
 
+(defn packs-for-skill
+  "Pack ids skill `id` could come out of: its declared `:from`, the pack of
+   that name, or, for a bare id, every pack carrying it plus every pack not
+   on disk yet."
+  [cfg id]
+  (cond
+    (get-in cfg [:skills id]) [(:from (get-in cfg [:skills id]))]
+    (get-in cfg [:skill-packs id]) [id]
+    :else (let [{:keys [found not-ready]} (locate-skill (:skill-packs cfg) id)]
+            (concat (map first found) not-ready))))
+
 (defn packs-for
   "Pack ids the given projects could need. A project names a skill by one of
    three routes — a declared skill (whose `:from` is a pack), a whole pack, or
@@ -210,11 +221,7 @@
      (for [[pid proj] (:projects cfg)
            :when (contains? wanted pid)
            id (:skills proj)
-           pack (cond
-                  (get-in cfg [:skills id]) [(:from (get-in cfg [:skills id]))]
-                  (get-in cfg [:skill-packs id]) [id]
-                  :else (let [{:keys [found not-ready]} (locate-skill (:skill-packs cfg) id)]
-                          (concat (map first found) not-ready)))
+           pack (packs-for-skill cfg id)
            :when pack]
        pack))))
 
@@ -322,6 +329,15 @@
               :cmds cmds
               :runs (mapv plan/run runs)
               :diffs [{:key :revision :before local :after remote}]
+              ;; a fetch that fails fails the op: nothing is owned, and
+              ;; no skill is linked against a checkout that is not there
               :exec! (fn []
                        (fs/create-dirs packs-root)
-                       (doseq [c cmds] (apply u/sh c)))})))
+                       (doseq [r runs
+                               :let [{:keys [exit out err]} (apply u/sh (:argv r))]
+                               :when (not (zero? exit))]
+                         (throw (ex-info (str (:program r) " " (str/join " " (:action r))
+                                              " exited " exit ": "
+                                              (or (last (remove str/blank? (str/split-lines (str err))))
+                                                  (not-empty out) "no output"))
+                                         {:exit exit}))))})))

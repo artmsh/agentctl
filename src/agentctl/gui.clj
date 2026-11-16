@@ -15,6 +15,7 @@
             [agentctl.form :as form]
             [agentctl.plan :as plan]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [cheshire.core :as json]
             [clojure.java.io :as io]
@@ -27,14 +28,19 @@
 (defn opts-from-json
   "JSON gives strings; every filter downstream compares keywords, and
    `keep-projects` does no coercion of its own — a vector of strings there
-   would silently select nothing."
+   would silently select nothing. A tool or kind nothing answers to would
+   select nothing too, and is refused the way the CLI refuses `-t`/`-k`:
+   ex-data `:status 400`."
   [m base]
-  (merge base
-         {:tools (set (map keyword (:tools m)))
-          :kinds (set (map keyword (:kinds m)))
-          :projects (set (map keyword (:projects m)))
-          :verbose (boolean (:verbose m))
-          :show-noop (boolean (:show-noop m))}))
+  (let [o (merge base
+                 {:tools (set (map keyword (:tools m)))
+                  :kinds (set (map keyword (:kinds m)))
+                  :projects (set (map keyword (:projects m)))
+                  :verbose (boolean (:verbose m))
+                  :show-noop (boolean (:show-noop m))})]
+    (when-let [[flag v msg] (first (core/unknown-selectors o))]
+      (throw (ex-info (str ({"-t" "tool " "-k" "kind "} flag) (u/kw->str v) ": " msg) {:status 400})))
+    o))
 
 (defn- finding->data [f]
   {:level (name (:level f))
@@ -55,12 +61,24 @@
   [text path opts]
   (try
     (let [cfg (config/parse-config (buffer-text text) path)
-          findings (config/structural-findings cfg)
-          errors (filter #(= :error (:level %)) findings)]
-      (if (seq errors)
+          ;; the GUI plans this machine, so this machine's findings too
+          findings (concat (config/structural-findings cfg) (statusline/findings cfg opts))
+          errors (filter #(= :error (:level %)) findings)
+          ;; the buffer decides the format, and it can change with any edit:
+          ;; a kind it never plans is refused here, not in `opts-from-json`
+          [_ dead msg] (first (core/dead-selectors cfg opts))]
+      (cond
+        (seq errors)
         {:ok false
          :error "config errors — refusing to plan"
          :findings (mapv finding->data findings)}
+
+        dead
+        {:ok false
+         :error (str "kind " dead ": " msg)
+         :findings (mapv finding->data findings)}
+
+        :else
         (let [st (state/load-state)
               ops (core/build-plan cfg st opts)
               changes (filter plan/mutating? ops)]
@@ -70,8 +88,11 @@
            ;; the rendered plan, not the ops: `render-val` is where a
            ;; credential read out of an existing config file gets masked, and
            ;; serializing `:diffs` would route around it
+           ;; printed when the CLI prints it: `index.html` shows its
+           ;; up-to-date state for exactly the "no changes" line, so a
+           ;; converged plan carrying a warning has to arrive as a plan
            :plan (binding [plan/*color* false]
-                   (if (or (seq changes) (seq (core/unresolved ops)))
+                   (if (plan/show-plan? ops opts)
                      (str/triml (plan/render-plan ops opts))
                      "no changes — environment matches agents.edn"))
            ;; the same plan as a table: grouped and masked in Clojure, because
@@ -80,6 +101,9 @@
            ;; and for parity with what the CLI prints
            :ops (plan/plan-data ops opts)
            :summary (plan/summary-line ops)
+           ;; the pills: the same ops `:summary` counts, so the two agree by
+           ;; construction rather than by re-deriving them from `:plan` text
+           :counts (plan/op-counts ops)
            :changes (count changes)
            :secrets (count (filter #(= :secret (:risk %)) changes))})))
     (catch Exception e
@@ -144,7 +168,7 @@
                   failed (concat failed unresolved)]
               ;; ownership is never claimed for a resource whose creation
               ;; failed — a later prune would delete something we never made;
-              ;; on a scoped run (-t/-k/-p) a data-carrying id (hooks) only
+              ;; on a scoped run (-t/-k/-p/--only/--user) a data-carrying id (hooks) only
               ;; gets its value overwritten if this run actually wrote it —
               ;; see `core/sync-state!`
               (state/save! (core/sync-state! st cfg
@@ -216,60 +240,66 @@
        :body "forbidden — open the URL agentctl printed, it carries this run's token\n"}
 
       :else
-      (case [(:request-method req) (:uri req)]
-        [:get "/"]
-        {:status 200
-         :headers {"content-type" "text/html; charset=utf-8" "cache-control" "no-store"}
-         :body (index-page tok path)}
+      (try
+        (case [(:request-method req) (:uri req)]
+          [:get "/"]
+          {:status 200
+           :headers {"content-type" "text/html; charset=utf-8" "cache-control" "no-store"}
+           :body (index-page tok path)}
 
-        [:get "/api/config"]
-        (json-res 200 {:path (u/tilde path)
-                       :exists (boolean (u/exists? path))
-                       :text (or (u/slurp-safe path) "")
-                       :tools (mapv name config/all-tools)
-                       :opts {:tools (mapv name (:tools base-opts))
-                              :kinds (mapv name (:kinds base-opts))
-                              :projects (mapv name (:projects base-opts))
-                              :verbose (boolean (:verbose base-opts))
-                              :show-noop (boolean (:show-noop base-opts))}})
+          [:get "/api/config"]
+          (json-res 200 {:path (u/tilde path)
+                         :exists (boolean (u/exists? path))
+                         :text (or (u/slurp-safe path) "")
+                         :tools (mapv name config/all-tools)
+                         :opts {:tools (mapv name (:tools base-opts))
+                                :kinds (mapv name (:kinds base-opts))
+                                :projects (mapv name (:projects base-opts))
+                                :verbose (boolean (:verbose base-opts))
+                                :show-noop (boolean (:show-noop base-opts))}})
 
-        [:post "/api/plan"]
-        (let [b (body-json req)]
-          ;; serialized against apply: a plan rendered from a half-converged
-          ;; environment would be a plan of nothing in particular
-          (locking lock
-            (json-res 200 (with-form (:text b)
-                            (plan-for-text (:text b) path (opts-from-json b base-opts))))))
-
-        [:post "/api/edit"]
-        ;; the controls change one field at a time; the answer is the new
-        ;; buffer and what it would do — never a write
-        (let [b (body-json req)]
-          (try
-            (let [text (edit/apply-ops (buffer-text (:text b)) (form/ops->edits (:ops b)))]
-              (locking lock
-                (json-res 200 (assoc (with-form text
-                                       (plan-for-text text path (opts-from-json b base-opts)))
-                                     :text text))))
-            (catch Exception e
-              (json-res 400 {:ok false :error (ex-message e)}))))
-
-        [:post "/api/apply"]
-        (let [b (body-json req)]
-          (if-not (true? (:confirm b))
-            ;; the browser dialog is a courtesy; this is the gate
-            (json-res 400 {:ok false :error "apply requires an explicit confirmation"})
+          [:post "/api/plan"]
+          (let [b (body-json req)]
+            ;; serialized against apply: a plan rendered from a half-converged
+            ;; environment would be a plan of nothing in particular
             (locking lock
-              (let [res (apply-for-text! (:text b) path
-                                         (assoc (opts-from-json b base-opts) :expect (:expect b)))]
-                (json-res (:status res 200) (dissoc res :status))))))
+              (json-res 200 (with-form (:text b)
+                              (plan-for-text (:text b) path (opts-from-json b base-opts))))))
 
-        [:get "/api/state"]
-        (json-res 200 {:path (u/tilde state/path)
-                       :managed (mapv (fn [[[t k id] _]] {:tool (name t) :kind (name k) :id (str id)})
-                                      (sort-by (comp str key) (:managed (state/load-state))))})
+          [:post "/api/edit"]
+          ;; the controls change one field at a time; the answer is the new
+          ;; buffer and what it would do — never a write
+          (let [b (body-json req)]
+            (try
+              (let [text (edit/apply-ops (buffer-text (:text b)) (form/ops->edits (:ops b)))]
+                (locking lock
+                  (json-res 200 (assoc (with-form text
+                                         (plan-for-text text path (opts-from-json b base-opts)))
+                                       :text text))))
+              (catch Exception e
+                (json-res 400 {:ok false :error (ex-message e)}))))
 
-        {:status 404 :body "not found"}))))
+          [:post "/api/apply"]
+          (let [b (body-json req)]
+            (if-not (true? (:confirm b))
+              ;; the browser dialog is a courtesy; this is the gate
+              (json-res 400 {:ok false :error "apply requires an explicit confirmation"})
+              (locking lock
+                (let [res (apply-for-text! (:text b) path
+                                           (assoc (opts-from-json b base-opts) :expect (:expect b)))]
+                  (json-res (:status res 200) (dissoc res :status))))))
+
+          [:get "/api/state"]
+          (json-res 200 {:path (u/tilde state/path)
+                         :managed (mapv (fn [[[t k id] _]] {:tool (name t) :kind (name k) :id (str id)})
+                                        (sort-by (comp str key) (:managed (state/load-state))))})
+
+          {:status 404 :body "not found"})
+      (catch clojure.lang.ExceptionInfo e
+        ;; a request the page should never send, answered as what it is
+        (if-let [status (:status (ex-data e))]
+          (json-res status {:ok false :error (ex-message e)})
+          (throw e)))))))
 
 ;; ---------------------------------------------------------------- entry
 

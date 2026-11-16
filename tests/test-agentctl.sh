@@ -879,4 +879,342 @@ EDN
   cmp -s "$SB/mcp-before-invalid-ref.json" "$SB/.pi/agent/mcp.json" || fail "invalid reference changed MCPs"
 done
 
+echo "21. --only and --user narrow apply! without pruning what lies outside them"
+# a home of its own: what this section owns, and nothing else, is the point
+SEL="$SB/sel"
+mkdir -p "$SEL/proj" "$SEL/gp/skills/g"
+git -C "$SEL/proj" init -q
+for s in a b c d e; do
+  mkdir -p "$SEL/packs/p/skills/$s"
+  printf -- '---\nname: %s\ndescription: Demo.\n---\n' "$s" > "$SEL/packs/p/skills/$s/SKILL.md"
+done
+printf -- '---\nname: g\ndescription: Demo.\n---\n' > "$SEL/gp/skills/g/SKILL.md"
+git -C "$SEL/gp" init -q
+git -C "$SEL/gp" -c user.email=t@e -c user.name=t add -A
+git -C "$SEL/gp" -c user.email=t@e -c user.name=t commit -qm init
+sel() { AGENTCTL_HOME="$SEL" run "$@"; }
+sel_plan() { (cd "$SEL" && sel apply "$@" || true); }
+owned() { sel state | grep -qE "$1"; }
+pack="{:skill-packs {[:uri \"file://$SEL/packs/p\"] {:alias p :dir \"skills\"}}"
+cat > "$SEL/full.edn" <<EDN
+$pack
+ :skills {[p "a"] {:in :all :acli [:claude]}
+          [p "b"] {:in "proj" :acli [:claude]}}
+ :mcps [{:id :keep :cmd "/bin/echo keep" :in :all :acli [:pi]}]}
+EDN
+(cd "$SEL" && sel apply! -f "$SEL/full.edn" --all -y) > "$SEL/own.txt"
+[ -L "$SEL/.claude/skills/a" ] && [ -L "$SEL/proj/.claude/skills/b" ] || { cat "$SEL/own.txt"; fail "setup: skills not installed"; }
+grep -q '"keep"' "$SEL/.pi/agent/mcp.json" || { cat "$SEL/own.txt"; fail "setup: pi MCP not written"; }
+
+# the hazard: a manifest holding only the new entity owns nothing else, so an
+# unscoped run removes everything else agentctl owns
+cat > "$SEL/min.edn" <<EDN
+$pack
+ :skills {[p "c"] {:in :all :acli [:claude]}}}
+EDN
+sel_plan -f "$SEL/min.edn" --all > "$SEL/min-all.txt"
+grep -q -- '- skill .*/proj/.claude/skills/b' "$SEL/min-all.txt" || { cat "$SEL/min-all.txt"; fail "a minimal manifest no longer plans the prune this section guards against"; }
+
+sel_plan -f "$SEL/min.edn" --only skills/c > "$SEL/only-plan.txt"
+grep -q '+ skill .*skills/c' "$SEL/only-plan.txt" || { cat "$SEL/only-plan.txt"; fail "--only did not plan its entity"; }
+grep -qE '^.{0,12}- ' "$SEL/only-plan.txt" && { cat "$SEL/only-plan.txt"; fail "--only planned a removal outside its selection"; }
+(cd "$SEL" && sel apply! -f "$SEL/min.edn" --only skills/c -y) > "$SEL/only-apply.txt"
+[ -L "$SEL/.claude/skills/c" ] || { cat "$SEL/only-apply.txt"; fail "--only did not install its entity"; }
+[ -L "$SEL/.claude/skills/a" ] && [ -L "$SEL/proj/.claude/skills/b" ] || fail "--only removed a skill outside its selection"
+grep -q '"keep"' "$SEL/.pi/agent/mcp.json" || fail "--only removed an MCP server outside its selection"
+for id in 'skills +a$' 'skills +c$' 'skills +target-[0-9a-f]+/b$' 'mcps +keep$'; do
+  owned "$id" || { sel state; fail "--only dropped ownership of $id"; }
+done
+# still owned, not orphaned: the unscoped plan still knows to remove them
+sel_plan -f "$SEL/min.edn" --all > "$SEL/min-all2.txt"
+grep -q -- '- skill .*/proj/.claude/skills/b' "$SEL/min-all2.txt" || { cat "$SEL/min-all2.txt"; fail "b is no longer owned after --only"; }
+
+# --user: drop b and add d; the project's prune waits for a run that plans it
+cat > "$SEL/user.edn" <<EDN
+$pack
+ :skills {[p "a"] {:in :all :acli [:claude]}
+          [p "c"] {:in :all :acli [:claude]}
+          [p "d"] {:in :all :acli [:claude]}}
+ :mcps [{:id :keep :cmd "/bin/echo keep" :in :all :acli [:pi]}]}
+EDN
+(cd "$SEL" && sel apply -f "$SEL/user.edn" --user --json || true) > "$SEL/user.json"
+python3 - "$SEL/user.json" <<'PY' || fail "--user planned an op inside a project"
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert any(o["kind"] == "skills" and o["id"] == "d" for o in ops), "d not planned"
+assert not [o for o in ops if o.get("project") or o.get("project-path")], "project op under --user"
+PY
+(cd "$SEL/proj" && sel apply! -f "$SEL/user.edn" --user -y) > "$SEL/user-apply.txt"
+grep -q '^scope:' "$SEL/user-apply.txt" && { cat "$SEL/user-apply.txt"; fail "the working directory narrowed a --user run"; }
+[ -L "$SEL/.claude/skills/d" ] || { cat "$SEL/user-apply.txt"; fail "--user did not install a user-wide skill"; }
+[ -L "$SEL/proj/.claude/skills/b" ] || fail "--user removed a project skill"
+owned 'skills +target-[0-9a-f]+/b$' || { sel state; fail "--user dropped ownership of a project skill"; }
+sel_plan -f "$SEL/user.edn" --all > "$SEL/user-all.txt"
+grep -q -- '- skill .*/proj/.claude/skills/b' "$SEL/user-all.txt" || { cat "$SEL/user-all.txt"; fail "b is no longer owned after --user"; }
+
+# --only outranks the working directory: a user-wide entity from inside a project
+sed 's/\[p "d"\]/[p "e"]/' "$SEL/user.edn" > "$SEL/e.edn"
+(cd "$SEL/proj" && sel apply -f "$SEL/e.edn" --only skills/e || true) > "$SEL/e.txt"
+grep -q '^scope:' "$SEL/e.txt" && { cat "$SEL/e.txt"; fail "the working directory narrowed an --only run"; }
+grep -q '+ skill .*skills/e' "$SEL/e.txt" || { cat "$SEL/e.txt"; fail "--only from inside a project missed a user-wide entity"; }
+
+# a skill out of a git pack not fetched yet: --only brings the clone with it
+cat > "$SEL/git.edn" <<EDN
+{:skill-packs {[:uri "file://$SEL/packs/p"] {:alias p :dir "skills"}
+               [:uri "file://$SEL/gp"] {:alias gp :dir "skills" :type :git}}
+ :skills {[p "a"] {:in :all :acli [:claude]}
+          [gp "g"] {:in :all :acli [:claude]}}}
+EDN
+(cd "$SEL" && sel apply! -f "$SEL/git.edn" --only skills/g -y) > "$SEL/git.txt"
+[ -L "$SEL/.claude/skills/g" ] || { cat "$SEL/git.txt"; fail "--only did not fetch the pack its skill comes from"; }
+[ -L "$SEL/.claude/skills/c" ] || fail "--only on a git pack removed a skill outside its selection"
+set +e
+(cd "$SEL" && sel apply -f "$SEL/git.edn" --only skills/g) > "$SEL/git2.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SEL/git2.txt"; fail "--only skills/g did not converge in one apply!"; }
+
+# a selector that names nothing is an error or a warning, never a silent "converged"
+set +e
+sel apply -f "$SEL/git.edn" -k bogus-kind > "$SEL/k.txt" 2>&1; code=$?
+set -e
+[ "$code" = 1 ] && grep -q 'unknown kind' "$SEL/k.txt" && grep -q 'plugins' "$SEL/k.txt" || { cat "$SEL/k.txt"; fail "-k bogus-kind was not rejected with the valid kinds"; }
+for bad in skills skill/x; do
+  set +e
+  sel apply -f "$SEL/git.edn" --only "$bad" > "$SEL/o.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || { cat "$SEL/o.txt"; fail "--only $bad was not rejected"; }
+done
+sel_plan -f "$SEL/git.edn" --only skills/nope > "$SEL/nope.txt"
+grep -q -- '--only skills/nope — nothing declared or owned' "$SEL/nope.txt" || { cat "$SEL/nope.txt"; fail "an --only naming nothing was not reported"; }
+
+# ...and brings no pack: an unknown id must not fall back to cloning every
+# pack not on disk yet
+mkdir -p "$SEL/gp2/skills/h"
+printf -- '---\nname: h\ndescription: Demo.\n---\n' > "$SEL/gp2/skills/h/SKILL.md"
+git -C "$SEL/gp2" init -q
+git -C "$SEL/gp2" -c user.email=t@e -c user.name=t add -A
+git -C "$SEL/gp2" -c user.email=t@e -c user.name=t commit -qm init
+cat > "$SEL/git2.edn" <<EDN
+{:skill-packs {[:uri "file://$SEL/gp2"] {:alias gp2 :dir "skills" :type :git}}
+ :skills {[gp2 "h"] {:in :all :acli [:claude]}}}
+EDN
+sel_plan -f "$SEL/git2.edn" --all --json > "$SEL/git2-all.json"
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(0 if any(o["kind"]=="skill-packs" for o in ops) else 1)' "$SEL/git2-all.json" \
+  || { cat "$SEL/git2-all.json"; fail "setup: gp2 is not planned as a clone"; }
+sel_plan -f "$SEL/git2.edn" --only skills/nope --json > "$SEL/git2-nope.json"
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["ops"] == [] else 1)' "$SEL/git2-nope.json" \
+  || { cat "$SEL/git2-nope.json"; fail "--only with an unknown id planned a clone or a link"; }
+(cd "$SEL" && sel apply! -f "$SEL/git2.edn" --only skills/nope -y) > "$SEL/git2-nope.txt"
+[ ! -e "$SEL/.agents/skill-packs/gp2" ] || { cat "$SEL/git2-nope.txt"; fail "--only with an unknown id cloned a pack"; }
+
+# an id still owned but dropped from the config is only removed: its removal
+# needs no clone, and must not fall back to fetching every pack not on disk
+cat > "$SEL/git3.edn" <<EDN
+{:skill-packs {[:uri "file://$SEL/packs/p"] {:alias p :dir "skills"}
+               [:uri "file://$SEL/gp2"] {:alias gp2 :dir "skills" :type :git}}
+ :skills {[gp2 "h"] {:in :all :acli [:claude]}}}
+EDN
+owned 'skills +a$' || { sel state; fail "setup: a is not owned"; }
+sel_plan -f "$SEL/git3.edn" --only skills/a --json > "$SEL/drop-a.json"
+python3 - "$SEL/drop-a.json" <<'PY' || { cat "$SEL/drop-a.json"; fail "--only on a dropped skill planned more than its removal"; }
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert ops, "nothing planned"
+assert all(o["kind"] == "skills" and o["id"] == "a" and o["action"] == "delete" for o in ops), ops
+PY
+(cd "$SEL" && sel apply! -f "$SEL/git3.edn" --only skills/a -y) > "$SEL/drop-a.txt"
+[ ! -e "$SEL/.claude/skills/a" ] || { cat "$SEL/drop-a.txt"; fail "--only did not remove a dropped skill"; }
+[ ! -e "$SEL/.agents/skill-packs/gp2" ] || { cat "$SEL/drop-a.txt"; fail "removing a dropped skill cloned a pack"; }
+[ -L "$SEL/.claude/skills/c" ] || fail "removing a dropped skill touched another"
+
+# -k skills keeps the fetch a skill needs, alone and with --only / --user
+sel_plan -f "$SEL/git3.edn" --user -k skills --json > "$SEL/k-user.json"
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(0 if any(o["kind"]=="skill-packs" and o["id"]=="gp2" for o in ops) else 1)' "$SEL/k-user.json" \
+  || { cat "$SEL/k-user.json"; fail "--user -k skills dropped the clone a user-wide skill needs"; }
+(cd "$SEL" && sel apply! -f "$SEL/git3.edn" --only skills/h -k skills -y) > "$SEL/k-only.txt"
+[ -L "$SEL/.claude/skills/h" ] || { cat "$SEL/k-only.txt"; fail "--only skills/h -k skills did not clone and link"; }
+
+# --json carries the warnings the text prints
+sel_plan -f "$SEL/git3.edn" --only skills/nope --json > "$SEL/warn.json"
+python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["warnings"]; sys.exit(0 if any("--only skills/nope" in x for x in w) else 1)' "$SEL/warn.json" \
+  || { cat "$SEL/warn.json"; fail "--json omitted the warning for an --only naming nothing"; }
+
+# selectors that cannot both hold, and options nobody knows, are errors
+for args in "-k skills --only mcps/keep" "--onyl skills/c"; do
+  set +e
+  sel apply -f "$SEL/git3.edn" $args > "$SEL/bad.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || { cat "$SEL/bad.txt"; fail "apply $args was not rejected"; }
+done
+grep -q 'unknown option --onyl' "$SEL/bad.txt" || { cat "$SEL/bad.txt"; fail "an unknown option was not named"; }
+[ -L "$SEL/.claude/skills/c" ] || fail "a rejected run touched the environment"
+
+# a mistyped command is reported as one, whatever options came with it
+for opt in "--only skills/x" "--host h"; do
+  set +e
+  sel bogus $opt > "$SEL/cmd.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] && grep -q 'unknown command: bogus' "$SEL/cmd.txt" || { cat "$SEL/cmd.txt"; fail "bogus $opt was not reported as an unknown command"; }
+done
+
+echo "22. a pack that fails to clone fails the run and owns nothing"
+FAILSB="$SB/clonefail"; mkdir -p "$FAILSB"
+cat > "$FAILSB/agents.edn" <<EDN
+{:executors {:pi {:model "m1" :provider "prov"}}
+ :skill-packs {:gone {:uri "file://$FAILSB/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}}
+ :extra-providers {:prov {:url "http://127.0.0.1:9999" :models ["m1"] :tools [:pi]}}}
+EDN
+set +e
+run apply! -f "$FAILSB/agents.edn" -t pi -y > "$FAILSB/apply.txt" 2>&1; code=$?
+set -e
+[ "$code" = 1 ] || { cat "$FAILSB/apply.txt"; fail "a failed clone exited $code, want 1"; }
+grep -q 'git clone exited' "$FAILSB/apply.txt" || { cat "$FAILSB/apply.txt"; fail "the failed clone was not reported with git's exit"; }
+[ ! -e "$SB/.agents/skill-packs/gone" ] || fail "a failed clone left a checkout behind"
+[ ! -e "$SB/.pi/agent/skills/gone-skill" ] || fail "a skill was linked against a pack that failed to clone"
+if grep -q ":gone" "$SB/.config/agentctl/state.edn" 2>/dev/null; then fail "a failed clone was recorded as owned"; fi
+
+echo "23. a converged plan still prints its warnings, and exits 0"
+CW="$SB/converged-warn"
+mkdir -p "$CW"
+cw() { (cd "$CW" && AGENTCTL_HOME="$CW" run "$@"); }
+# claude has no :bogus-setting: every plan reports it, converged or not
+cat > "$CW/agents.edn" <<'EDN'
+{:executors {:claude {:model "opus" :bogus-setting true}}}
+EDN
+cw apply! -f "$CW/agents.edn" -t claude -y > "$CW/first.txt"
+grep -q '"model" *: *"opus"' "$CW/.claude/settings.json" || { cat "$CW/first.txt"; fail "setup: claude settings not written"; }
+for cmd in apply apply!; do
+  set +e
+  cw "$cmd" -f "$CW/agents.edn" -t claude -y > "$CW/$cmd.txt"; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning exited $code"; }
+  grep -q 'unsupported setting :bogus-setting' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd hid its warning behind no changes"; }
+  grep -q '^0 to add, 0 to change, 0 to remove' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning planned a change"; }
+done
+set +e
+cw apply -f "$CW/agents.edn" -t claude --json > "$CW/plan.json"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$CW/plan.json"; fail "a converged apply --json with a warning exited $code"; }
+python3 - "$CW/plan.json" <<'PY' || { cat "$CW/plan.json"; fail "--json dropped the warning of a converged plan"; }
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert not [o for o in ops if o["action"] in ("create", "update", "delete")], ops
+assert any(o.get("warn") and "bogus-setting" in o["summary"] for o in ops), ops
+PY
+
+echo "24. --json prints one JSON document: config findings and refusals included"
+JO="$SB/json-out"
+mkdir -p "$JO"
+jo() { (cd "$JO" && AGENTCTL_HOME="$JO" run "$@"); }
+# jo_json <want-exit> <out-file> <args…>: the run exits as wanted and its
+# stdout parses as JSON on its own
+jo_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  jo "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$JO/warn.edn" <<'EDN'
+{:cli-code {:pi {:model "m"}}}
+EDN
+cat > "$JO/error.edn" <<'EDN'
+{:mcps {:x {:cmd "a"}} :projects {:p {:mcp [:nope]}}}
+EDN
+# a structural warning travels in `findings`, beside the plan
+jo_json 2 "$JO/warn.json" apply -f "$JO/warn.edn" -t pi
+python3 - "$JO/warn.json" <<'PY' || { cat "$JO/warn.json"; fail "--json lost the config warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ops"], d
+assert any(f["level"] == "warn" and f["where"] == ["cli-code"] and ":cli-code" in f["message"]
+           for f in d["findings"]), d["findings"]
+PY
+jo_json 0 "$JO/validate.json" validate -f "$JO/warn.edn" -t pi
+# so does this machine's word on the status line, checked once the scope is known
+cat > "$JO/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+AGENT_STATUSLINE_CONFIG="$JO/elsewhere.json" jo_json 2 "$JO/statusline.json" apply -f "$JO/statusline.edn" --all
+python3 - "$JO/statusline.json" <<'PY' || { cat "$JO/statusline.json"; fail "--json lost the status-line warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and f["where"] == ["statusline", "env"] for f in d["findings"]), d["findings"]
+PY
+# a config with errors is refused as JSON, and plans nothing
+for cmd in apply apply!; do
+  jo_json 1 "$JO/error-$cmd.json" "$cmd" -f "$JO/error.edn" -y
+  python3 - "$JO/error-$cmd.json" <<'PY' || { cat "$JO/error-$cmd.json"; fail "$cmd --json refused a config without saying why"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "refusing to plan" in d["error"], d
+assert "ops" not in d, d
+assert any(f["level"] == "error" and f["where"] == ["projects", "p", "mcp"] for f in d["findings"]), d
+PY
+done
+# so is every other error: a selector, a missing file
+jo_json 1 "$JO/kind.json" apply -f "$JO/warn.edn" -k bogus-kind
+python3 -c 'import json,sys; sys.exit(0 if "unknown kind" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/kind.json" \
+  || { cat "$JO/kind.json"; fail "-k bogus-kind --json lost the error"; }
+jo_json 1 "$JO/missing.json" apply -f "$JO/nowhere.edn"
+python3 -c 'import json,sys; sys.exit(0 if "not found" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/missing.json" \
+  || { cat "$JO/missing.json"; fail "a missing config under --json lost the error"; }
+# text output is unchanged
+set +e
+jo apply -f "$JO/warn.edn" -t pi > "$JO/warn.txt"; code=$?
+set -e
+[ "$code" = 2 ] && grep -q '⚠ cli-code — :cli-code is the old name' "$JO/warn.txt" \
+  || { cat "$JO/warn.txt"; fail "the text plan stopped printing config warnings"; }
+
+echo "25. -k refuses a kind the config's format never plans"
+FK="$SB/format-kinds"
+mkdir -p "$FK/proj"
+fk() { (cd "$FK" && AGENTCTL_HOME="$FK" run "$@"); }
+# the same trusted project, once per format: the DSL plans its trust as
+# `trust`, the old format as `projects`
+cat > "$FK/dsl.edn" <<EDN
+{:trust [{:in "$FK/proj" :acli [:codex]}]}
+EDN
+cat > "$FK/old.edn" <<EDN
+{:projects {:p {:path "$FK/proj" :trusted true :executors #{:codex}}}}
+EDN
+# fk_code <want-exit> <out-file> <args…>
+fk_code() {
+  local want=$1 out=$2; shift 2
+  set +e
+  fk "$@" > "$out" 2>&1; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* exited $code, wanted $want"; }
+}
+for cmd in apply apply!; do
+  fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: extensions, ' "$FK/dsl-$cmd.txt" \
+    || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
+  grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
+  fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y
+  grep -q '^error: -k trust: an old-format config plans nothing as trust; it files those ops under projects (kinds for this config: .*projects' "$FK/old-$cmd.txt" \
+    || { cat "$FK/old-$cmd.txt"; fail "$cmd -k trust on an old-format config did not name its kinds"; }
+done
+[ -e "$FK/.codex/config.toml" ] && fail "a refused kind wrote the codex config"
+# the counterpart in each format plans the trust
+fk_code 2 "$FK/dsl-trust.txt" apply -f "$FK/dsl.edn" --all -t codex -k trust
+grep -q 'trust' "$FK/dsl-trust.txt" || { cat "$FK/dsl-trust.txt"; fail "-k trust planned nothing on a DSL config"; }
+fk_code 2 "$FK/old-projects.txt" apply -f "$FK/old.edn" --all -t codex -k projects
+grep -q 'projects' "$FK/old-projects.txt" || { cat "$FK/old-projects.txt"; fail "-k projects planned nothing on an old-format config"; }
+# --only's kind is held to the same rule, and --json carries the refusal
+fk_code 1 "$FK/only.txt" apply -f "$FK/dsl.edn" --only projects/p
+grep -q '^error: --only projects/p: an entity-DSL config plans nothing as projects' "$FK/only.txt" \
+  || { cat "$FK/only.txt"; fail "--only projects/p on a DSL config was not refused"; }
+fk_code 1 "$FK/dead.json" apply -f "$FK/old.edn" -k trust --json
+python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.argv[1]))["error"] else 1)' "$FK/dead.json" \
+  || { cat "$FK/dead.json"; fail "-k trust --json lost the refusal"; }
+# --help marks the old format's own kind
+run --help | grep -q 'legacy (old-format configs only, in place of trust): projects$' \
+  || { run --help; fail "--help does not mark projects as legacy"; }
+
 echo "all agentctl e2e checks passed"
