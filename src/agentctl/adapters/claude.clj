@@ -328,7 +328,7 @@
         headers (common/resolve-env (:headers m))]
     {:env env
      :headers headers
-     :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))}))
+     :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m))}))
 
 (defn- restore-user-mcp!
   "Put back a user-wide server's entry as it was before the update removed
@@ -365,10 +365,10 @@
                    :tool tool :kind :mcps :id id
                    :target runtime-file
                    :summary (common/mcp-summary m)
-                   :note (when (common/holds-secret? (merge (:env m) (:headers m)))
+                   :note (when (common/holds-secret? (common/mcp-secrets m))
                            "⚠ secret value stored in ~/.claude.json")
                    :diffs (plan/field-diffs (or have {}) want)
-                   :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
+                   :risk (if (common/holds-secret? (common/mcp-secrets m)) :secret :low)
                    :exec! (fn []
                             (let [prev (when cur (get (current-mcps) (keyword nm)))]
                               (when prev
@@ -746,7 +746,7 @@
               oid (keyword (str (name id) "/" (name mid)))
               current (get-in (u/read-json file) path)
               {:keys [env headers issues]} (resolve-mcp m)
-              secret? (common/holds-secret? (merge (:env m) (:headers m)))
+              secret? (common/holds-secret? (common/mcp-secrets m))
               op (if (seq issues)
                    (common/unresolved-op {:tool tool :kind :mcps :project id :id oid :target file} issues)
                    (some-> (plan/json-set-op

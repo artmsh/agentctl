@@ -70,7 +70,7 @@
                (plan/json-set-op {:tool tool :kind :mcps :id id
                                   :file mcp-file :path [:mcpServers (keyword (u/kw->str id))]
                                   :value (mcp-entry m (get current (keyword (u/kw->str id))))
-                                  :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
+                                  :risk (if (common/holds-secret? (common/mcp-secrets m)) :secret :low)
                                   :summary (common/mcp-summary m)})))
            desired)
      (keep (fn [id]

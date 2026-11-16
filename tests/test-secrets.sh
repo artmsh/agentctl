@@ -47,7 +47,7 @@ vault() { # vault <env> <header> <key> <arg>
 }
 
 cat > "$SB/agents.edn" <<'EDN'
-{:mcps [{:id :sdocs :cmd "/bin/echo s" :env {"DOCS_ENV" "!bw://plant/ENV" "MODE" "fast" "WORKDIR" "$HOME"} :in :all
+{:mcps [{:id :sdocs :cmd "/bin/echo s --token !bw://plant/ARG" :env {"DOCS_ENV" "!bw://plant/ENV" "MODE" "fast" "WORKDIR" "$HOME"} :in :all
          :acli [:pi :omp :kimi :antigravity :codex]}
         {:id :hdocs :type :http :url "https://mcp.example.com/h" :headers {"x-docs" "!bw://plant/HDR"} :in :all
          :acli [:omp :kimi :antigravity :codex]}]
@@ -92,14 +92,14 @@ outputs
 for f in plain.txt plan.json gui.out; do
   grep -q "sdocs" "$SB/$f" || { cat "$SB/$f"; fail "$f does not plan the servers"; }
 done
-leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333
+leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333 argsecretvalue777
 # masked, not missing: every tool's plan carries each of its secrets
 python3 - "$SB/plan.json" <<'PY' || fail "a tool's plan does not carry its masked secrets"
 import json, sys
 ops = json.load(open(sys.argv[1]))["ops"]
-want = {"pi": ["envs…11", "keys…33"], "omp": ["envs…11", "hdrs…22", "keys…33"],
-        "kimi": ["envs…11", "hdrs…22", "keys…33"],
-        "antigravity": ["envs…11", "hdrs…22"], "codex": ["hdrs…22"]}
+want = {"pi": ["envs…11", "keys…33", "args…77"], "omp": ["envs…11", "hdrs…22", "keys…33", "args…77"],
+        "kimi": ["envs…11", "hdrs…22", "keys…33", "args…77"],
+        "antigravity": ["envs…11", "hdrs…22", "args…77"], "codex": ["hdrs…22", "args…77"]}
 for tool, masks in want.items():
     text = json.dumps([o for o in ops if o["tool"] == tool], ensure_ascii=False)
     for m in masks:
@@ -110,6 +110,7 @@ grep -q 'hdrs…22' "$SB/verbose.txt" || fail "-v does not show the masked heade
 grep -qF "\"target\" : \"$SB/.pi/agent/mcp.json\"" "$SB/plan.json" || { grep -n target "$SB/plan.json"; fail "--json mangled a target path"; }
 grep -qF "WORKDIR: \"$SB\"" "$SB/verbose.txt" || { cat "$SB/verbose.txt"; fail "a directory reference was masked"; }
 grep -q envsecretvalue111 "$SB/.pi/agent/mcp.json" || fail "the secret was not written"
+grep -q argsecretvalue777 "$SB/.pi/agent/mcp.json" || fail "the argument reference was not resolved"
 python3 - "$SB/.omp/agent/mcp.json" <<'PY' || fail "omp's http server was written without its header"
 import json, sys
 assert json.load(open(sys.argv[1]))["mcpServers"]["hdocs"]["headers"] == {"x-docs": "hdrsecretvalue222"}
@@ -119,8 +120,8 @@ echo "2. rotated, neither the old values nor the new ones print"
 vault envsecretvalue444 hdrsecretvalue555 keysecretvalue666 argsecretvalue888
 outputs --json
 grep -q '"ops"' "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "apply! --json printed no plan"; }
-leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333 \
-  envsecretvalue444 hdrsecretvalue555 keysecretvalue666
+leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333 argsecretvalue777 \
+  envsecretvalue444 hdrsecretvalue555 keysecretvalue666 argsecretvalue888
 grep -q envsecretvalue444 "$SB/.pi/agent/mcp.json" || fail "the rotated secret was not written"
 
 echo "3. an llm provider whose key does not resolve is held back whole, not written keyless"
@@ -167,8 +168,22 @@ for mode in text json; do
   set -e
   [ "$code" = 1 ] || { cat "$SB/fail.txt"; fail "$mode: a refused add exited $code, not 1"; }
   grep -q 'refused' "$SB/fail.txt" || { cat "$SB/fail.txt"; fail "$mode: the failure is not reported"; }
-  grep -nE 'envsecretvalue444|hdrsecretvalue555' "$SB/fail.txt" && fail "$mode: the failure printed a secret"
+  grep -nE 'envsecretvalue444|hdrsecretvalue555|argsecretvalue888' "$SB/fail.txt" && fail "$mode: the failure printed a secret"
 done
 rm "$SB/codex-refuse"
+
+echo "6. an argument reference that does not resolve holds its server back, for every tool"
+cat > "$SB/args.edn" <<'EDN'
+{:mcps [{:id :adocs :command "/bin/echo" :args ["--token=!bw://plant/NOPE"] :in :all
+         :acli [:claude :pi :omp :kimi :antigravity :codex]}]}
+EDN
+for t in claude pi omp kimi antigravity codex; do
+  set +e; "$ROOT/agentctl" apply --all -t $t -k mcps -f "$SB/args.edn" > "$SB/args.txt" 2>&1; code=$?; set -e
+  [ "$code" = 2 ] || { cat "$SB/args.txt"; fail "$t: an unresolved argument exited $code, not 2"; }
+  grep -qF 'secret unresolved: field not found on bw item: plant/NOPE (args.--token)' "$SB/args.txt" \
+    || { cat "$SB/args.txt"; fail "$t: the unresolved argument is not named"; }
+done
+set +e; "$ROOT/agentctl" validate -f "$SB/args.edn" > "$SB/args.txt" 2>&1; set -e
+grep -qF -- '--token' "$SB/args.txt" || { cat "$SB/args.txt"; fail "validate does not report the unresolved argument"; }
 
 echo "all secrets e2e checks passed"

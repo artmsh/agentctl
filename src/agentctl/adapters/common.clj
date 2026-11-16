@@ -10,16 +10,38 @@
   [m tool]
   (into {} (filter (fn [[_ v]] (contains? (:tools v) tool))) m))
 
+(defn resolve-args
+  "An MCP server with the references in its argv resolved (`refs/arg-refs`):
+   `:args` as written, the references under `:arg-refs` by flag, and those
+   that did not resolve under `:arg-issues`, which hold the server back as
+   an unresolved env value does. An unresolved one stays as written."
+  [m]
+  (let [found (refs/arg-refs (:args m))]
+    (if (or (::args-resolved m) (empty? found))
+      m
+      (let [res (for [[i flag r prefix] found] [i flag r prefix (refs/resolve-ref r)])]
+        (assoc m
+               ::args-resolved true
+               :args (reduce (fn [args [i _ _ prefix {:keys [status value]}]]
+                               (if (= :ok status) (assoc args i (str prefix value)) args))
+                             (vec (:args m)) res)
+               :arg-refs (into {} (map (fn [[_ flag r]] [(str "--" flag) r])) res)
+               :arg-issues (for [[_ flag _ _ {:keys [status message]}] res
+                                 :when (not= :ok status)]
+                             {:key (str "--" flag) :status status :message message :where "args"}))))))
+
 (defn for-this-tool
   "Apply a resource's :per-tool override for `tool`, if any.
 
    One endpoint often differs per agent — one tool may use a public host while
    others use an internal address — and a single flattened
-   definition would silently rewrite one of them on every apply."
+   definition would silently rewrite one of them on every apply. An MCP
+   server's argv references are resolved once the override is in."
   [res tool]
-  (if-let [override (get-in res [:per-tool tool])]
-    (merge res (into {} (remove (comp nil? val)) override))
-    res))
+  (cond-> (if-let [override (get-in res [:per-tool tool])]
+            (merge res (into {} (remove (comp nil? val)) override))
+            res)
+    (= :mcps (:kind res)) resolve-args))
 
 (defn for-tool-resources
   "Resources targeting `tool`, each already merged with its per-tool override."
@@ -52,9 +74,15 @@
   (mapcat (fn [[where m]] (issues-in where (resolve-env m))) places))
 
 (defn mcp-issues
-  "A server's unresolved env and header refs."
+  "A server's unresolved env, header and argv refs."
   [m]
-  (ref-issues [["env" (:env m)] ["headers" (:headers m)]]))
+  (concat (ref-issues [["env" (:env m)] ["headers" (:headers m)]]) (:arg-issues m)))
+
+(defn mcp-secrets
+  "Every ref a server declares where a credential goes, by name: env, headers
+   and argv — what `holds-secret?` looks at."
+  [m]
+  (merge (:env m) (:headers m) (:arg-refs m)))
 
 (defn provider-issues
   "A provider's unresolved refs: its key, unless `key?` is false (a key the
@@ -241,7 +269,7 @@
   (into {} (keep (fn [mid]
                    (let [m (get-in cfg [:mcps mid])]
                      (when (and m (project-scopes (:scope m)) (contains? (:tools m) tool))
-                       [mid m]))))
+                       [mid (resolve-args m)]))))
         (sort (:mcp proj))))
 
 (defn project-scope-skip-ops

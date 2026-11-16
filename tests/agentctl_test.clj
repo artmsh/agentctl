@@ -1920,6 +1920,7 @@
         cfg (fn [tool]
               (config/normalize
                {:mcps {:docs {:command "/bin/echo" :env {"TOKEN" ref "MODE" "fast"} :tools [tool]}
+                       :cli {:command "/bin/echo" :args ["--mode" "fast" "--token" ref] :tools [tool]}
                        :web {:url "https://mcp.example.com/w" :headers {"x-key" ref} :tools [tool]}}
                 :extra-providers {:gw {:url "https://api.example.com/v1" :api "openai-completions"
                                        :key ref :models ["m1"] :tools [tool]}}}
@@ -1933,11 +1934,11 @@
     (reset! @#'refs/cache {})
     (with-redefs [refs/bw-state (delay :locked)
                   codex/mcp-list (fn [] {})]
-      (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs]]
-                              [:omp omp/mcp-ops [:docs :web]]
-                              [:antigravity antigravity/mcp-ops [:docs :web]]
-                              [:kimi kimi/mcp-ops [:docs :web]]
-                              [:codex codex/mcp-ops [:docs :web]]]
+      (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs :cli]]
+                              [:omp omp/mcp-ops [:docs :web :cli]]
+                              [:antigravity antigravity/mcp-ops [:docs :web :cli]]
+                              [:kimi kimi/mcp-ops [:docs :web :cli]]
+                              [:codex codex/mcp-ops [:docs :web :cli]]]
               id ids]
         (testing (str (name tool) " MCP server " (name id))
           (is (held? (ops (cfg tool) state/empty-state) id))))

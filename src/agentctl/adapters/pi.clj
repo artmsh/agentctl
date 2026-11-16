@@ -59,12 +59,12 @@
         managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
     (concat
      (keep (fn [[id m]]
-             (if-let [issues (seq (common/ref-issues [["env" (:env m)]]))]
+             (if-let [issues (seq (concat (common/ref-issues [["env" (:env m)]]) (:arg-issues m)))]
                (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
                (plan/json-set-op {:tool tool :kind :mcps :id id
                                   :file mcp-file :path [:mcpServers (keyword (u/kw->str id))]
                                   :value (mcp-entry m (get current (keyword (u/kw->str id))))
-                                  :risk (if (common/holds-secret? (:env m)) :secret :low)
+                                  :risk (if (common/holds-secret? (common/mcp-secrets m)) :secret :low)
                                   :summary (common/mcp-summary m)})))
            desired)
      (keep (fn [id]

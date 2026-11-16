@@ -56,7 +56,7 @@ segment.
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
   values, every MCP header, every env value it cannot show is no secret, and every argument
-  after a credential-looking flag; review its output
+  after a credential-looking flag, which takes a reference as env does; review its output
   before sharing a config.
 
 ## Comparison

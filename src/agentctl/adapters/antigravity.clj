@@ -80,7 +80,7 @@
         managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
     (concat
      (keep (fn [[id m]]
-             (let [secret? (common/holds-secret? (merge (:env m) (:headers m)))]
+             (let [secret? (common/holds-secret? (common/mcp-secrets m))]
                (if-let [issues (seq (common/mcp-issues m))]
                  (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
                  (plan/json-set-op {:tool tool :kind :mcps :id id

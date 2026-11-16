@@ -248,6 +248,40 @@
    The vendor-prefix test below still masks a real credential under it."
   #"(?i)[a-z]env$")
 
+(defn credential-flag
+  "The name a credential-looking flag carries — `api-key` for `--api-key`,
+   `token` for `-token` — or nil. A flag naming where the credential lives
+   (`--token-file`, `--api-key-env`) takes a path or a name, and is not one."
+  [a]
+  (when-let [[_ nm] (and (string? a) (re-matches #"--?([A-Za-z][A-Za-z0-9_-]*)" a))]
+    (when (and (re-find secret-key-pattern nm)
+               (not (re-find indirection-key-pattern nm))
+               (not (re-find #"(?i)[-_](file|path|dir|var|name)$" nm)))
+      nm)))
+
+(defn- secret-ref-text [a]
+  (when (string? a)
+    (let [r (try (parse a) (catch clojure.lang.ExceptionInfo _ nil))]
+      (when (secret-ref? r) r))))
+
+(defn arg-refs
+  "`[index flag ref prefix]` for every reference argv carries where a
+   credential goes: the argument after a credential-looking flag
+   (`--token !bw://docs/token`), or such a flag's `=value` (`prefix` is then
+   `--token=`). Anywhere else a `$VAR` is just text agentctl expands, and a
+   `!bw://` is text the server receives."
+  [args]
+  (loop [i 0, xs (seq args), flag nil, acc []]
+    (if-not xs
+      acc
+      (let [a (first xs)
+            [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
+            fv (when f (credential-flag f))]
+        (cond
+          (and fv (secret-ref-text v)) (recur (inc i) (next xs) nil (conj acc [i fv (secret-ref-text v) (str f "=")]))
+          (and flag (secret-ref-text a)) (recur (inc i) (next xs) nil (conj acc [i flag (secret-ref-text a) ""]))
+          :else (recur (inc i) (next xs) (when-not f (credential-flag a)) acc))))))
+
 (def credential-value-patterns
   "Vendor prefixes nothing but a credential carries."
   [#"^sk-[A-Za-z0-9\-_]{10,}"

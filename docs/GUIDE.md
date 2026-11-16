@@ -385,8 +385,9 @@ plan lists the keys that go:
 
 ## Unresolved secrets
 
-A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
-`:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
+A value in an MCP server's `:env` or `:headers`, an argument after a
+credential-looking flag in its argv (`--token !bw://docs/token`,
+`--api-key=$DOCS_KEY`), or a value in Claude's `:settings` `:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
 that is resolved when `apply!` runs. A settings `env` is where a project's
 `.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
 value:

@@ -369,7 +369,7 @@
                  cur (get current name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
-                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m))
                  want (mcp-desired-shape m (:values headers))
                  have (some-> cur mcp-current-shape)]
            ;; an unresolved env or header ref holds the server back: written
@@ -381,10 +381,10 @@
                  :tool tool :kind :mcps :id id
                  :target config-file
                  :summary (common/mcp-summary m)
-                 :note (when (common/holds-secret? (merge (:env m) (:headers m)))
+                 :note (when (common/holds-secret? (common/mcp-secrets m))
                          "⚠ writes resolved secret to config.toml")
                  :diffs (plan/field-diffs (or have {}) want)
-                 :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
+                 :risk (if (common/holds-secret? (common/mcp-secrets m)) :secret :low)
                  :exec! (fn []
                           (u/backup! config-file)
                           (when cur (ok! (codex-sh "codex" "mcp" "remove" name*) "codex mcp remove"))
@@ -459,10 +459,10 @@
                  id (keyword (name pid) name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
-                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m))
                  have (get servers name*)
                  want (project-mcp-table m (:values env) (:values headers))
-                 secret? (common/holds-secret? (merge (:env m) (:headers m)))]
+                 secret? (common/holds-secret? (common/mcp-secrets m))]
            :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
        (if (seq issues)
          (common/unresolved-op {:tool tool :kind :mcps :project pid :id id :target file} issues)

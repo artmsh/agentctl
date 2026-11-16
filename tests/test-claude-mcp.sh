@@ -768,9 +768,9 @@ grep -qF '"API_TOKEN" "!bw://claude-env/API_TOKEN"' "$SB/imported.edn" || { cat 
 grep -qF '"MODE" "fast"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain settings env value was not imported"; }
 grep -qF '!bw://hx/x-docs' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a header with a plain-looking value is not a placeholder"; }
 # an argument after a credential-looking flag, or its `=value`, becomes a
-# variable; a flag that names where the credential lives keeps its value
+# placeholder; a flag that names where the credential lives keeps its value
 grep -q argsecret "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import kept a secret argument"; }
-for arg in '"$SX_API_KEY"' '"fast"' '"--token=$SX_TOKEN"' '"/etc/docs-token"' '"$DOCS_PW"'; do
+for arg in '"!bw://sx/api-key"' '"fast"' '"--token=!bw://sx/token"' '"/etc/docs-token"' '"$DOCS_PW"'; do
   grep -qF -- "$arg" "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "import did not write the argument $arg"; }
 done
 vault '{"claude-env": {"API_TOKEN": "'$SECRET'", "DOCS_AUTH": "'$PLAIN2'"}, "hx": {"x-docs": "'$PLAIN'"}}'

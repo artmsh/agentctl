@@ -744,9 +744,20 @@ boolean, a number of up to five digits, or a common settings word such as
 `debug` or `fast`. A token under a plain name, `DOCS_AUTH` or `UPSTREAM`, is a
 placeholder too, and the import notes list each vault field to fill in.
 An MCP argument that follows a credential-looking flag — `--api-key X`,
-`--token=X` — becomes a `$<SERVER>_<FLAG>` variable (`$DOCS_API_KEY`), since
-arguments are written literally and only a `$VAR` in them is expanded; a flag
-naming where the credential lives, such as `--token-file`, keeps its value.
+`--token=X` — becomes a `!bw://<server>/<flag>` placeholder the same way
+(`!bw://docs/api-key`); a flag naming where the credential lives, such as
+`--token-file`, keeps its value.
+
+An MCP server's argv takes a reference wherever a credential goes: the
+argument after a flag whose name says credential (`--token`, `--api-key`,
+`--password`), or such a flag's `=value`. It is resolved when the plan is made,
+masked in every output, and held back like an env value when it does not
+resolve; `validate` checks it. Anywhere else in argv, `$VAR` is expanded when
+the config is read and `!bw://` is plain text.
+
+```clojure
+{:mcps [{:id :docs :cmd "docs-mcp --api-key !bw://vendor/docs/api-key" :in :all}]}
+```
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
