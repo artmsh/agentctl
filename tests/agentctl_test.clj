@@ -1087,6 +1087,35 @@
             (is (= "hand-written" (get-in t ["tui" "presets" "7" "input"])))
             (is (empty? (codex-drift less st2)))))))))
 
+(deftest codex-preset-slot-is-owned-whole
+  ;; Codex saves presets into the same slots; owning only `input` would leave
+  ;; `[tui.presets.5] label = …` behind on a prune, and Codex then refuses
+  ;; the whole config: missing field `input`
+  (let [f (str (temp-dir) "/config.toml")
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :presets {5 {:input "/review"}}}]}
+        less {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]}]
+    (u/write-text! f (str "model = \"m-a\"\n\n[tui.presets.5]\ninput = \"/status\"\nlabel = \"saved in codex\"\n\n"
+                          "[tui.presets.6]\ninput = \"/diff\"\n"))
+    (with-redefs [codex/config-file f]
+      (testing "the plan shows the saved label going"
+        (let [[op] (codex-drift raw state/empty-state)]
+          (is (= #{["input" "/status" "/review"] ["label" "saved in codex" nil]}
+                 (set (map (juxt :key :before :after) (:diffs op)))))))
+      (let [{st1 :st} (converge-codex raw state/empty-state)]
+        (is (= {"input" "/review"} (get-in (toml/read-toml f) ["tui" "presets" "5"])))
+        (is (str/index-of (slurp f) "[tui.presets.5]\ninput = \"/review\"\n\n[tui.presets.6]")
+            "rewritten where it stands")
+        (is (empty? (codex-drift raw st1)) "converged, and the dropped label plans no prune")
+        (let [{st2 :st} (converge-codex raw st1)]
+          (is (empty? (codex-drift raw st2))))
+        (testing "dropping the slot removes it whole; the slot Codex saved stays"
+          (let [{st3 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["tui" "presets" "5"])))
+            (is (not (str/includes? (slurp f) "[tui.presets.5]")))
+            (is (= {"input" "/diff"} (get-in t ["tui" "presets" "6"])))
+            (is (empty? (codex-drift less st3)))))))))
+
 (deftest codex-presets-reject-a-bad-slot-or-a-missing-input
   (doseq [[presets msg] [[{10 {:input "/model"}} #"single digit"]
                          [{:p {:input "/model"}} #"single digit"]

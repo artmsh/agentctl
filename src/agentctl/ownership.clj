@@ -106,18 +106,25 @@
                         (plan/json-unset-op args)))
                     (str/ends-with? target ".toml")
                     (let [current (toml/read-toml-lenient target)
-                          ks (remove #((desired-fields cfg o) (u/kw->str %)) (map :key diffs))
+                          desired (desired-fields cfg o)
+                          ;; a table owned whole goes whole once nothing in it
+                          ;; is declared — keys Codex saved there included
+                          whole? (and (= :codex tool) (codex/whole-table? path) (empty? desired))
+                          ks (if whole? (map :key diffs) (remove #(desired (u/kw->str %)) (map :key diffs)))
                           table (get-in current path)]
-                      (when (some #(contains? table (u/kw->str %)) ks)
+                      (when (if whole? (some? table) (some #(contains? table (u/kw->str %)) ks))
                         (plan/op {:tool tool :kind kind :id id :target target :path path :project project
                                   :action :delete :summary "removed from agents.edn" :pruned-keys (vec ks)
                                   ;; a table left with no keys goes too: a bare
                                   ;; `[tui.presets.N]` header is a codex load error
                                   :exec! #(do (u/backup! target)
                                               (toml/update-file! target
-                                                                (fn [text] (toml/remove-table-if-empty
-                                                                            (reduce (fn [s k] (toml/remove-key s path k)) text ks)
-                                                                            path))))})))
+                                                                (fn [text]
+                                                                  (if whole?
+                                                                    (toml/remove-table text path)
+                                                                    (toml/remove-table-if-empty
+                                                                     (reduce (fn [s k] (toml/remove-key s path k)) text ks)
+                                                                     path)))))})))
                     (or (str/ends-with? target ".yaml") (str/ends-with? target ".yml"))
                     (plan/yaml-remove-op args)
                     :else nil)]

@@ -100,8 +100,10 @@ A model switch two keys away: bind the presets browser and put `/model` in slot 
 
 alt-t opens the browser and 0 runs `/model`, which opens the model picker. A
 preset is `{:input "…" :label "…"}` in slots 0-9; `:input` is required and runs
-as typed. `validate` rejects other slots and fields. Removing a slot removes
-only a table agentctl wrote; presets saved from the Codex browser stay.
+as typed. `validate` rejects other slots and fields. A declared slot is
+agentctl's whole: a preset Codex saved in that slot is replaced, its label
+included, and removing the slot from the config removes the table. Presets
+saved from the Codex browser in other slots stay.
 
 Codex has no external status command; its footer is a list of built-in items:
 

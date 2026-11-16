@@ -332,11 +332,15 @@ alt-t then 0 opens the model picker. `validate` rejects a slot outside 0-9, a
 missing or non-string `:input`, and any field other than `:input` and `:label`
 (codex-cli 0.169.0 accepts only those two and ignores the rest silently).
 
-The write is key surgery on the slot's table: the rest of `[tui]`, including the
+The write is surgery on the slot's table: the rest of `[tui]`, including the
 counters Codex keeps there (`[tui.model_availability_nux]`), is never replaced.
-Under the entity DSL, dropping a slot from the config removes that slot's table
-if agentctl wrote it; a slot saved from Codex itself (`n · new` in the browser)
-is not agentctl's and stays. Import reads presets back as `{0 {:input …}}`.
+A declared slot is owned whole, not key by key (`codex/whole-table?`). The table
+is made to hold exactly the declared fields, so a preset Codex saved in that
+slot is replaced, label included, and the plan shows the label going. Under the
+entity DSL, dropping the slot removes the whole table. Owning only `input`
+would leave `[tui.presets.N] label = …` behind, and Codex refuses that config
+(`missing field input`). A slot saved from Codex itself (`n · new` in the
+browser) that the config never declared is not agentctl's and stays. Import reads presets back as `{0 {:input …}}`.
 
 ### Codex `:status-line`
 

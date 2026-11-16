@@ -351,6 +351,20 @@
 (defn set-keys [text table-path kvs]
   (reduce (fn [t [k v]] (set-key t table-path k v)) text kvs))
 
+(declare remove-key)
+
+(defn set-table
+  "Make the `[header]` table `table-path` hold exactly `kvs`, where it
+   stands: keys it has beyond them go, and the rest is `set-keys`."
+  [text table-path kvs]
+  (let [segs (segments text)
+        loc (locate segs table-path)
+        wanted (set (map (comp u/kw->str first) kvs))
+        extra (when (and loc (not (:key loc)))
+                (remove wanted (keep (fn [[_ _ parts]] (when (= 1 (count parts)) (first parts)))
+                                     (key-spans (:lines (nth segs (:seg loc)))))))]
+    (set-keys (reduce #(remove-key %1 table-path %2) text extra) table-path kvs)))
+
 (defn remove-key
   "Remove `k` from table `table-path`, a `[header]` or an inline table."
   [text table-path k]
@@ -366,6 +380,14 @@
                               (vec (keep-indexed (fn [i l] (when-not (gone i) l)) lines))))))
       :else text)))
 
+(defn- keep-final-newline
+  "`out`, ending in a newline when `text` did: dropping the last table takes
+   the blank line that ended the one before it."
+  [text out]
+  (if (and (str/ends-with? text "\n") (seq out) (not (str/ends-with? out "\n")))
+    (str out "\n")
+    out))
+
 (defn remove-table-if-empty
   "Drop the table at `table-path` once it holds no key and no comment — the
    bare header a key-by-key prune leaves behind, which for some tables (a
@@ -378,20 +400,20 @@
           out (render (vec (remove (fn [s] (and (table-seg? s header)
                                                 (every? str/blank? (rest (:lines s)))))
                                    (segments text))))]
-      (if (and (str/ends-with? text "\n") (seq out) (not (str/ends-with? out "\n")))
-        (str out "\n")
-        out))))
+      (keep-final-newline text out))))
 
 (defn remove-table
   "Drop a table and every sub-table beneath it."
   [text table-path]
   (let [header (header-for table-path)
         prefix (str header ".")]
-    (render (vec (remove (fn [s]
-                           (and (:header s)
-                                (or (= (:header s) header)
-                                    (str/starts-with? (:header s) prefix))))
-                         (segments text))))))
+    (keep-final-newline
+     text
+     (render (vec (remove (fn [s]
+                            (and (:header s)
+                                 (or (= (:header s) header)
+                                     (str/starts-with? (:header s) prefix))))
+                          (segments text)))))))
 
 (def ^:private py-check
   "import sys,tomllib;tomllib.loads(sys.stdin.read())")

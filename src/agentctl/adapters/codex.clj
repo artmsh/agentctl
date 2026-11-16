@@ -127,19 +127,35 @@
     (sequential? v) (mapv native v)
     :else v))
 
+(defn whole-table?
+  "Is the config.toml table at `path` owned whole rather than key by key? A
+   preset slot is: Codex saves its own presets into the same slots, and a
+   slot left with a `label` and no `input` is a load error (`missing field
+   input`). Declaring slot N replaces whatever was saved there; dropping it
+   removes the slot."
+  [path]
+  (let [path (vec path)]
+    (and (= 3 (count path)) (= ["tui" "presets"] (subvec path 0 2)))))
+
 (defn- preset-ops
-  "One `[tui.presets.<n>]` table per declared slot, set key by key: Codex
-   writes its own state into `[tui]` (`model_availability_nux`), so nothing
-   above the slot is ever replaced."
+  "One `[tui.presets.<n>]` table per declared slot, made to hold exactly the
+   declared fields (`whole-table?`). Codex writes its own state into `[tui]`
+   (`model_availability_nux`), so nothing above the slot is replaced."
   [presets]
-  (for [[k p] (sort-by (comp str key) presets)
-        :let [n (schema/preset-slot k)
-              op (plan/toml-set-op {:tool tool :kind :settings :id (keyword (str "preset-" n))
-                                    :file config-file :table ["tui" "presets" n]
-                                    :kvs (native p)
-                                    :summary (str "codex preset " n)})]
-        :when op]
-    op))
+  (let [current (toml/read-toml-lenient config-file)]
+    (for [[k p] (sort-by (comp str key) presets)
+          :let [n (schema/preset-slot k)
+                table ["tui" "presets" n]
+                want (native p)
+                have (get-in current table)
+                diffs (plan/field-diffs (or have {}) want)]
+          :when (seq diffs)]
+      (plan/op {:action (if have :update :create) :tool tool :kind :settings
+                :id (keyword (str "preset-" n)) :target config-file :path table
+                :summary (str "codex preset " n) :diffs diffs :risk :low
+                :exec! (fn []
+                         (u/backup! config-file)
+                         (toml/update-file! config-file #(toml/set-table % table want)))}))))
 
 (defn- status-line-op
   "The native footer: `[tui] status_line`, an item list. One key of `[tui]`,

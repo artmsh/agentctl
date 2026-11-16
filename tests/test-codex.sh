@@ -124,4 +124,28 @@ c=$(code_of run apply! -f "$SB/c.edn" --all -t codex -y)
 toml 'd = t["permissions"]["local-dev"]["network"]["domains"]; assert d == {"127.0.0.1": "allow", "localhost": "allow"}, d' \
   || fail "the prune did not remove exactly the declared domain"
 
+echo "5. a preset slot is owned whole: what Codex saved there is replaced, and the slot goes on a prune"
+cat > "$CONF" <<'TOML'
+model = "m-a"
+
+[tui.presets.5]
+input = "/status"
+label = "saved in codex"
+TOML
+cat > "$SB/d.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a" :presets {5 {:input "/review"}}}]}
+EDN
+c=$(code_of run apply! -f "$SB/d.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! exited $c"; }
+toml 'assert t["tui"]["presets"]["5"] == {"input": "/review"}, t' || fail "the saved label survived the declared slot"
+c=$(code_of run apply -f "$SB/d.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "not converged after a state.edn round trip ($c)"; }
+cat > "$SB/d.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]}
+EDN
+c=$(code_of run apply! -f "$SB/d.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! of the prune exited $c"; }
+toml 'assert "presets" not in t.get("tui", {}), t' || fail "the dropped slot was not removed whole"
+grep -q 'tui.presets' "$CONF" && fail "a bare [tui.presets.5] header was left behind"
+
 echo "all codex e2e checks passed"
