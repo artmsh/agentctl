@@ -646,7 +646,9 @@ a resolved secret in `secrets`, and the `summary`. `apply!` adds `applied` —
 failed one with its `error` — and `backups`. A confirmation prompt cannot share
 stdout with that document, so `apply! --json` needs `-y`. An error is
 `{"error": …}` with exit 1 instead — a config with errors carries its
-`findings` too, an unknown option or a missing file only the message.
+`findings` too; an unknown command or option, or a config file missing,
+unreadable or not a file, only the message. Without `--json` the same errors
+are one `error: …` line.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a

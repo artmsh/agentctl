@@ -418,8 +418,10 @@
       ;; what the command is comes before what its options may be: a typo in
       ;; the command must not be reported as an option it does not take
       (not (commands command))
-      (do (println (str "unknown command: " command "\n"))
-          (println usage)
+      (do (if (:json opts)
+            (println (json/generate-string {:error (str "unknown command: " command)} {:pretty true}))
+            (do (println (str "unknown command: " command "\n"))
+                (println usage)))
           (System/exit 1))
       :else
       (try
@@ -442,9 +444,13 @@
             "import!" (cmd-import opts true)
             "state" (cmd-state opts)
             "gui" (cmd-gui opts)))
-        (catch clojure.lang.ExceptionInfo e
-          ;; a script reading --json gets its error as JSON too
-          (println (if (:json opts)
-                     (json/generate-string {:error (ex-message e)} {:pretty true})
-                     (str "error: " (ex-message e))))
+        ;; not only agentctl's own refusals: a config that cannot be read (a
+        ;; directory, no permission) throws from the JVM, and a stack trace on
+        ;; stderr with nothing on stdout is no answer, least of all under
+        ;; --json. A script reading --json gets its error as JSON too.
+        (catch Exception e
+          (let [msg (or (ex-message e) (.getName (class e)))]
+            (println (if (:json opts)
+                       (json/generate-string {:error msg} {:pretty true})
+                       (str "error: " msg))))
           (System/exit 1))))))

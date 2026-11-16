@@ -1277,4 +1277,47 @@ aj apply! -f "$AJ/ok2.edn" -t pi -y > "$AJ/text.txt"
 grep -q '^applied 1 change(s)$' "$AJ/text.txt" && grep -q '^backups: ' "$AJ/text.txt" \
   || { cat "$AJ/text.txt"; fail "apply! text output changed"; }
 
+echo "27. every failure is one error line, or one JSON document under --json"
+EF="$SB/errors"
+mkdir -p "$EF/dir.edn"
+printf '{}\n' > "$EF/locked.edn"
+chmod 000 "$EF/locked.edn"
+ef() { (cd "$EF" && AGENTCTL_HOME="$EF" run "$@"); }
+# ef_fails <out-stem> <expect-in-message> <args…>: exit 1 in both modes, a
+# one-line "error: …" in text, {"error": …} under --json, and no stack trace
+ef_fails() {
+  local stem=$1 want=$2; shift 2
+  set +e
+  ef "$@" > "$EF/$stem.txt" 2> "$EF/$stem.err"; local code=$?
+  ef "$@" --json > "$EF/$stem.json" 2> "$EF/$stem.jerr"; local jcode=$?
+  set -e
+  [ "$code" = 1 ] && [ "$jcode" = 1 ] || { cat "$EF/$stem".*; fail "$* exited $code / $jcode under --json, wanted 1"; }
+  [ "$(wc -l < "$EF/$stem.txt")" -eq 1 ] && grep -q "^error: .*$want" "$EF/$stem.txt" \
+    || { cat "$EF/$stem.txt" "$EF/$stem.err"; fail "$* did not fail with one error line"; }
+  python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["error"] else 1)' "$EF/$stem.json" "$want" \
+    || { cat "$EF/$stem.json" "$EF/$stem.jerr"; fail "$* --json did not fail with a JSON error"; }
+  if grep -q 'Error ---\|Location:' "$EF/$stem.err" "$EF/$stem.jerr"; then
+    cat "$EF/$stem.err" "$EF/$stem.jerr"; fail "$* printed a stack trace"
+  fi
+}
+ef_fails dir 'Is a directory' apply -f "$EF/dir.edn"
+ef_fails dir-validate 'Is a directory' validate -f "$EF/dir.edn"
+# root reads a file whatever its mode; the check means nothing there
+if [ ! -r "$EF/locked.edn" ]; then
+  ef_fails locked 'Permission denied' apply -f "$EF/locked.edn"
+fi
+chmod 600 "$EF/locked.edn"
+# a mistyped command, under --json, is an error and not the usage text
+set +e
+ef bogus --json > "$EF/bogus.json"; code=$?
+set -e
+[ "$code" = 1 ] || { cat "$EF/bogus.json"; fail "bogus --json exited $code"; }
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) == {"error": "unknown command: bogus"} else 1)' "$EF/bogus.json" \
+  || { cat "$EF/bogus.json"; fail "bogus --json did not print a JSON error"; }
+set +e
+ef bogus > "$EF/bogus.txt"; code=$?
+set -e
+[ "$code" = 1 ] && grep -q '^unknown command: bogus' "$EF/bogus.txt" && grep -q '^USAGE' "$EF/bogus.txt" \
+  || { cat "$EF/bogus.txt"; fail "bogus without --json stopped printing the usage"; }
+
 echo "all agentctl e2e checks passed"
