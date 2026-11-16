@@ -57,6 +57,21 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
 | `:trust` / legacy `:projects` | project `settings.json`, trust | `[projects."…"]` trust | `trust.json`; project `.agents/skills` from `:skills` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
+| `:plugins` | `claude plugin marketplace add` + `install`, then `extraKnownMarketplaces` / `enabledPlugins` in the placement's settings file | — | — | — | — | — | — | — |
+| `:agents` | symlink `~/.claude/agents/<name>.md` or `<project>/.claude/agents/<name>.md` | — | — | — | — | — | — | — |
+
+A `:plugins` key is `[:gh "owner/repo" "plugin"]` or `[:uri "…" "plugin"]`. Its
+value takes `:marketplace` (the name the marketplace's own manifest gives it;
+default the plugin's name), `:ref`, a branch, tag or commit of a git
+marketplace, written as `source.ref` and passed to the CLI as `owner/repo#ref`,
+`:version` (`:latest` or a pinned version string; without it only presence is
+checked) and `:build`, a shell command run in each new install path. See
+[GUIDE.md](GUIDE.md#claude-plugins) and [Plugin versions](GUIDE.md#plugin-versions).
+
+An `:agents` key is `[pack "name"]` or `[pack ["a" "b"]]`, `pack` being a
+declared `:skill-packs` entry's `:alias` or id. It links
+`<pack root>/agents/<name>.md` as a Claude Code subagent definition; `:in`
+places it user-wide or in projects. See [GUIDE.md](GUIDE.md#claude-subagents).
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
 instructions file. Omp's context-file provider loads `AGENTS.md` from its
@@ -650,7 +665,7 @@ the entire project declaration still prunes entries agentctl wrote there.
 
 A user-wide server is written with `claude mcp add`, which cannot edit an
 entry: an update removes the server and adds it again, after backing up
-`~/.claude.json`. Drift there is a declared env or header name the entry lacks,
+`~/.claude.json`, and puts the previous entry back if the add fails. Drift there is a declared env or header name the entry lacks,
 never a value and never a name added by hand, and the add carries every env var
 or header the declaration does not name, so a hand-added `Authorization`
 survives. A name agentctl declared and the declaration has since dropped is
@@ -731,7 +746,10 @@ Anything beyond that (env, cwd, per-tool selection) needs the map form.
 placeholder: agentctl writes headers resolved, and the value on disk says
 nothing about whether it was a secret. A whole `$VAR` header is kept. Env
 values, an MCP server's and Claude's settings `env` (`!bw://claude-env/<NAME>`),
-are redacted when they look like a credential.
+are redacted the same way unless they are provably no secret: a whole `$VAR`, a
+boolean, a number of up to five digits, or a common settings word such as
+`debug` or `fast`. A token under a plain name, `DOCS_AUTH` or `UPSTREAM`, is a
+placeholder too, and the import notes list each vault field to fill in.
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
@@ -871,7 +889,10 @@ changing built-in models in place.
                :os :windows           ; :windows, :linux or :macos
                :home "C:\\scratch"     ; optional: pins the remote home, ignoring CODEX_HOME
                :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex :awl]}}
-               :skills {[:gh "owner/skill"] {:acli [:codex]}}}}}
+               :skills {[:gh "owner/skill"] {:acli [:codex]}}
+               :settings [{:acli [:codex] :sandbox "net"
+                           :permission-profiles {:net {:extends ":workspace"
+                                                       :network {:enabled true}}}}]}}}
 ```
 
 A host holds its own declarations instead of selecting from the top level. A source
@@ -880,9 +901,17 @@ also be placed user-wide on a host for another. Top-level declarations stay loca
 host ones never reach a local plan.
 
 A host has no projects: `:in` is `:all` (or `:none` on a pack that a `[pack "skill"]`
-key names), and anything else is a config error, as is a non-keyed section. Host
+key names), and anything else is a config error, as is a non-keyed `:skills` or
+`:skill-packs`, or `:settings` that is not a vector of rows. Host
 keys other than the ones above, and any tool but codex and awl, are reported as not
 provisioned.
+
+Codex settings on a host are planned by the codex adapter's own ops against a local
+copy of the host's `config.toml`, read in the inventory's round trip. Once they have
+run, the copy is written back whole: staged, checksummed and refused if the file's
+SHA-256 is no longer the one read. The replaced file goes into the host's backups.
+Ownership of host settings is not recorded yet, so a dropped setting stays on the
+host.
 
 A host has no `agents.edn` for awl to read, so `:awl` there places copies, in
 `~/.agents/skills/<name>`. Codex keeps `$CODEX_HOME/skills`, and from 0.95.0 on also
@@ -941,7 +970,9 @@ A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
 `$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
 A field name the item does not have is missing too: a misspelt field never
-falls back to the login password. Claude's
+falls back to the login password. When the item has a login, `validate` and the
+plan say so — `did you mean item/password?` — since a ref that read the
+password through that fallback now needs the field named. Claude's
 settings `:env` takes the same forms as an MCP server's `:env`. A Claude MCP
 server or settings `env` with any ref that does not resolve is held back whole,
 as [GUIDE.md](GUIDE.md#unresolved-secrets) describes; a resolved one is printed

@@ -392,12 +392,14 @@
   [cfg project-ids]
   (let [wanted (set project-ids)]
     (set
-     (for [[pid proj] (:projects cfg)
-           :when (contains? wanted pid)
-           id (:skills proj)
-           pack (packs-for-skill cfg id)
-           :when pack]
-       pack))))
+     (concat
+      (for [[pid proj] (:projects cfg)
+            :when (contains? wanted pid)
+            id (:skills proj)
+            pack (packs-for-skill cfg id)
+            :when pack]
+        pack)
+      (for [[_ a] (:agents cfg) :when (some wanted (keys (:targets a)))] (:pack a))))))
 
 ;; ---------------------------------------------------------------- pack ops
 
@@ -467,10 +469,11 @@
 
 (defn cloned-for-user?
   "A pack agentctl itself links from: placed user-wide, or the source of a
-   user-wide skill, for some tool. A pack only projects use is fetched by the
-   `skills` CLI. An old-format config keeps every pack — a project's bare skill
-   name is resolved by scanning them. A host's config also carries
-   `:consumers`, which a host places like tools; a local one never does."
+   user-wide skill, for some tool. A pack only projects use is installed by
+   the `skills` CLI (agentctl clones one a project takes whole only to learn
+   its names: `taken-whole?`). An old-format config keeps every pack — a
+   project's bare skill name is resolved by scanning them. A host's config
+   also carries `:consumers`, which a host places like tools; a local one never does."
   [cfg id]
   (or (not (:entity-dsl? cfg))
       (some #(and (= :skill-packs (:kind %)) (= id (:id %)) (= :all (:in %))
@@ -478,23 +481,50 @@
                       (seq (get-in cfg [:skill-packs id :consumers]))))
             (:entities cfg))
       (some #(and (= id (:from %)) (= :global (:scope %)) (or (seq (:tools %)) (seq (:consumers %))))
-            (vals (:skills cfg)))))
+            (vals (:skills cfg)))
+      ;; a Claude subagent is linked by agentctl, user-wide or into a project
+      (some #(and (= id (:pack %)) (seq (:tools %))) (vals (:agents cfg)))))
+
+(defn taken-whole?
+  "A git pack some project takes whole, which the `skills` CLI installs there
+   by URL. agentctl clones it as well, only to learn the names it brings: the
+   CLI writes each of them over whatever the project already has."
+  [cfg id]
+  (and (not (cloned-for-user? cfg id))
+       (boolean (some #(some #{id} (:skills %)) (vals (:projects cfg))))))
+
+(declare pack-op)
 
 (defn pack-ops
-  "Ops that fetch or update git-backed skill packs."
+  "Ops that fetch or update the git-backed skill packs agentctl links from."
   [cfg]
   (for [[id pack] (:skill-packs cfg)
         :when (and (= :git (:type pack)) (cloned-for-user? cfg id))
-        :let [root (:root pack)
+        :let [o (pack-op id pack)]
+        :when o]
+    o))
+
+(defn project-pack-ops
+  "Ops that fetch the git packs projects take whole (`taken-whole?`). They
+   serve projects only, so a `--user` run leaves them out (`:for-projects`)."
+  [cfg]
+  (for [[id pack] (:skill-packs cfg)
+        :when (and (= :git (:type pack)) (taken-whole? cfg id))
+        :let [o (pack-op id pack)]
+        :when o]
+    (assoc o :for-projects true)))
+
+(defn- pack-op [id pack]
+  (let [root (:root pack)
               present (u/exists? (str root "/.git"))
               local (when present (git-head root))
               remote (git-remote-head (:uri pack) (:ref pack))
               [label repo] (uri-parts (:uri pack))
-              runs (checkout-runs pack present)
-              cmds (mapv :argv runs)
-              what (if (:implicit pack) "skill" "pack")]
-        :when (or (not present) (and remote local (not= local remote)))]
-    (plan/op {:action (if present :update :create)
+        runs (checkout-runs pack present)
+        cmds (mapv :argv runs)
+        what (if (:implicit pack) "skill" "pack")]
+    (when (or (not present) (and remote local (not= local remote)))
+      (plan/op {:action (if present :update :create)
               :tool :agentctl :kind :skill-packs :id id
               ;; a repository that is one skill reads as that skill, not a pack
               :shown-kind (when (:implicit pack) :skills)
@@ -517,4 +547,4 @@
                                               " exited " exit ": "
                                               (or (last (remove str/blank? (str/split-lines (str err))))
                                                   (not-empty out) "no output"))
-                                         {:exit exit}))))})))
+                                         {:exit exit}))))}))))

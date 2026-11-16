@@ -20,6 +20,7 @@ mkdir -p "$SB/bin"
 # to answer another one, or nothing
 cat > "$SB/bin/codex" <<'STUB'
 #!/bin/sh
+[ -n "${CODEX_HANG:-}" ] && exec sleep 60
 [ "${1:-}" = --version ] && printf '%s\n' "${CODEX_VERSION-codex-cli 0.169.0}"
 exit 0
 STUB
@@ -265,10 +266,10 @@ grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "old codex not gi
 CODEX_VERSION='codex-cli 0.94.0' expect 0 apply! $W -y
 for s in alpha beta gamma; do [ -d "$CX/$s" ] && [ -d "$AG/$s" ] || fail "$s not in both roots"; done
 CODEX_VERSION='codex-cli 0.94.0' converged
-echo "    and loses it once codex reads the shared root"
-expect 2 apply $W
-grep -q '0 to add, 0 to change, 3 to remove' "$SB/out" || fail "codex copies not dropped: $(cat "$SB/out")"
-expect 0 apply! $W -y
+echo "    and loses it once codex reads the shared root, under -t awl too"
+expect 2 apply $W -t awl
+grep -q '0 to add, 0 to change, 3 to remove' "$SB/out" || fail "-t awl leaves codex its second copies: $(cat "$SB/out")"
+expect 0 apply! $W -t awl -y
 [ -e "$CX/alpha" ] && fail "codex copy kept beside the shared one"
 converged
 
@@ -276,6 +277,15 @@ echo "20. a codex that gives no version gets a copy of its own, and a warning"
 CODEX_VERSION='' expect 2 apply $W
 grep -q 'gave no version' "$SB/out" || fail "unknown codex version not reported: $(cat "$SB/out")"
 grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "unknown codex not given copies: $(cat "$SB/out")"
+CODEX_VERSION='Error: Node.js v18.19.1 is not supported' expect 2 apply $W
+grep -q 'gave no version' "$SB/out" || fail "a runtime's version taken for codex's: $(cat "$SB/out")"
+if command -v timeout >/dev/null 2>&1; then
+  echo "    nor does one that hangs"
+  t0=$(date +%s)
+  CODEX_HANG=1 expect 2 apply $W
+  [ $(( $(date +%s) - t0 )) -lt 30 ] || fail "a hanging codex hung the inventory"
+  grep -q 'gave no version' "$SB/out" || fail "a hanging codex not reported: $(cat "$SB/out")"
+fi
 
 echo "21. a hand-made copy codex reads beside agentctl's is reported, never touched"
 mkdir -p "$CX/beta"; printf 'mine\n' > "$CX/beta/SKILL.md"
@@ -355,5 +365,82 @@ PY
 jh_json "$JH/again.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["applied"] == {"done": [], "failed": []} else 1)' "$JH/again.json" \
   || { cat "$JH/again.json" >&2; fail "a converged apply! --host --json reported something applied"; }
+
+# codex settings: the host's config.toml is read, edited here, and written
+# back whole, keeping what it holds that agents.edn does not declare
+G="$SB/far6"; GC="$G/.codex/config.toml"
+mkdir -p "$G/.codex"
+cat > "$GC" <<'TOML'
+model = "hand-picked"
+
+[mcp_servers.docs]
+command = "docs-server"
+TOML
+cat > "$SB/set.edn" <<EDN
+{:hosts {:box3 {:ssh "box" :os :linux :home "$G"
+                :settings [{:acli [:codex] :sandbox "net"
+                            :permission-profiles {:net {:extends ":workspace"
+                                                        :network {:enabled true}}}}]}}}
+EDN
+S="-f $SB/set.edn --host box3"
+converged_s() { expect 0 apply $S; grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "settings not converged: $(cat "$SB/out")"; }
+
+echo "26. codex settings on a host: planned against its config.toml, nothing written"
+cp "$GC" "$SB/gc.before"
+expect 2 apply $S -t codex -k settings
+grep -q "far6/.codex/config.toml" "$SB/out" || fail "plan does not name the host's config.toml: $(cat "$SB/out")"
+grep -q 'default_permissions' "$SB/out" || fail "sandbox not planned: $(cat "$SB/out")"
+grep -q 'permission-profiles.net' "$SB/out" || fail "profile not planned: $(cat "$SB/out")"
+cmp -s "$GC" "$SB/gc.before" || fail "a dry plan wrote the host's config.toml"
+expect 0 apply $S -k skills
+grep -q 'default_permissions' "$SB/out" && fail "-k skills planned settings"
+
+echo "27. apply! writes them and leaves the rest of the file alone; then converged"
+expect 0 apply! $S -y
+grep -q '^default_permissions = "net"' "$GC" || fail "default not written: $(cat "$GC")"
+grep -q '^\[permissions.net\]' "$GC" || fail "profile not written: $(cat "$GC")"
+grep -q '^enabled = true' "$GC" || fail "network not enabled: $(cat "$GC")"
+grep -q '^model = "hand-picked"' "$GC" || fail "undeclared key lost"
+grep -q '^command = "docs-server"' "$GC" || fail "undeclared table lost"
+ls "$G/.config/agentctl/backups/"*/_.codex_config.toml >/dev/null || fail "config.toml not backed up on the host"
+[ -e "$G/.config/agentctl/staging/"* ] 2>/dev/null && fail "staging left behind"
+converged_s
+expect 0 validate $S
+grep -q 'host matches' "$SB/out" || fail "validate after converging: $(cat "$SB/out")"
+
+echo "28. drift in the host's config.toml is reported and repaired"
+sed -i.bak 's/^enabled = true/enabled = false/' "$GC"
+expect 0 validate $S
+grep -q 'pending change' "$SB/out" || fail "validate does not report drift: $(cat "$SB/out")"
+expect 2 apply $S
+expect 0 apply! $S -y
+grep -q '^enabled = true' "$GC" || fail "drift not repaired"
+converged_s
+
+echo "29. a config.toml changed between plan and write is not overwritten"
+sed -i.bak 's/^enabled = true/enabled = false/' "$GC"
+cat > "$SB/ssh-racing" <<STUB
+#!/bin/sh
+# the host's file changes after the inventory read it, before the write
+script=\$(cat)
+case "\$script" in *"changed on the host"*) printf 'model_verbosity = "raced"\n' >> "$GC";; esac
+printf '%s\n' "\$script" | sh -c "\$2"
+STUB
+chmod +x "$SB/ssh-racing"
+AGENTCTL_SSH_CMD="$SB/ssh-racing" expect 1 apply! $S -y
+grep -q 'changed on the host since it was read' "$SB/out" || fail "a raced write not refused: $(cat "$SB/out")"
+grep -q 'raced' "$GC" || fail "the racing edit was overwritten"
+grep -q '^enabled = false' "$GC" || fail "a refused write still landed"
+
+echo "30. a codex the host lacks skips its settings; other tools' settings are reported"
+cat > "$SB/set2.edn" <<EDN
+{:hosts {:box3 {:ssh "box" :os :linux :home "$G"
+                :settings [{:id :cx :acli [:codex] :model "x"} {:id :cc :acli [:claude] :model "y"}]}}}
+EDN
+AGENTCTL_SSH_CMD="$SB/bare-ssh" expect 0 apply -f "$SB/set2.edn" --host box3
+grep -q 'skipped (CLI not installed on host): codex' "$SB/out" || fail "absent codex not reported: $(cat "$SB/out")"
+grep -q 'claude settings are not provisioned on hosts' "$SB/out" || fail "claude settings not reported: $(cat "$SB/out")"
+run apply -f "$SB/set.edn" > "$SB/out" 2>&1 || true
+grep -q 'permission-profiles.net' "$SB/out" && fail "host settings leaked into the local plan"
 
 echo "hosts e2e OK"

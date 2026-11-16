@@ -130,12 +130,14 @@
     (concat
      (keep (fn [[id m]]
              (let [secret? (common/holds-secret? (merge (:env m) (:headers m)))]
-               (plan/json-set-op {:tool tool :kind :mcps :id id
-                                  :file mcp-file
-                                  :path [:mcpServers (keyword (u/kw->str id))]
-                                  :value (mcp-entry m (get current (keyword (u/kw->str id))))
-                                  :risk (if secret? :secret :low)
-                                  :summary (common/mcp-summary m)})))
+               (if-let [issues (seq (common/mcp-issues m))]
+                 (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
+                 (plan/json-set-op {:tool tool :kind :mcps :id id
+                                    :file mcp-file
+                                    :path [:mcpServers (keyword (u/kw->str id))]
+                                    :value (mcp-entry m (get current (keyword (u/kw->str id))))
+                                    :risk (if secret? :secret :low)
+                                    :summary (common/mcp-summary m)}))))
            desired)
      (keep (fn [id]
              (when (and (nil? (namespace id))
@@ -307,7 +309,8 @@
            (let [cur (get current (str "providers" (u/kw->str id)))
                  key-ref (:key p)
                  env-var (when (= :env (:ref/kind key-ref)) (:ref/var key-ref))
-                 {:keys [status message]} (refs/resolve-ref key-ref)
+                 ;; an env var is named, not copied: kimi reads it when it starts
+                 issues (seq (common/provider-issues p (not env-var)))
                  provider-op (plan/toml-set-op
                               {:tool tool :kind :providers :id id
                                :file config-file
@@ -319,14 +322,11 @@
                                :summary (str "config.toml providers." (u/kw->str id))})]
              (remove nil?
                      (concat
-                      ;; an env var that is not set right now is not a failure:
-                      ;; kimi reads it when it starts
-                      [(when (and (:key p) (not env-var) (not= :ok status))
-                         (plan/op {:action :noop :tool tool :kind :providers :id id :warn true
-                                   :summary (str "key " (refs/describe (:key p)) " unresolved ("
-                                                 (or message (name status))
-                                                 ") — existing credential left untouched")}))]
-                      [provider-op]
+                      ;; written without its key or a header the provider
+                      ;; would answer nothing, and leave no drift to say so
+                      [(if issues
+                         (common/unresolved-op {:tool tool :kind :providers :id id :target config-file} issues)
+                         provider-op)]
                       (model-ops id (common/declared-models p) (get current "models"))))))))
      desired)))
 

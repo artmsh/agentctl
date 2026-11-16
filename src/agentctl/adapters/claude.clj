@@ -5,6 +5,8 @@
    runtime state blob owned by the CLI: it is read for current state, and only
    ever mutated through `claude mcp` or narrowly-scoped project keys."
   (:require [agentctl.adapters.common :as common]
+            [agentctl.adapters.claude-plugins :as cp]
+            [agentctl.adapters.claude-sources :as cs]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
@@ -39,28 +41,41 @@
           (str s)
           (sort-by (comp - count) (distinct (remove str/blank? (map str values))))))
 
+(defn- value-arg
+  "An argv element carrying an env or header value (`prefix` is `K=` or
+   `k: `), and what a message may show of it: the value masked where it
+   sits, never searched for elsewhere in the text."
+  [prefix v]
+  {:arg (str prefix v) :shown (str prefix (refs/mask v))})
+
+(defn- arg-text [a] (if (map? a) (:arg a) a))
+(defn- arg-shown [a] (if (map? a) (:shown a) a))
+
 (defn- ok!
   "Turn a non-zero CLI exit into a real failure, so apply! reports the op as
    failed and claims no ownership of what the CLI never wrote — a server it
    refused to add, a plugin it never installed.
 
    The message names the command, and `claude mcp add` carries its env and
-   header values on the command line, where the CLI may echo them back:
-   `secrets` are masked wherever they appear, since the message is printed,
-   and served to the GUI."
+   header values on the command line, where the CLI may echo them back. The
+   message is printed and served to the GUI, so a value in the command
+   (`value-arg`) is shown masked where it sits, and in the CLI's own output
+   each of `secrets` is masked wherever it appears. Only secrets are looked
+   for there: masking every value would turn a plain `s` into a row of
+   asterisks inside every word that holds one."
   ([result argv] (ok! result argv nil))
   ([{:keys [exit err out]} argv secrets]
    (when-not (zero? exit)
-     (let [argv (mapv #(hide % secrets) argv)]
-       (throw (ex-info (str (str/join " " argv) " failed: "
+     (let [shown (mapv arg-shown argv)]
+       (throw (ex-info (str (str/join " " shown) " failed: "
                             (hide (first (remove str/blank? [err out])) secrets))
-                       {:exit exit :argv argv}))))
+                       {:exit exit :argv shown}))))
    true))
 
 (defn- claude-ok!
   "Run the claude CLI and fail on a non-zero exit."
   ([argv] (claude-ok! argv nil))
-  ([argv secrets] (ok! (claude-sh argv) argv secrets)))
+  ([argv secrets] (ok! (claude-sh (mapv arg-text argv)) argv secrets)))
 
 (def setting-keys
   {:model :model
@@ -302,6 +317,8 @@
     :env (key-names (:env entry))
     :headers (key-names (:headers entry))}))
 
+(declare declared-secret-keys)
+
 (defn- resolve-mcp
   "A server's env and headers with every ref resolved, and the refs that did
    not resolve: a server holding one is not written, and not approved."
@@ -311,6 +328,18 @@
     {:env env
      :headers headers
      :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))}))
+
+(defn- restore-user-mcp!
+  "Put back a user-wide server's entry as it was before the update removed
+   it, after `claude mcp add` refused the new one: otherwise a failed update
+   would uninstall the server. Says what happened, for the failure message."
+  [nm prev]
+  (try
+    (u/write-json! runtime-file (assoc-in (plan/read-json-strict runtime-file) [:mcpServers (keyword nm)] prev))
+    "the previous definition was restored"
+    (catch Exception e
+      (str "restoring the previous definition failed too (" (ex-message e) "); ~/.claude.json is backed up in "
+           (u/tilde (u/backup-dir))))))
 
 (defn mcp-ops [cfg st]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
@@ -340,21 +369,33 @@
                    :diffs (plan/field-diffs (or have {}) want)
                    :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                    :exec! (fn []
-                            (when cur
-                              ;; the remove drops what the add may fail to put back
-                              (u/backup! runtime-file)
-                              (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                            (let [prev (when cur (get (current-mcps) (keyword nm)))]
+                              (when prev
+                                ;; the remove drops what the add may fail to put back
+                                (u/backup! runtime-file)
+                                (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                              (try
                             (claude-ok!
                              (vec (if (= :http (:transport m))
                                     (concat ["claude" "mcp" "add" "--scope" "user"
                                              "--transport" "http" nm (:url m)]
-                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)])
+                                            (mapcat (fn [[k v]] ["--header" (value-arg (str k ": ") v)])
                                                     (merge carried (:values headers))))
                                     (concat ["claude" "mcp" "add" "--scope" "user" nm]
-                                            (mapcat (fn [[k v]] ["-e" (str k "=" v)])
+                                            (mapcat (fn [[k v]] ["-e" (value-arg (str k "=") v)])
                                                     (merge carried (:values env)))
                                             ["--"] [(:command m)] (:args m))))
-                             (concat (vals (:values env)) (vals (:values headers)) (vals carried))))})))
+                             ;; what the CLI may echo back: the values from a secret
+                             ;; ref or shaped like one, and every value carried over,
+                             ;; whose origin nothing records
+                             (concat (vals (select-keys (:values env) (declared-secret-keys (:env m))))
+                                     (vals (select-keys (:values headers) (declared-secret-keys (:headers m))))
+                                     (vals carried)))
+                                (catch clojure.lang.ExceptionInfo e
+                                  (throw (if prev
+                                           (ex-info (str (ex-message e) " — " (restore-user-mcp! nm prev))
+                                                    (ex-data e))
+                                           e))))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
@@ -429,45 +470,39 @@
 
 (defn- uri-path [uri] (u/abs-path (str/replace (u/expand uri) #"^file://" "")))
 
+(defn- with-ref
+  "The CLI reads a git ref after `#`: `owner/repo#ref`, `<git-url>#ref`."
+  [source ref]
+  (if ref (str source "#" ref) source))
+
 (defn- plugin-source
   "The source as `claude plugin marketplace add` takes it: owner/repo, a URL,
-   or a path. The CLI rejects `file://`, so a local URI becomes its path."
+   or a path, a git one with its ref. The CLI rejects `file://`, so a local
+   URI becomes its path."
   [p]
-  (cond (:repo p) (:repo p)
+  (cond (:repo p) (with-ref (:repo p) (:ref p))
         (local-uri? (:uri p)) (uri-path (:uri p))
-        :else (:uri p)))
+        :else (with-ref (:uri p) (:ref p))))
 
 (defn- plugin-key [p]
   (str (:plugin p) "@" (:marketplace p)))
 
 (defn- plugin-marketplace
-  "The `extraKnownMarketplaces` entry the CLI itself writes for this source:
-   github for owner/repo, directory for a local path, url for a hosted
-   marketplace.json, and git for any other remote."
+  "The `extraKnownMarketplaces` source the CLI itself writes for this row:
+   github for owner/repo, directory for a local path, and for a remote URL
+   what `cs/remote` says the CLI reads it as. Git sources carry the ref."
   [p]
   (let [uri (:uri p)]
-    {:source (cond (:repo p) {:source "github" :repo (:repo p)}
-                   (local-uri? uri) {:source "directory" :path (uri-path uri)}
-                   (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
-                   :else {:source "git" :url uri})}))
+    {:source (u/prune-nils
+              (cond (:repo p) {:source "github" :repo (:repo p) :ref (:ref p)}
+                    (local-uri? uri) {:source "directory" :path (uri-path uri)}
+                    :else (let [r (cs/remote uri)]
+                            (cond-> r (= "git" (:source r)) (assoc :ref (:ref p))))))}))
 
-(def installed-plugins-file (str home "/plugins/installed_plugins.json"))
-
-(defn- installed?
-  "Whether the CLI's own install record holds `key` at this scope — for a
-   project or local scope, at this project. Settings alone do not install a
-   plugin; an enabled entry with no install is drift."
-  [key scope project]
-  (let [rows (get-in (u/read-json installed-plugins-file) [:plugins (keyword key)])
-        want (plugin-scope scope)
-        canon #(str (fs/canonicalize (u/abs-path %)))
-        here (some-> project :path canon)]
-    (boolean
-     (some (fn [{s :scope p :projectPath}]
-             (and (= want s)
-                  (or (= "user" want)
-                      (= here (some-> p canon)))))
-           rows))))
+;; Whether the CLI's own install record holds a plugin at a scope is
+;; `cp/install-record`: settings alone do not install a plugin, and an enabled
+;; entry with no install is drift.
+(def installed-plugins-file cp/installed-file)
 
 (defn- not-installed? [{:keys [exit err out]}]
   (and (not (zero? exit)) (re-find #"is not installed" (str err " " out))))
@@ -478,48 +513,100 @@
    :cli-scope (plugin-scope scope)
    :key (plugin-key p)})
 
-(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key]}]
+(defn- plugin-install-op [{:keys [id plugin project scope file cli-scope key remote rows-clash]}]
   (let [current (u/read-json file)
         marketplaces (or (:extraKnownMarketplaces current) {})
         enabled (or (:enabledPlugins current) {})
         mname (:marketplace plugin)
-        want-marketplace (plugin-marketplace plugin)
         before-m (get marketplaces (keyword mname))
+        ;; keys the row does not declare (`autoUpdate`, …) are the user's and stay
+        want-marketplace (merge before-m (plugin-marketplace plugin))
         before-e (get enabled (keyword key))
-        desired-m (not= (u/norm before-m) (u/norm want-marketplace))
+        desired-m (not= (u/norm (:source before-m)) (u/norm (:source want-marketplace)))
         desired-e (not= true before-e)
-        missing (not (installed? key scope project))
+        rec (cp/install-record key cli-scope (:path project))
+        missing (nil? rec)
+        ;; settings already name this marketplace, from another source or ref
+        ;; (a URL spelled with or without `.git` is the same remote)
+        switched (and before-m (not (cs/same-source? (:source before-m) (:source want-marketplace))))
+        ;; a source switch re-registers the marketplace, which then offers what
+        ;; it offers: the version on disk now says nothing about it
+        want (:version plugin)
+        offer (when (and want (not desired-m)) (cp/offered mname (:plugin plugin)))
+        ;; only `:latest` asks the network, and only of an installed plugin
+        moved (when (and (= :latest want) rec offer) (remote mname))
+        vdiff (when-not desired-m (cp/version-diff want rec offer moved))
+        ;; Claude adds a marketplace to a project only from the source the
+        ;; user settings name for it, spelled the same way
+        user-source (when (not= "user" cli-scope)
+                      (get-in (u/read-json settings-file) [:extraKnownMarketplaces (keyword mname) :source]))
+        clash (and user-source (not= (u/norm user-source) (u/norm (:source want-marketplace))))
         source (plugin-source plugin)
         cwd (:path project)
         argv-add ["claude" "plugin" "marketplace" "add" "--scope" cli-scope source]
         ;; the marketplace is registered by argv-add, so the install names it
         ;; once, in the key; the CLI rejects plugin@marketplace with --marketplace
-        argv-install ["claude" "plugin" "install" "--scope" cli-scope "-y" key]
+        steps (cp/steps {:key key :cli-scope cli-scope :installed? (not missing)
+                         :switched? (and switched (not missing)) :behind? (some? vdiff)})
         run (fn [argv] (ok! (if cwd (claude-sh-in cwd argv) (claude-sh argv)) argv))]
-    (when (or desired-m desired-e missing)
+    (when (or desired-m desired-e missing vdiff)
       (plan/op
        {:action (if (nil? current) :create :update)
         :tool tool :kind :plugins :id id :project (some-> (:id project) keyword)
         :project-path (some-> project :path) :target file
-        :path ["enabledPlugins" key] :cmds [argv-add argv-install]
+        :path ["enabledPlugins" key]
+        :cmds (vec (concat [argv-add] (when want [(cp/refresh-cmd mname)]) steps))
         :summary (str "Claude marketplace " mname "; enable " key
                       (when (and missing (not desired-m) (not desired-e))
                         " (enabled in settings but not installed)"))
+        :note (or (when rows-clash
+                    (str "⚠ agents.edn declares marketplace " mname " from more than one source;"
+                         " Claude keeps one source per name, so apply! fails for all but one"))
+                  (when clash
+                    (str "⚠ " (u/tilde settings-file) " declares marketplace " mname " from "
+                         (pr-str user-source) "; Claude adds it to a project only from that source,"
+                         " so apply! fails until the two agree"))
+                  (when (and switched (not missing))
+                    (str "marketplace source changed: " key
+                         " is reinstalled, Claude would keep its cached copy at an unchanged version"))
+                  (cp/pin-note want mname offer))
         :diffs (cond-> []
                  desired-m (conj {:key :extraKnownMarketplaces :before before-m :after want-marketplace})
                  desired-e (conj {:key :enabledPlugins :before before-e :after true})
-                 missing (conj {:key :installed :before false :after true}))
+                 missing (conj {:key :installed :before false :after true})
+                 (and missing want) (conj {:key :version :before nil
+                                           :after (or (cp/wanted-version want offer nil) "latest")})
+                 vdiff (conj vdiff))
         :exec! (fn []
                  (plan/read-json-strict file)
-                 (run argv-add)
-                 (run argv-install)
+                 (let [before (u/slurp-safe file)]
+                   (try
+                     ;; Claude refuses to re-point a marketplace whose
+                     ;; user-settings entry names another source, so the
+                     ;; entry is written first
+                     (when desired-m
+                       (u/backup! file)
+                       (u/write-json! file (update-in (plan/read-json-strict file)
+                                                      [:extraKnownMarketplaces (keyword mname)]
+                                                      merge want-marketplace)))
+                     (run argv-add)
+                     (cp/converge! {:run run :key key :cli-scope cli-scope :project-path cwd
+                                    :mname mname :plugin (:plugin plugin) :want want
+                                    :switched? (boolean (and switched (not missing)))})
+                     ;; a failed step leaves the settings file as it was
+                     (catch Exception e
+                       (if before (u/write-text! file before) (fs/delete-if-exists file))
+                       (throw e))))
                  ;; Keep the JSON deterministic even when the CLI is stubbed,
                  ;; unavailable in a test harness, or writes a different
                  ;; ordering than the settings file expects.
                  (u/backup! file)
                  (u/write-json! file
                                 (-> (plan/read-json-strict file)
-                                    (assoc-in [:extraKnownMarketplaces (keyword mname)] want-marketplace)
+                                    ;; `marketplace add` rewrites the entry whole, dropping
+                                    ;; keys such as autoUpdate: put back what was there
+                                    (update-in [:extraKnownMarketplaces (keyword mname)] merge
+                                               want-marketplace)
                                     (assoc-in [:enabledPlugins (keyword key)] true))))}))))
 
 (defn- plugin-uninstall-op [{:keys [id plugin project scope file cli-scope key]}]
@@ -562,6 +649,10 @@
                                      p (assoc proj :id pid) (:scope p)))))
                  (:projects cfg))
         desired (concat global project)
+        clashing (set (for [[m es] (group-by (comp :marketplace :plugin) desired)
+                            :when (next (distinct (map #(:source (plugin-marketplace (:plugin %))) es)))]
+                        m))
+        desired (map #(cond-> % (clashing (get-in % [:plugin :marketplace])) (assoc :rows-clash true)) desired)
         desired-ids (set (map :id desired))
         managed (for [sid (state/managed-ids st tool :plugins)
                       :let [id (keyword sid)
@@ -572,7 +663,11 @@
                                  :marketplace (or (:marketplace e) (name id))}
                                 (when-let [p (:project-path e)] {:path p :id (some-> id namespace keyword)})
                                 (or (:scope e) :global)))]
-    (concat (keep plugin-install-op desired)
+    (concat (let [remote (memoize cp/remote-revision)]
+              ;; a plugin's build follows its install, which may move it
+              (mapcat (fn [e] (let [o (plugin-install-op (assoc e :remote remote))]
+                                (remove nil? [o (cp/build-op e (some? o))])))
+                      desired))
             (keep plugin-uninstall-op managed))))
 
 (def ^:private transport-keys
@@ -675,10 +770,14 @@
     (concat
      ;; a copy left behind in .mcp.json still ships the server — and its token —
      ;; to everyone who clones the repo. Not ours to delete: agentctl never
-     ;; wrote it, and the file may hold servers it knows nothing about
+     ;; wrote it, and the file may hold servers it knows nothing about. A copy
+     ;; agentctl did write there is pruned by this same plan
+     ;; (`project-mcp-prune-ops`), and needs no warning
      (for [[mid m] (common/project-mcps cfg proj tool)
+           :let [oid (keyword (str (name id) "/" (name mid)))]
            :when (and (not= :project (:scope m))
-                      (contains? tracked (keyword (u/kw->str mid))))]
+                      (contains? tracked (keyword (u/kw->str mid)))
+                      (not= :project (:scope (state/entry st tool :mcps oid))))]
        (plan/op {:action :noop :warn true :tool tool :kind :mcps :project id
                  :id (keyword (str (name id) "/" (name mid)))
                  :summary (str "⚠ also declared in " (u/tilde (project-mcp-file proj))

@@ -2,6 +2,7 @@
   "Planning engine: turn a normalized config into ops, execute them, track state."
   (:require [agentctl.adapters.antigravity :as antigravity]
             [agentctl.adapters.claude :as claude]
+            [agentctl.adapters.claude-agents :as claude-agents]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
             [agentctl.adapters.dsh :as dsh]
@@ -127,14 +128,14 @@
      ["-k" k (kind-problem k)])))
 
 (defn kind-selected?
-  "Does `-k` let ops of `kind` through? Selecting skills lets the
+  "Does `-k` let ops of `kind` through? Selecting skills or agents lets the
    `:skill-packs` ops through too: a pack op exists only because some skill
-   placement needs its clone, and without it a skill from a pack not on disk
-   yet is never linked while the run reports nothing to change."
+   or agent placement needs its clone, and without it one from a pack not on
+   disk yet is never linked while the run reports nothing to change."
   [{:keys [kinds]} kind]
   (or (empty? kinds)
       (contains? (set kinds) kind)
-      (and (= :skill-packs kind) (contains? (set kinds) :skills))))
+      (and (= :skill-packs kind) (some #{:skills :agents} kinds) true)))
 
 (defn- keep-kinds
   "`-k` keeps ops of the kinds named, and skills keep their packs. Later
@@ -177,8 +178,11 @@
   [ops cfg {:keys [only]}]
   (if (empty? only)
     ops
-    (let [packs (set (for [[kind id] only :when (= :skills kind)
-                           p (only-skill-packs cfg (keyword id)) :when p] p))]
+    (let [packs (set (concat
+                      (for [[kind id] only :when (= :skills kind)
+                            p (only-skill-packs cfg (keyword id)) :when p] p)
+                      (for [[kind id] only :when (= :agents kind)
+                            [aid a] (:agents cfg) :when (= id (name aid))] (:pack a))))]
       (filter #(or (some (fn [sel] (only-match? sel %)) only)
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
               ops))))
@@ -187,7 +191,7 @@
   "`--user` keeps what lands outside every project: user-wide files, and the
    packs cloned for them, which belong to no project either."
   [ops {:keys [user]}]
-  (if user (remove #(or (:project %) (:project-path %)) ops) ops))
+  (if user (remove #(or (:project %) (:project-path %) (:for-projects %)) ops) ops))
 
 (defn- project-ids
   "The declared projects one `--project` value selects: a project id as is,
@@ -226,6 +230,25 @@
       (filter #(or (contains? projects (:project %))
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
               ops))))
+
+(defn covers
+  "What a scoped run (`scoped?`) selects, as a predicate over `inventory`
+   tuples: the same `-t`/`-k`/`--only`/`-p`/`--user` rules the plan's own
+   filters apply to ops. A tuple's project is the `:project-id` it carries;
+   one without is user-wide. `sync-state!` adopts what this covers, because
+   a converged placement plans no op at all, so the filtered plan would
+   never show it as this run's."
+  [cfg {:keys [tools only projects user] :as opts}]
+  (let [tools (not-empty (set tools))
+        pids (when (seq projects) (set (mapcat #(project-ids cfg %) projects)))]
+    (fn [[t k id data]]
+      (let [pid (:project-id data)]
+        (boolean
+         (and (or (nil? tools) (contains? tools t))
+              (kind-selected? opts k)
+              (or (empty? only) (some #(only-match? % {:kind k :id id}) only))
+              (or (nil? pids) (contains? pids pid))
+              (not (and user pid))))))))
 
 (defn- under?
   "Is `child` `parent` itself or somewhere beneath it? Compared on whole path
@@ -442,8 +465,16 @@
                 global? (some #(and (= :skill-packs (:kind %)) (= (:id o) (:id %)) (= :all (:in %)))
                               (:entities cfg))]
             (assoc (pack-line (:id o) (map #(fs/file-name %) (sources/skill-dirs p)))
-                   :agents (sort (if (or global? (empty? ps))
-                                   (:tools p)
+                   :agents (sort (cond
+                                   global? (:tools p)
+                                   ;; placed nowhere itself: the tools whose
+                                   ;; skills or subagents come out of it
+                                   (empty? ps)
+                                   (distinct (concat (for [[_ sk] (:skills cfg) :when (= (:id o) (:from sk))
+                                                           t (:tools sk)] t)
+                                                     (for [[_ a] (:agents cfg) :when (= (:id o) (:pack a))
+                                                           t (:tools a)] t)))
+                                   :else
                                    (filter #(and (common/project-skill-tools %)
                                                  (or (nil? (:tools p)) (contains? (:tools p) %)))
                                            (distinct (mapcat (comp :for-tools val) users)))))
@@ -506,6 +537,17 @@
                  (dissoc :exec! :cmds :requires :owns))
              o))
          ops)))
+
+(defn- drop-moot-collisions
+  "Pi's report that it loads a project copy in place of a user-wide skill,
+   left out where this plan removes that copy. It runs after every filter and
+   after `defer-unmet-removals`, so a removal that will not happen leaves the
+   report standing."
+  [ops]
+  (let [removed (set (for [o ops
+                           :when (and (plan/mutating? o) (= :delete (:action o)) (:target o))]
+                       (sources/leaf-path (:target o))))]
+    (remove #(and (:collision %) (removed (sources/leaf-path (:target %)))) ops)))
 
 (defn- skill-readers
   "The agents that read project `p`'s shared `.agents/skills`: those placed
@@ -583,6 +625,7 @@
                             (= :projects (:kind o)) (assoc :kind (dsl-section o)))) tool-ops)
                    tool-ops)]
     (let [all (concat (sources/pack-ops cfg)
+                (sources/project-pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
                 ;; a collision report names the copy as well, but says what pi
@@ -595,7 +638,8 @@
                 (statusline/plan-ops cfg st opts)
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
-                (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
+                (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st))
+                (when (selected :claude) (claude-agents/plan-ops cfg st)))
           gates (filter :refuse-if-settings-change all)]
       (-> (remove :refuse-if-settings-change all)
         (keep-kinds opts)
@@ -603,6 +647,7 @@
         (keep-only cfg opts)
         (keep-user opts)
         defer-unmet-removals
+        drop-moot-collisions
         (->> (annotate-skill-ops cfg))
         same-command
         refuse-unparseable-json
@@ -672,7 +717,7 @@
    ;; the manifest so a later removal can uninstall only what agentctl owns.
    (for [[id p] (:plugins cfg) :when (and (= :global (:scope p)) (contains? (:tools p) :claude))]
      [:claude :plugins id {:scope :global :plugin (:plugin p) :marketplace (:marketplace p)
-                           :repo (:repo p) :uri (:uri p)}])
+                           :repo (:repo p) :uri (:uri p) :ref (:ref p)}])
    (for [[pid proj] (:projects cfg)
          :when (contains? (:for-tools proj) :claude)
          id (:plugins proj)
@@ -680,7 +725,10 @@
          :when (and p (contains? (:tools p) :claude))]
      [:claude :plugins (keyword (str (name pid) "/" (name id)))
       {:scope (:scope p) :plugin (:plugin p) :marketplace (:marketplace p)
-       :repo (:repo p) :uri (:uri p) :project-id pid :project-path (:path proj)}])
+       :repo (:repo p) :uri (:uri p) :ref (:ref p) :project-id pid :project-path (:path proj)}])
+   ;; a subagent link records where it went and what it points at, so a
+   ;; removal can tell it from a file someone put there since
+   (claude-agents/inventory cfg)
    (for [[id p] (:providers cfg) t (:tools p)] [t :providers id])
    ;; `defaultTools` is an array shared with the user; what an extension put
    ;; in it has to be remembered to be taken out again
@@ -757,10 +805,18 @@
    this run never wrote, and the next unfiltered run would then fail to find
    the real element to replace, orphaning it in the array forever — so there,
    only ids actually in `done` refresh, everything else keeps what the
-   manifest already had."
+   manifest already had.
+
+   `covered?` (`covers`) widens `done` to what the scoped run selected: a
+   placement already on disk plans no op, so without it only an unfiltered
+   run would ever adopt one. A tuple it covers is treated as an unfiltered
+   run treats every tuple — the run planned it, and planned nothing because
+   disk already matches. Nothing outside it is adopted, refreshed or
+   forgotten."
   ([st cfg] (sync-state! st cfg #{} nil))
   ([st cfg failed] (sync-state! st cfg failed nil))
-  ([st cfg failed done]
+  ([st cfg failed done] (sync-state! st cfg failed done (constantly false)))
+  ([st cfg failed done covered?]
    (let [cfg (if (:entity-dsl? cfg)
                (assoc cfg :skills (:skills (config/normalize (:entity-raw cfg) (:source cfg)))) cfg)
          owned (remove (fn [[t k id]] (contains? failed [t k id])) (inventory cfg))
@@ -769,15 +825,22 @@
          done-keys (set (map (fn [[t k id]] (state/key-for t k id)) done))
          stale (filter #(and (not (want %)) (not (failed-keys %))
                              (or (nil? done) (done-keys %))) (keys (:managed st)))
-         wrote? (fn [t k id] (or (nil? done) (contains? done [t k id])))
+         ;; a skill whose source is not on disk — its pack failed to clone,
+         ;; or is not fetched yet — was planned nothing because nothing could
+         ;; be linked, not because disk matches: it is not adopted
+         unsourced (set (for [[id s] (sources/all-skills cfg) :when (nil? (:source s))] id))
+         wrote? (fn [t k id data]
+                  (or (contains? done [t k id])
+                      (and (or (nil? done) (covered? [t k id data]))
+                           (not (and (= :skills k) (unsourced id))))))
          data-for (fn [t k id data]
                     (cond
                       (empty? data) data
-                      (wrote? t k id) data
+                      (wrote? t k id data) data
                       :else (dissoc (state/entry st t k id) :at)))]
      (as-> st $
        (reduce (fn [s [t k id data]]
-                 (if (or (wrote? t k id) (state/managed? s t k id))
+                 (if (or (wrote? t k id data) (state/managed? s t k id))
                    (state/record s t k id (or (data-for t k id data) {})) s))
                $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)

@@ -15,8 +15,7 @@
 > **Alpha.** Config keys change without migration: `:#let` became `:#def` with no alias, and an
 > old file's `$name` references fall back to environment variables. 170 unit tests and five
 > end-to-end suites pass in CI, but no `apply!` over a whole config on a real home has been done
-> yet. Beta when that run is verified and no adapter drops an MCP secret silently when a
-> Bitwarden vault is locked (see [Limitations](#limitations)).
+> yet. Beta when that run is verified.
 
 ## Rationale
 
@@ -41,6 +40,13 @@ segment.
   supersedes ([project skills](docs/GUIDE.md#project-skills)).
 - `:statusline` writes the one JSON file the `agent-statusline` renderer reads for every
   agent's status line, and that renderer's own `--check` validates it before anything is written.
+- Claude Code plugins are installed through `claude plugin` from a GitHub, git, directory or
+  hosted marketplace, user-wide or per project; a git marketplace can be pinned to a branch,
+  tag or commit with `:ref`, `:version :latest` upgrades a plugin when its marketplace moves,
+  and `:build` builds each new install ([Claude plugins](docs/GUIDE.md#claude-plugins)).
+- `:agents` links Claude Code subagent definitions from a skill pack into `~/.claude/agents` or
+  a project's `.claude/agents`, and removes only the links it made
+  ([Claude subagents](docs/GUIDE.md#claude-subagents)).
 - TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Codex's nested tables are declarable too: keymap, presets and the native footer
@@ -49,7 +55,8 @@ segment.
   Claude Code and Codex; vendor hooks in the same file are left alone ([hooks](docs/GUIDE.md#hooks)).
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
-  values and every MCP header; review its output before sharing a config.
+  values, every MCP header, and every env value it cannot show is no secret; review its output
+  before sharing a config.
 
 ## Comparison
 
@@ -145,7 +152,7 @@ behind a per-run token in the URL it prints, and Apply is its only control that 
 For one person running several coding-agent CLIs who wants their settings, MCP servers, skills,
 memory and providers in one reviewed file. Not for agent CLIs other than the eight above (an
 unknown tool is a config error; see [Comparison](#comparison)), or for remote hosts beyond
-codex's and awl's user-wide skills, where other kinds are reported, not written. One author, no tagged
+codex's and awl's user-wide skills and codex's settings, where other kinds are reported, not written. One author, no tagged
 releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describes.
 
 ## Limitations
@@ -154,11 +161,6 @@ releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describ
   server is skipped for them with a warning.
 - The DeepSeek Harness keeps settings, MCP servers and providers in Cordis patch files that
   agentctl does not write; `:dsh` entries there are reported by `validate` and the plan.
-- Pi, OMP, Kimi and Antigravity still write an MCP server without the header or env var whose
-  secret did not resolve (a locked vault, an unset variable), and the next `apply` shows no
-  drift. Codex leaves a project server, or a user-wide server's headers, untouched in that case
-  but still exits 0, and drops an unresolved `:env` from a user-wide server. Claude holds the
-  server back and `apply!` exits 1 ([unresolved secrets](docs/GUIDE.md#unresolved-secrets)).
 - Removing a project from the config leaves its project-scoped MCP entries behind.
 
 ## Development
