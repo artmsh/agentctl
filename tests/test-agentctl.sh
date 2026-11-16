@@ -1214,7 +1214,8 @@ fk_code 1 "$FK/dead.json" apply -f "$FK/old.edn" -k trust --json
 python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.argv[1]))["error"] else 1)' "$FK/dead.json" \
   || { cat "$FK/dead.json"; fail "-k trust --json lost the refusal"; }
 # --help marks the old format's own kind
-run --help | grep -q 'legacy (old-format configs only, in place of trust): projects$' \
+run --help | tr -s ' \n' ' ' \
+  | grep -q "legacy (old-format configs only, in place of trust, and of a project's permissions and settings): projects " \
   || { run --help; fail "--help does not mark projects as legacy"; }
 
 echo "26. apply! --json needs -y, and prints one document with what it applied"
@@ -1371,5 +1372,46 @@ d = json.load(open(sys.argv[1]))
 assert any(f["level"] == "warn" and "sub/nope" in f["where"] for f in d["findings"]), d["findings"]
 PY
 kill "$GD_PID" 2>/dev/null || true
+
+echo "29. a config that decides no format claims none; --host holds -k to the format"
+UF="$SB/undecided"
+mkdir -p "$UF/proj"
+uf() { (cd "$UF" && AGENTCTL_HOME="$UF" run "$@"); }
+printf '{}\n' > "$UF/empty.edn"
+cat > "$UF/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+# -k trust selects nothing in either, and is told so — as a warning, since the
+# next section added may decide the format either way
+for f in empty statusline; do
+  set +e
+  uf apply -f "$UF/$f.edn" --all -k trust > "$UF/$f.txt" 2>&1; code=$?
+  uf apply -f "$UF/$f.edn" --all -k trust --json > "$UF/$f.json"; jcode=$?
+  set -e
+  [ "$code" = 0 ] && [ "$jcode" = 0 ] || { cat "$UF/$f.txt" "$UF/$f.json"; fail "-k trust on $f.edn exited $code / $jcode"; }
+  grep -q '⚠ -k trust — selects nothing in this config' "$UF/$f.txt" \
+    || { cat "$UF/$f.txt"; fail "-k trust on $f.edn was not reported"; }
+  python3 -c 'import json,sys; sys.exit(0 if any(w.startswith("-k trust — selects nothing in this config") for w in json.load(open(sys.argv[1]))["warnings"]) else 1)' "$UF/$f.json" \
+    || { cat "$UF/$f.json"; fail "-k trust --json on $f.edn lost the warning"; }
+  if grep -q 'old-format\|entity-DSL' "$UF/$f.txt" "$UF/$f.json"; then
+    cat "$UF/$f.txt" "$UF/$f.json"; fail "$f.edn was said to be in a format it does not have"
+  fi
+done
+# a host is planned under the same config: a kind its format never plans is
+# refused there too, before the host is looked up
+cat > "$UF/dsl.edn" <<EDN
+{:trust [{:in "$UF/proj" :acli [:codex]}]}
+EDN
+cat > "$UF/old.edn" <<EDN
+{:projects {:p {:path "$UF/proj" :trusted true :executors #{:codex}}}}
+EDN
+for pair in "dsl projects entity-DSL" "old trust old-format"; do
+  set -- $pair
+  set +e
+  uf apply -f "$UF/$1.edn" --host nowhere -k "$2" > "$UF/host-$1.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] && grep -q "^error: -k $2: an $3 config plans nothing as $2" "$UF/host-$1.txt" \
+    || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
+done
 
 echo "all agentctl e2e checks passed"

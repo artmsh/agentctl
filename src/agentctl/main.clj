@@ -54,9 +54,17 @@
          old (core/kinds-for {})]
      (concat
       (wrap-words "                       " 92 (map name dsl))
-      [(str "                       legacy (old-format configs only, in place of "
-            (str/join ", " (map name (remove (set old) dsl))) "): "
-            (str/join " " (map name (remove (set dsl) old))))]))
+      ;; the DSL-only kind, and the others a project's `projects` op is
+      ;; refiled under in the DSL — all from `core/dsl-refiled`
+      (let [dsl-only (remove (set old) dsl)
+            also (sort (remove (set dsl-only) (mapcat val core/dsl-refiled)))]
+        (wrap-words "                       " 92
+                    (str/split (str "legacy (old-format configs only, in place of "
+                                    (str/join ", " (map name dsl-only))
+                                    (when (seq also)
+                                      (str ", and of a project's " (str/join " and " (map name also))))
+                                    "): " (str/join " " (map name (remove (set dsl) old))))
+                               #" ")))))
    ["  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
     "      --only KIND/ID   apply/apply!: plan one entity wherever it is placed (repeatable),"
@@ -167,6 +175,17 @@
         (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f))))
     warnings))
 
+(defn- check-kinds!
+  "A `-k` or `--only` kind is checked against every kind before the config is
+   read; one this config's format never plans would narrow the run to
+   nothing. Refused when the format is known; returned as warnings when the
+   config does not decide one yet."
+  [cfg opts]
+  (let [{errors :error warns :warn} (group-by #(nth % 3) (core/dead-selectors cfg opts))]
+    (when-let [[flag v msg] (first errors)]
+      (throw (ex-info (str flag " " v ": " msg) {})))
+    (vec (for [[flag v msg] warns] (str flag " " v " — " msg)))))
+
 (defn- applied->data
   "What a mutating run did, for --json: each op done, and each failed with
    its error."
@@ -205,6 +224,9 @@
     (throw (ex-info "--only does not apply with --host: a host is planned as a whole" {})))
   (let [cfg (load! opts)
         findings (check-config! cfg opts)
+        ;; the config's format holds for a host as it does here: a kind it
+        ;; never plans is refused before the host is looked up or reached
+        warnings (check-kinds! cfg opts)
         host (hosts/lookup cfg (:host opts))
         st (state/load-host-state (:id host))
         planned (hosts/plan-host host st opts)
@@ -215,9 +237,11 @@
         doc {:host (name (:id host))
              :ops (map op->data ops)
              :skipped (map name (:skipped planned))
+             :warnings warnings
              :findings (mapv finding->data findings)
              :summary (plan/summary-line ops)}]
     (when-not (:json opts)
+      (doseq [w warnings] (println (str "  ⚠ " w)))
       (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
       (when-let [missing (seq (:skipped planned))]
         (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
@@ -256,11 +280,8 @@
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
         st (state/load-state)
-        findings (check-config! cfg opts)]
-    ;; a kind is only checked against every kind before the config is read;
-    ;; one this config's format never plans would narrow the run to nothing
-    (when-let [[flag v msg] (first (core/dead-selectors cfg opts))]
-      (throw (ex-info (str flag " " v ": " msg) {})))
+        findings (check-config! cfg opts)
+        kind-warnings (check-kinds! cfg opts)]
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
@@ -278,6 +299,7 @@
           ;; a selector that names nothing narrows the run to nothing, which
           ;; reads as converged — in either output, so --json carries them too
           warnings (concat
+                    kind-warnings
                     (for [p (core/unmatched-projects cfg opts)]
                       (str "-p " p " — no declared project there"))
                     (for [o (core/unmatched-only cfg st opts)]

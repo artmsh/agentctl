@@ -81,27 +81,35 @@
 
 (defn kind-problem
   "Why `k` is no kind to select — with `cfg`, also a kind `cfg`'s format
-   plans nothing as."
+   plans nothing as. A config whose format nothing decides yet (`{}`, or only
+   format-neutral keys; see `config/config-format`) is planned the old way,
+   so the same kinds select nothing in it, but the reason names no format."
   ([k]
    (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
   ([cfg k]
    (when (and (some #{k} kinds) (not (some #{k} (kinds-for cfg))))
-     (let [instead (map name (sort (if (:entity-dsl? cfg)
-                                     (get dsl-refiled k)
-                                     (for [[from to] dsl-refiled :when (contains? to k)] from))))]
-       (str (format-name cfg) " plans nothing as " (name k) "; it files those ops under "
-            (if (next instead) (str (str/join ", " (butlast instead)) " or " (last instead)) (first instead))
-            " (kinds for this config: " (str/join ", " (map name (kinds-for cfg))) ")")))))
+     (if-not (:format cfg)
+       (str "selects nothing in this config: nothing in it decides between the entity DSL"
+            " and the old format yet")
+       (let [instead (map name (sort (if (:entity-dsl? cfg)
+                                       (get dsl-refiled k)
+                                       (for [[from to] dsl-refiled :when (contains? to k)] from))))]
+         (str (format-name cfg) " plans nothing as " (name k) "; it files those ops under "
+              (if (next instead) (str (str/join ", " (butlast instead)) " or " (last instead)) (first instead))
+              " (kinds for this config: " (str/join ", " (map name (kinds-for cfg))) ")"))))))
 
 (defn dead-selectors
-  "`[flag value message]` for each `-k` kind, and each `--only` kind, that is
-   a kind but one `cfg`'s format plans nothing as: `-k projects` on an
-   entity-DSL config, `-k trust` on an old-format one. Such a run plans
-   nothing and exits 0 — exactly what a converged machine looks like."
+  "`[flag value message level]` for each `-k` kind, and each `--only` kind,
+   that is a kind but one `cfg`'s format plans nothing as: `-k projects` on
+   an entity-DSL config, `-k trust` on an old-format one. Such a run plans
+   nothing and exits 0 — exactly what a converged machine looks like — so it
+   is an `:error`. Where the format is still undecided the run is only told,
+   with a `:warn`: the next section added may decide it either way."
   [cfg {:keys [kinds only]}]
-  (concat
-   (for [k kinds :let [p (kind-problem cfg k)] :when p] ["-k" (name k) p])
-   (for [[k id] only :let [p (kind-problem cfg k)] :when p] ["--only" (str (name k) "/" id) p])))
+  (let [level (if (:format cfg) :error :warn)]
+    (concat
+     (for [k kinds :let [p (kind-problem cfg k)] :when p] ["-k" (name k) p level])
+     (for [[k id] only :let [p (kind-problem cfg k)] :when p] ["--only" (str (name k) "/" id) p level]))))
 
 (defn unknown-selectors
   "`[flag value message]` for each `:tools` / `:kinds` value that selects

@@ -722,7 +722,10 @@ end up writing a resolved secret into a tool's config file are tagged
                    unknown one exits 1, and so does one the config's format
                    plans nothing as: projects in the entity DSL (which plans
                    trust, permissions and settings instead), trust in the
-                   legacy map form (which plans all three as projects)
+                   legacy map form (which plans all three as projects); with
+                   --host too. A config no section of which decides the format
+                   ({}, or only :statusline/:extensions/:hosts) gets a ⚠ for
+                   -k trust instead, naming no format
 -p, --project ID   restrict to one declared project — selects everything that
                    project owns, whatever its kind (its servers and skills are
                    :mcps / :skills ops, so --kind trust, or projects in the

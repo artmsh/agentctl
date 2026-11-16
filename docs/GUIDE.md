@@ -107,10 +107,14 @@ config's format plans: an entity-DSL config files a project's trust,
 permissions and settings under `trust`, `permissions` and `settings`, so
 `-k projects` there exits 1; an old-format config plans all three as
 `projects`, so `-k trust` there exits 1. The message lists the kinds the
-format has, `--help` marks `projects` as legacy, and the GUI refuses the same
-kinds for the buffer it plans. An `--only` or `-p` that nothing declares or
-owns is reported with `⚠` (under `--json`, in `warnings`), because a run
-narrowed to a typo plans nothing and would otherwise read as converged.
+format has, `--help` marks `projects` as legacy, `--host` runs are held to the
+same rule, and the GUI refuses the same kinds for the buffer it plans. A
+config with nothing that decides the format yet — `{}`, or only `:statusline`,
+`:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
+and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
+because a run narrowed to a typo plans nothing and would otherwise read as
+converged.
 
 ## Claude session retention
 

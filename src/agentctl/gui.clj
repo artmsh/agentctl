@@ -69,13 +69,17 @@
     (let [cfg (config/parse-config (buffer-text text) path)
           ;; the GUI plans this machine, so this machine's findings too; and
           ;; a -p naming nothing narrows the plan to nothing, as in the CLI
+          ;; the buffer decides the format, and it can change with any edit:
+          ;; a kind it never plans is refused here, not in `opts-from-json` —
+          ;; or, while nothing in the buffer decides a format, only reported
+          {dead-kinds :error undecided :warn} (group-by #(nth % 3) (core/dead-selectors cfg opts))
+          [_ dead msg] (first dead-kinds)
           findings (concat (config/structural-findings cfg) (statusline/findings cfg opts)
                            (for [p (core/unmatched-projects cfg opts)]
-                             (config/finding :warn [:project p] "no declared project there")))
-          errors (filter #(= :error (:level %)) findings)
-          ;; the buffer decides the format, and it can change with any edit:
-          ;; a kind it never plans is refused here, not in `opts-from-json`
-          [_ dead msg] (first (core/dead-selectors cfg opts))]
+                             (config/finding :warn [:project p] "no declared project there"))
+                           (for [[_ k msg] undecided]
+                             (config/finding :warn [:kind k] msg)))
+          errors (filter #(= :error (:level %)) findings)]
       (cond
         (seq errors)
         {:ok false
