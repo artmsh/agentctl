@@ -545,8 +545,10 @@
           (or (not-empty (reduce (fn [acc [_ proj]] (into acc (keys (:tools proj))))
                                  #{} (:projects cfg)))
               (set all-tools)))
-        ;; an extension names its CLI outright, with no project in between
-        (mapcat :for-tools (vals (:extensions cfg)))))
+        ;; an extension names its CLI outright, with no project in between,
+        ;; and so does a status line derived for one
+        (concat (mapcat :for-tools (vals (:extensions cfg)))
+                (get-in cfg [:statusline :derived]))))
 
 (defn- bare-project-skills
   "A project can name a skill id that resolves only by scanning a declared
@@ -734,12 +736,14 @@
 (defn normalize [raw path & [load-findings]]
   ;; read off the file as written: extensions are placed for a whole machine,
   ;; so they take no part in the entity lowering below
-  (assoc (normalize-resources raw path load-findings)
-         :format (config-format raw)
-         :extensions (norm-extensions (:extensions raw))
-         ;; one file for the whole machine, outside the entity model too
-         :statusline (statusline/normalize (:statusline raw))
-         :hosts (into {} (map (fn [[id decl]] [id (norm-host id decl path)])) (:hosts raw))))
+  (-> (normalize-resources raw path load-findings)
+      (assoc :format (config-format raw)
+             :extensions (norm-extensions (:extensions raw))
+             ;; one file for the whole machine, outside the entity model too
+             :statusline (statusline/normalize (:statusline raw))
+             :hosts (into {} (map (fn [[id decl]] [id (norm-host id decl path)])) (:hosts raw)))
+      ;; last, so whatever is declared by hand is there to win
+      statusline/derive-integrations))
 
 (defn- normalize-resources [raw path & [load-findings]]
   (if-not (scope/dsl? raw)

@@ -454,6 +454,10 @@
                           (nil? k) (throw (ex-info (str "--only " s ": want KIND/ID, e.g. --only skills/review") {}))
                           (not (some #{kind} core/kinds))
                           (throw (ex-info (str "--only " s ": " (core/kind-problem kind)) {}))
+                          ;; one file, one id: any other names nothing
+                          (and (= :statusline kind) (not= (name statusline/id) id))
+                          (throw (ex-info (str "--only " s ": the status-line file has one id, "
+                                               "statusline/" (name statusline/id)) {}))
                           ;; both filters apply, so this one could select nothing
                           (not (core/kind-selected? opts kind))
                           (throw (ex-info (str "--only " s ": -k " (str/join " -k " (map name (sort (:kinds opts))))

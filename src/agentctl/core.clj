@@ -636,6 +636,7 @@
                 ;; after the user-wide installs they check for
                 (:ops dups)
                 (statusline/plan-ops cfg st opts)
+                (filter #(selected (:tool %)) (statusline/derived-prune-ops cfg st claude/settings-file))
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st))
@@ -647,6 +648,7 @@
         (keep-projects cfg opts)
         (keep-only cfg opts)
         (keep-user opts)
+        (->> (statusline/mark-derived cfg))
         defer-unmet-removals
         drop-moot-collisions
         (->> (annotate-skill-ops cfg))
@@ -760,8 +762,12 @@
                                      (for [[_ p] (:skill-packs cfg) d (sources/skill-dirs p)]
                                        (fs/file-name d))))))]
     (for [[kind id :as sel] only
-          :when (not (field-kinds kind))
-          :when (not-any? #(contains? (id-names %) id) (declared kind))]
+          :when (if (= :statusline kind)
+                  ;; the one file: named when declared, or owned to be pruned
+                  (and (nil? (:statusline cfg))
+                       (not-any? (fn [[[_ k]]] (= :statusline k)) (:managed st)))
+                  (and (not (field-kinds kind))
+                       (not-any? #(contains? (id-names %) id) (declared kind))))]
       (str (name kind) "/" (second sel)))))
 
 (declare op-keys)
@@ -824,7 +830,8 @@
          want (set (map (fn [[t k id]] (state/key-for t k id)) owned))
          failed-keys (set (map (fn [[t k id]] (state/key-for t k id)) failed))
          done-keys (set (map (fn [[t k id]] (state/key-for t k id)) done))
-         stale (filter #(and (not (want %)) (not (failed-keys %))
+         kept (statusline/edited-derivation cfg st claude/settings-file)
+         stale (filter #(and (not (want %)) (not (failed-keys %)) (not= kept %)
                              (or (nil? done) (done-keys %))) (keys (:managed st)))
          ;; a skill whose source is not on disk — its pack failed to clone,
          ;; or is not fetched yet — was planned nothing because nothing could
