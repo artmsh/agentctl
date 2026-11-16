@@ -236,6 +236,28 @@
   [m]
   (not-empty (vec (sort (map u/key-str (keys m))))))
 
+(defn- str-keys
+  "JSON reads a key back as a keyword and a resolved value carries a string:
+   merged as they are, one name would be written twice."
+  [m]
+  (into {} (map (fn [[k v]] [(u/key-str k) v])) m))
+
+(defn declared-names
+  "The env and header names a server declares, kept in the manifest beside
+   it. A name agentctl declared and the declaration has since dropped is
+   agentctl's to remove; a name it never declared was added by hand, and is
+   kept."
+  [m]
+  (u/prune-nils {:env-names (key-names (:env m)) :header-names (key-names (:headers m))}))
+
+(defn- dropped-names
+  "Names under `k` (`:env-names`, `:header-names`) that the manifest entry
+   `old` says agentctl declared, and `m` no longer does. An entry recorded
+   before names were kept says nothing, so nothing is dropped."
+  [old m k]
+  (let [now (set (get (declared-names m) k))]
+    (into #{} (remove now) (get old k))))
+
 (defn- entry-type
   "The transport an entry is written for. Claude Code infers it when `type`
    is absent, and so does this."
@@ -245,16 +267,32 @@
 (defn- desired-shape
   "What `claude mcp add` will write: env for a stdio server, headers for an
    http one — the other is never passed, so counting it would be drift that
-   no apply can clear."
-  [m]
-  (let [http? (= :http (:transport m))]
+   no apply can clear. `carried` are the current values kept beside the
+   declared ones (`carried-values`), so their names are part of the entry."
+  [m carried]
+  (let [http? (= :http (:transport m))
+        names (fn [declared] (key-names (merge carried (str-keys declared))))]
     (u/prune-nils
      {:type (name (:transport m))
       :command (:command m)
       :args (not-empty (vec (:args m)))
       :url (:url m)
-      :env (when-not http? (key-names (:env m)))
-      :headers (when http? (key-names (:headers m)))})))
+      :env (when-not http? (names (:env m)))
+      :headers (when http? (names (:headers m)))})))
+
+(defn- carried-values
+  "The env (stdio) or header (http) values in the current entry that the
+   declaration does not name. `claude mcp add` cannot edit an entry, so an
+   update is a remove and an add, and a value left off the add is gone: an
+   `Authorization` header or an env var added by hand would be wiped by an
+   unrelated change. They are passed to the add as they are, except a name
+   agentctl declared and the declaration has since dropped."
+  [m cur old]
+  (let [http? (= :http (:transport m))
+        declared (if http? (:headers m) (:env m))]
+    (apply dissoc (str-keys (if http? (:headers cur) (:env cur)))
+           (concat (map u/key-str (keys declared))
+                   (dropped-names old m (if http? :header-names :env-names))))))
 
 (defn- current-shape [entry]
   (u/prune-nils
@@ -283,7 +321,10 @@
      (for [[id m] desired
            :let [nm (u/kw->str id)
                  cur (get current (keyword nm))
-                 want (desired-shape m)
+                 carried (carried-values m cur (state/entry st tool :mcps id))
+                 ;; the declared names plus the ones carried over: drift is a
+                 ;; declared name the entry lacks, or a dropped one it still has
+                 want (desired-shape m carried)
                  have (some-> cur current-shape)
                  {:keys [env headers issues]} (resolve-mcp m)]
            ;; an unresolved secret is reported even when the shapes agree: the
@@ -300,16 +341,21 @@
                    :diffs (plan/field-diffs (or have {}) want)
                    :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                    :exec! (fn []
-                            (when cur (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                            (when cur
+                              ;; the remove drops what the add may fail to put back
+                              (u/backup! runtime-file)
+                              (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
                             (claude-ok!
                              (vec (if (= :http (:transport m))
                                     (concat ["claude" "mcp" "add" "--scope" "user"
                                              "--transport" "http" nm (:url m)]
-                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers)))
+                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)])
+                                                    (merge carried (:values headers))))
                                     (concat ["claude" "mcp" "add" "--scope" "user" nm]
-                                            (mapcat (fn [[k v]] ["-e" (str k "=" v)]) (:values env))
+                                            (mapcat (fn [[k v]] ["-e" (str k "=" v)])
+                                                    (merge carried (:values env)))
                                             ["--"] [(:command m)] (:args m))))
-                             (concat (vals (:values env)) (vals (:values headers)))))})))
+                             (concat (vals (:values env)) (vals (:values headers)) (vals carried))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
@@ -531,12 +577,6 @@
 (def ^:private transport-keys
   "The keys that say how Claude Code reaches a server, for any transport."
   [:type :command :args :url :env :headers])
-
-(defn- str-keys
-  "JSON reads a key back as a keyword and a resolved value carries a string:
-   merged as they are, one name would be written twice."
-  [m]
-  (into {} (map (fn [[k v]] [(u/key-str k) v])) m))
 
 (defn- mcp-json-entry
   "The entry as Claude Code reads it, in `.mcp.json` or a project's local

@@ -429,7 +429,12 @@
    (for [[id decl] (:hooks (get-in cfg [:tools :claude]))
          :let [path [:hooks (keyword (u/kw->str (:event decl)))]]]
      [:claude :hooks id {:path path :value (claude/hook-group decl)}])
-   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))] [t :mcps id])
+   ;; claude's servers carry the env and header names they declare: one
+   ;; dropped from the declaration is agentctl's to remove, the rest the user's
+   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))]
+     (if (= :claude t)
+       [t :mcps id (claude/declared-names (common/for-this-tool m t))]
+       [t :mcps id]))
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)
          :let [m (get-in cfg [:mcps mid])]
@@ -437,7 +442,9 @@
          t (:tools m)
          :when (and (common/project-scopes (common/mcp-scope m t))
                     (contains? common/project-mcp-tools t))]
-     [t :mcps (keyword (name pid) (name mid)) {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}])
+     [t :mcps (keyword (name pid) (name mid))
+      (merge {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}
+             (when (= :claude t) (claude/declared-names m)))])
    ;; a project's skill is owned user-wide only by tools that cannot host one
    ;; inside a project — for them the user's home is the only place it fits
    (for [[id s] (sources/all-skills cfg) t (:tools s)

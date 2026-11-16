@@ -625,4 +625,66 @@ apply -k mcps
 leaks "$PLAIN"
 [ "$(json "$SB/proj/.mcp.json" "d['mcpServers']['m3r']['headers']['x-docs']")" = literal-new ] || fail "the literal was not written"
 
+# ---------------------------------------------------------------- hand-added values
+
+user_entry() { # user_entry <server> -> its user-scope entry, sorted JSON
+  python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))['mcpServers'].get(sys.argv[2]), sort_keys=True))" "$SB/.claude.json" "$1"
+}
+HAND="Bearer handmade-token-1234"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :hdocs :type :http :url "https://mcp.example.com/h" :headers {"api-key" "!bw://m5/KEY" "x-extra" "plain-extra"} :in :all :acli [:claude]}
+        {:id :sdocs :command "/bin/echo" :args ["s"] :env {"A" "1"} :in :all :acli [:claude]}]}
+EDN
+vault '{"m5": {"KEY": "'$PLAIN'"}}'
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "user-scope apply! exited $code"; }
+python3 - "$SB/.claude.json" "$HAND" <<'PY'
+import json, sys
+f, hand = sys.argv[1:]
+d = json.load(open(f))
+d["mcpServers"]["hdocs"]["headers"]["Authorization"] = hand
+d["mcpServers"]["sdocs"]["env"]["USER_VAR"] = "kept"
+json.dump(d, open(f, "w"), indent=2)
+PY
+
+echo "28. a header or env var added by hand to a user-scope server is not drift"
+plan -k mcps
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "a hand-added name read as drift: exit $code"; }
+
+echo "29. a declared header the config drops is removed, and the hand-added one is kept"
+sed -i.bak 's/ "x-extra" "plain-extra"//' "$SB/agents.edn"
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a dropped declared header is not drift: exit $code"; }
+grep -q 'x-extra' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not name the dropped header"; }
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! dropping a header exited $code"; }
+[ "$(user_entry hdocs)" = '{"headers": {"Authorization": "'"$HAND"'", "api-key": "'$PLAIN'"}, "type": "http", "url": "https://mcp.example.com/h"}' ] \
+  || { user_entry hdocs; fail "the dropped header stayed, or the hand-added one went"; }
+plan -k mcps
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after dropping a header: exit $code"; }
+
+echo "30. an update carries the hand-added header and env var over the remove and add"
+sed -i.bak 's|mcp.example.com/h"|mcp.example.com/h2"|; s|:args \["s"\]|:args ["s2"]|' "$SB/agents.edn"
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "the url and args change is not drift: exit $code"; }
+grep -qE -- '- .*(Authorization|USER_VAR)' "$SB/plan.txt" && { cat "$SB/plan.txt"; fail "the plan says a hand-added name goes"; }
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the update exited $code"; }
+[ "$(user_entry hdocs)" = '{"headers": {"Authorization": "'"$HAND"'", "api-key": "'$PLAIN'"}, "type": "http", "url": "https://mcp.example.com/h2"}' ] \
+  || { user_entry hdocs; fail "the update wiped the hand-added header"; }
+[ "$(user_entry sdocs)" = '{"args": ["s2"], "command": "/bin/echo", "env": {"A": "1", "USER_VAR": "kept"}, "type": "stdio"}' ] \
+  || { user_entry sdocs; fail "the update wiped the hand-added env var"; }
+dir=$(sed -n 's|^backups: ~/||p' "$SB/apply.txt")
+[ -f "$SB/$dir/__.claude.json" ] || { cat "$SB/apply.txt"; fail "~/.claude.json was not backed up before the remove"; }
+grep -q "handmade-token" "$SB/$dir/__.claude.json" || fail "the backup does not hold the hand-added header"
+plan -k mcps
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after the update: exit $code"; }
+
+echo "31. a refused add does not print the hand-added header it carried"
+sed -i.bak 's|mcp.example.com/h2"|mcp.example.com/h3"|' "$SB/agents.edn"
+STUB_REFUSE=add apply -k mcps
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused add exited $code"; }
+grep -qF "Authorization: Bear…34" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the carried header is not shown masked"; }
+grep -q "handmade-token" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the carried header"; }
+
 echo "all claude mcp e2e checks passed"

@@ -257,8 +257,14 @@ that never got written cannot be pruned later, and a hand-made server of the sam
 name stays the user's.
 
 For a user-wide server, whose secret `claude mcp add` stores and agentctl does
-not read back, drift is decided by the env and header *names*: a name missing
-from `~/.claude.json` is drift, a changed value is not.
+not read back, drift is decided by the env and header *names*: a declared name
+missing from `~/.claude.json` is drift, a changed value is not. A name added by
+hand, such as an `Authorization` header, is not drift either. `claude mcp add`
+cannot edit an entry, so an update removes the server and adds it again, after
+backing up `~/.claude.json`; the add carries every env var (stdio) or header
+(http) the declaration does not name, so a hand-added one survives. A name
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares.
 
 `validate` checks the same references before anything runs: every MCP server's
 `:env` and `:headers` and Claude's settings `:env`, user-wide and per project.
