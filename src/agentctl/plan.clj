@@ -517,10 +517,15 @@
            {:tool (name tool)
             :groups (mapv group-data (chunk-ops tool-ops))}))))
 
-(defn summary-line [ops]
-  (let [f (frequencies (map :action ops))]
-    (format "%d to add, %d to change, %d to remove, %d unchanged"
-            (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))))
+(defn summary-line
+  "Counts by action. A resource held back on an unresolved secret is a noop
+   that did not converge, so it is counted apart rather than as unchanged."
+  [ops]
+  (let [held (count (filter :unresolved ops))
+        f (frequencies (map :action (remove :unresolved ops)))]
+    (str (format "%d to add, %d to change, %d to remove, %d unchanged"
+                 (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))
+         (when (pos? held) (format ", %d unresolved" held)))))
 
 (defn op-counts
   "The numbers behind the GUI's pills, counted over ops the way `summary-line`
@@ -648,6 +653,37 @@
                                     arr'
                                     (conj arr' value))]
                         (u/write-json! file (assoc-in data path arr''))))})))))
+
+(defn json-union-op
+  "Op that makes the JSON array at `path` hold every element of `values`,
+   keeping whatever else is there, in its order. The array is shared — the
+   tool and the user add to it too — so nothing is removed and an element
+   already present is not added twice. Nothing missing is no op at all."
+  [{:keys [tool kind id file path values summary note risk project]}]
+  (let [current (get-in (u/read-json file) path)
+        have (set (map u/norm current))
+        missing (vec (remove #(have (u/norm %)) values))]
+    (when (seq missing)
+      (op {:project project :action (if (nil? current) :create :update)
+           :tool tool :kind kind :id id
+           :target file
+           :path (mapv u/kw->str path)
+           :summary summary
+           :note note
+           :diffs [{:key (last path) :before current :after (into (vec current) missing)}]
+           ;; what this op puts in the array, for a caller that has to take it
+           ;; out again later — and only that: the rest was someone else's
+           :added missing
+           :risk (or risk :low)
+           ;; re-read at execution time: the tool rewrites this array itself,
+           ;; and several ops may target one file in a single run
+           :exec! (fn []
+                    (u/backup! file)
+                    (let [data (or (u/read-json file) {})
+                          arr (vec (get-in data path))
+                          have (set (map u/norm arr))]
+                      (u/write-json! file (assoc-in data path
+                                                    (into arr (remove #(have (u/norm %)) values))))))}))))
 
 (defn json-array-unset-op
   "Op that removes one caller-owned element (`old`) from a JSON array at

@@ -158,6 +158,32 @@
     (is (= :ok (:status (refs/resolve-ref r)))))
   (is (= :missing (:status (refs/resolve-ref (refs/parse "!env://AGENTCTL_DEFINITELY_UNSET"))))))
 
+(deftest an-empty-vault-field-is-missing-never-the-login-password
+  (let [item (fn [v] {:login {:username "u" :password "pw-test-login"}
+                      :fields [{:name "KEY" :value v} {:name "OTHER" :value "sk-test-other"}]})
+        resolve (fn [it ref]
+                  (reset! @#'refs/cache {})
+                  (with-redefs [refs/bw-state (delay :unlocked)
+                                u/sh (fn [& _] {:exit 0 :out (json/generate-string it) :err ""})]
+                    (refs/resolve-ref (refs/parse ref))))]
+    (doseq [v [nil "" "null" " null "]]
+      (testing (str "a KEY field holding " (pr-str v))
+        (let [r (resolve (item v) "!bw://vendor/KEY")]
+          (is (= :missing (:status r)))
+          (is (nil? (:value r))))))
+    (testing "a field with a value resolves to it"
+      (is (= {:status :ok :value "sk-test-other"} (resolve (item nil) "!bw://vendor/OTHER"))))
+    (testing "the login's password and username are reached by those names"
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor/password")))
+      (is (= {:status :ok :value "u"} (resolve (item nil) "!bw://vendor/username")))
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor/u")) "the login's username names its password")
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor")) "a bare item is its password"))
+    (testing "any other name the item lacks is missing, never the login password"
+      (let [r (resolve (item nil) "!bw://vendor/KEYY")]
+        (is (= :missing (:status r)))
+        (is (= "field not found on bw item: vendor/KEYY" (:message r)))))
+    (reset! @#'refs/cache {})))
+
 ;; ---------------------------------------------------------------- config
 
 (def sample-config
@@ -1209,6 +1235,50 @@
   (is (common/holds-secret? {"TOKEN" "!bw://example-vault/x/y"}))
   (is (not (common/holds-secret? {"SLACK_MCP_CHANNELS_CACHE" "/tmp/channels.json"}))))
 
+(deftest an-unresolved-secret-holds-the-op-back-and-names-only-keys
+  (let [env (common/resolve-env {"TOKEN" (refs/parse "!env://AGENTCTL_TEST_NEVER_SET")
+                                 "PLAIN" (refs/parse "sk-test-literal-0123456789")})
+        o (common/unresolved-op {:tool :claude :kind :mcps :id :docs :target "/x/.claude.json"
+                                 :exec! (fn [] (throw (ex-info "must not run" {})))
+                                 :diffs [{:key :docs :before nil :after {:env (:values env)}}]}
+                                (common/issues-in "env" env))]
+    (testing "nothing is written for it"
+      (is (nil? (:exec! o)))
+      (is (nil? (:diffs o)))
+      (is (= :noop (:action o)))
+      (is (not (plan/mutating? o))))
+    (testing "the plan says why and where, and apply! sees it"
+      (is (:warn o))
+      (is (= [o] (core/unresolved [o (plan/op {:tool :claude :kind :mcps :id :plain})])))
+      (is (= "⚠ secret unresolved: env var unset: AGENTCTL_TEST_NEVER_SET (env.TOKEN) — nothing written"
+             (:summary o))))
+    (testing "a resolved neighbour's value never reaches the line"
+      (is (not (str/includes? (plan/render-plan [o] {:verbose true}) "sk-test-literal"))))
+    (testing "the summary counts it apart from what is unchanged"
+      (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
+             (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
+
+(deftest a-secret-env-value-is-masked-and-a-rotation-still-shows
+  (let [ks (common/secret-keys {"X" (refs/parse "!bw://vendor/KEY") "MODE" (refs/parse "fast")}
+                               {"X" "!bw://vendor/KEY" "MODE" "fast"})]
+    (is (= #{"X"} ks))
+    (testing "a create masks the new value and leaves a plain one readable"
+      (is (= [nil {"X" "sk-t…ef" "MODE" "fast"}]
+             (common/mask-secrets nil {"X" "sk-test-0123456789abcdef" "MODE" "fast"} ks))))
+    (testing "keys read back from JSON as keywords mask the same"
+      (is (= {"X" "********"} (first (common/mask-secrets {:X "s3cret"} {"X" "s3cret"} ks)))))
+    (testing "a rotated value whose mask reads the same is marked changed"
+      (is (= [{"X" "sk-t…ef"} {"X" "sk-t…ef (changed)"}]
+             (common/mask-secrets {:X "sk-test-0123456789abcdef"} {"X" "sk-test-9999999999abcdef"} ks))))
+    (testing "an unchanged value is not"
+      (is (= [{"X" "********" "MODE" "fast"} {"X" "********" "MODE" "fast"}]
+             (common/mask-secrets {:X "s3cret" :MODE "fast"} {"X" "s3cret" "MODE" "fast"} ks))))
+    (testing "a value a change replaces or removes is masked whatever the new declaration says"
+      ;; what it held may have come from a ref the declaration no longer makes
+      (is (= [{"DOCS_KEY" "plai…34" "OLD" "plai…99"} {"DOCS_KEY" "literal-new"}]
+             (common/mask-secrets {:DOCS_KEY "plainvalue1234" :OLD "plainother99"}
+                                  {"DOCS_KEY" "literal-new"} #{}))))))
+
 (defn- mcp-op [id action diffs]
   (plan/op {:action action :tool :claude :kind :mcps :project :example
             :id (keyword (str "example/" id))
@@ -1591,16 +1661,24 @@
                    (drop-while #(not (str/includes? % "--kind KIND")))
                    rest
                    (take-while #(str/starts-with? % (apply str (repeat 23 " ")))))
-        {legacy true current false} (group-by #(str/includes? % "legacy") lines)
+        [current legacy] (split-with #(not (str/includes? % "legacy")) lines)
         words #(set (mapcat (fn [l] (str/split (str/trim l) #"\s+")) %))]
     (testing "--help names every kind: the DSL's, then the old format's own, marked"
       (is (= (set (map name (core/kinds-for {:entity-dsl? true}))) (words current)))
-      (is (= 1 (count legacy)))
       (is (= #{"projects"} (set (map name (remove (set (core/kinds-for {:entity-dsl? true})) core/kinds)))))
-      (is (str/ends-with? (first legacy) "in place of trust): projects"))))
+      (is (= (str "legacy (old-format configs only, in place of trust, and of a project's"
+                  " permissions and settings): projects")
+             (str/join " " (map str/trim legacy))))))
   (is (= {:only ["skills/review" "mcps/search"] :user true}
          (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
                       [:only :user]))))
+
+(deftest gui-command-line-kinds-and-projects-hold-unless-a-request-names-them
+  (let [base (main/parse-args ["gui" "-k" "mcps" "-p" "sub/web"])
+        sel #(select-keys (gui/opts-from-json % base) [:kinds :projects])]
+    (is (= {:kinds #{:mcps} :projects #{:sub/web}} (sel {:tools ["claude"]})))
+    (is (= {:kinds #{} :projects #{}} (sel {:kinds [] :projects []})) "an empty list means none")
+    (is (= {:kinds #{:skills} :projects #{:sub/web}} (sel {:kinds ["skills"]})))))
 
 (deftest each-config-format-has-its-own-kinds
   ;; the DSL refiles every :projects op under :trust/:permissions/:settings, and
@@ -1652,6 +1730,39 @@
         (is (str/starts-with? (:error res) "kind projects: an entity-DSL config")))
       (is (false? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:trust}}))))
       (is (true? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:projects}})))))))
+
+(deftest a-config-that-decides-no-format-claims-none
+  ;; `{}` and a file of format-neutral keys are normalized the old way, but
+  ;; they are in neither format: nothing said about them may name one
+  (testing "what decides the format"
+    (doseq [raw [{} {:statusline {:defaults {:segments [:model]}}}
+                 {:extensions {[:uri "file:///tmp/ext"] {:acli [:pi]}}}
+                 {:hosts {:win {:ssh "example.com" :os :windows}}}
+                 {:projects {}} {:bogus-key {:a 1}}]]
+      (is (nil? (config/config-format raw)) (pr-str raw)))
+    ;; a section vector exists only in the DSL, empty or not, and the config
+    ;; is normalized as one: the format follows how it is read
+    (is (= :entity-dsl (config/config-format {:mcps []})))
+    (is (= :legacy (config/config-format {:mcps {:x {:cmd "a"}}})))
+    (is (= :legacy (config/config-format {:statusline {} :executors {:pi {:model "m"}}})))
+    (is (= :entity-dsl (config/config-format {:mcps [{:id :x :cmd "a" :in :all}]})))
+    (is (nil? (:format (config/normalize {:statusline {:defaults {:segments [:model]}}} "test"))))
+    (is (= :legacy (:format (config/normalize {:projects {:p {:path "/tmp/x"}}} "test")))))
+  (testing "a kind it plans nothing as is a warning that names no format"
+    (doseq [raw [{} {:statusline {:defaults {:segments [:model]}}}]
+            :let [cfg (config/normalize raw "test")
+                  [[flag v msg level] :as dead] (core/dead-selectors cfg {:kinds #{:trust :projects}})]]
+      (is (= 1 (count dead)))
+      (is (= ["-k" "trust" :warn] [flag v level]))
+      (is (str/starts-with? msg "selects nothing in this config"))
+      (is (not (re-find #"old-format|entity-DSL" msg)))))
+  (testing "the gui plans it, and reports the kind"
+    (let [res (gui/plan-for-text "" "test" {:tools #{:claude} :kinds #{:trust}})]
+      (is (true? (:ok res)))
+      (is (some #(and (= "warn" (:level %)) (= "kind trust" (:where %))
+                      (str/starts-with? (:message %) "selects nothing"))
+                (:findings res)))
+      (is (not (re-find #"old-format|entity-DSL" (pr-str res)))))))
 
 (deftest only-and-user-select-across-scopes-without-the-rest
   (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")]
@@ -2037,6 +2148,26 @@
                  {:tool :claude :kind :hooks :id :lock
                   :file f :path [:hooks :PreToolUse]
                   :old {:matcher "Write|Edit" :hooks [{:type "command" :command "lock.sh"}]}}))))))
+
+(deftest json-union-op-adds-what-is-missing-and-removes-nothing
+  (let [dir (temp-dir) f (str dir "/settings.local.json")
+        args {:tool :claude :kind :mcps :id :proj/enabledMcpjsonServers
+              :file f :path [:enabledMcpjsonServers] :values ["docs" "search"]}]
+    (testing "a missing file is a create"
+      (is (= :create (:action (plan/json-union-op args)))))
+    (u/write-json! f {:enabledMcpjsonServers ["handmade" "docs"] :permissions {:allow ["Bash(ls)"]}})
+    (let [op (plan/json-union-op args)]
+      (is (= :update (:action op)))
+      (is (= [{:key :enabledMcpjsonServers :before ["handmade" "docs"] :after ["handmade" "docs" "search"]}]
+             (:diffs op)))
+      (is (= ["search"] (:added op)) "only what the op adds is its own")
+      (testing "the array is re-read when the op runs: an entry added since the plan survives"
+        (u/write-json! f {:enabledMcpjsonServers ["handmade" "docs" "late"] :permissions {:allow ["Bash(ls)"]}})
+        ((:exec! op))
+        (is (= {:enabledMcpjsonServers ["handmade" "docs" "late" "search"] :permissions {:allow ["Bash(ls)"]}}
+               (u/read-json f)))))
+    (testing "everything present is not an op, in any order"
+      (is (nil? (plan/json-union-op (assoc args :values ["search" "docs"])))))))
 
 (deftest a-checked-setting-that-already-agrees-is-one-line
   (let [dir (temp-dir) f (str dir "/settings.json")]

@@ -74,7 +74,9 @@
                  :ref/raw v
                  :ref/folder (when (= 3 (count segs)) (first segs))
                  :ref/item (if (= 3 (count segs)) (second segs) (first segs))
-                 :ref/field (last segs)})
+                 ;; a bare `!bw://item` is the item's login password, said
+                 ;; here rather than left to a fallback in the lookup
+                 :ref/field (if (= 1 (count segs)) "password" (last segs))})
 
               (str/starts-with? v "!env://") {:ref/kind :env :ref/var (subs v 7) :ref/raw v}
               (str/starts-with? v "!file://") {:ref/kind :file :ref/path (subs v 8) :ref/raw v}
@@ -130,14 +132,27 @@
         (let [it (try (cheshire.core/parse-string out true) (catch Exception _ nil))
               fields (into {} (map (juxt :name :value)) (:fields it))
               login (:login it)
-              v (or (get fields field)
-                    (when (= field "password") (:password login))
-                    (when (= field "username") (:username login))
-                    (when (and (:username login) (= field (:username login))) (:password login))
-                    (:password login))]
-          (if v
-            {:status :ok :value v}
-            {:status :missing :message (str "field not found on bw item: " item "/" field)}))))))
+              named? (contains? fields field)
+              ;; a field the item names is the answer, even when it is empty:
+              ;; falling through to the login would send its password instead.
+              ;; Otherwise only `password`, `username` and the login's own
+              ;; username reach the login: any other name — a typo — is
+              ;; missing, never the password
+              v (if named?
+                  (get fields field)
+                  (cond
+                    (= field "password") (:password login)
+                    (= field "username") (:username login)
+                    (and (:username login) (= field (:username login))) (:password login)))]
+          (cond
+            ;; an emptied field reads back as null, "" or the text "null";
+            ;; written out, any of them is a header that authenticates nothing
+            (and named? (or (nil? v) (contains? #{"" "null"} (str/trim (str v)))))
+            {:status :missing :message (str "field is empty on bw item: " item "/" field)}
+            (nil? v) {:status :missing :message (str "field not found on bw item: " item "/" field)}
+            (contains? #{"" "null"} (str/trim (str v)))
+            {:status :missing :message (str "field is empty on bw item: " item "/" field)}
+            :else {:status :ok :value v}))))))
 
 (defn resolve-ref
   "Resolve a ref. Returns {:status :ok|:missing|:unknown|:error :value ... :message ...}.
@@ -151,16 +166,24 @@
     (or (get @cache r)
         (let [res (case (:ref/kind r)
                     :literal {:status :ok :value (:ref/value r)}
-                    :env (if-let [v (System/getenv (:ref/var r))]
-                           {:status :ok :value v}
-                           {:status :missing :message (str "env var unset: " (:ref/var r))})
-                    :file (if-let [v (u/slurp-safe (:ref/path r))]
-                            {:status :ok :value (str/trim v)}
-                            {:status :missing :message (str "file not readable: " (:ref/path r))})
+                    ;; an empty value is missing, as an emptied vault field
+                    ;; is: written out, it is a header or env var that
+                    ;; authenticates nothing
+                    :env (let [v (System/getenv (:ref/var r))]
+                           (cond
+                             (nil? v) {:status :missing :message (str "env var unset: " (:ref/var r))}
+                             (str/blank? v) {:status :missing :message (str "env var is empty: " (:ref/var r))}
+                             :else {:status :ok :value v}))
+                    :file (let [v (u/slurp-safe (:ref/path r))]
+                            (cond
+                              (nil? v) {:status :missing :message (str "file not readable: " (:ref/path r))}
+                              (str/blank? v) {:status :missing :message (str "file is empty: " (:ref/path r))}
+                              :else {:status :ok :value (str/trim v)}))
                     :cmd (let [{:keys [exit out err]} (u/sh "sh" "-c" (:ref/cmd r))]
-                           (if (zero? exit)
-                             {:status :ok :value (str/trim out)}
-                             {:status :error :message (str "command failed: " err)}))
+                           (cond
+                             (not (zero? exit)) {:status :error :message (str "command failed: " err)}
+                             (str/blank? out) {:status :missing :message "command printed nothing"}
+                             :else {:status :ok :value (str/trim out)}))
                     :bw (bw-fetch r))]
           (swap! cache assoc r res)
           res))))

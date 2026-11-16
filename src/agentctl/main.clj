@@ -36,8 +36,10 @@
     "  agentctl <command> [options]"
     ""
     "COMMANDS"
-    "  apply            Show what would change. Read-only. Exit 2 when drift exists."
-    "  apply!           Converge the environment onto agents.edn."
+    "  apply            Show what would change. Read-only. Exit 2 when drift exists"
+    "                   or (claude) a secret did not resolve."
+    "  apply!           Converge the environment onto agents.edn. Exit 1 when a"
+    "                   change failed or (claude) a secret did not resolve."
     "  validate         Check the config and the environment; print a report."
     "  import           Show the agents.edn that the current environment implies."
     "  import!          Write that agents.edn (existing file is backed up first)."
@@ -54,9 +56,17 @@
          old (core/kinds-for {})]
      (concat
       (wrap-words "                       " 92 (map name dsl))
-      [(str "                       legacy (old-format configs only, in place of "
-            (str/join ", " (map name (remove (set old) dsl))) "): "
-            (str/join " " (map name (remove (set dsl) old))))]))
+      ;; the DSL-only kind, and the others a project's `projects` op is
+      ;; refiled under in the DSL — all from `core/dsl-refiled`
+      (let [dsl-only (remove (set old) dsl)
+            also (sort (remove (set dsl-only) (mapcat val core/dsl-refiled)))]
+        (wrap-words "                       " 92
+                    (str/split (str "legacy (old-format configs only, in place of "
+                                    (str/join ", " (map name dsl-only))
+                                    (when (seq also)
+                                      (str ", and of a project's " (str/join " and " (map name also))))
+                                    "): " (str/join " " (map name (remove (set dsl) old))))
+                               #" ")))))
    ["  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
     "      --only KIND/ID   apply/apply!: plan one entity wherever it is placed (repeatable),"
@@ -167,11 +177,33 @@
         (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f))))
     warnings))
 
+(defn- check-kinds!
+  "A `-k` or `--only` kind is checked against every kind before the config is
+   read; one this config's format never plans would narrow the run to
+   nothing. Refused when the format is known; returned as warnings when the
+   config does not decide one yet."
+  [cfg opts]
+  (let [{errors :error warns :warn} (group-by #(nth % 3) (core/dead-selectors cfg opts))]
+    (when-let [[flag v msg] (first errors)]
+      (throw (ex-info (str flag " " v ": " msg) {})))
+    (vec (for [[flag v msg] warns] (str flag " " v " — " msg)))))
+
+(defn- applied->data
+  "What a mutating run did, for --json: each op done, and each failed with
+   its error."
+  [done failed]
+  {:done (mapv #(select-keys (op->data %) [:tool :kind :id :action]) done)
+   :failed (mapv #(select-keys (op->data %) [:tool :kind :id :action :error]) failed)})
+
+(defn- print-json [doc] (println (json/generate-string doc {:pretty true})))
+
 (defn- confirm!
-  "Ask before a mutating run, unless told not to. Declining exits."
+  "Ask before a mutating run, unless told not to. Declining exits. Under
+   --json `-y` is required, so there is nothing to ask and nothing to print:
+   the document carries `secrets`."
   [opts changes]
   (let [secretive (filter #(= :secret (:risk %)) changes)]
-    (when (seq secretive)
+    (when (and (seq secretive) (not (:json opts)))
       (println (format "\n⚠ %d change(s) write resolved secrets into tool config files."
                        (count secretive))))
     (when-not (:yes opts)
@@ -181,6 +213,16 @@
         (when-not (contains? #{"y" "yes"} answer)
           (println "aborted")
           (System/exit 1))))))
+
+(defn- report-unresolved!
+  "Name every resource apply! held back on an unresolved secret. The rest of
+   the run applied; these did not, and the exit status says so."
+  [unresolved]
+  (when (seq unresolved)
+    (println (format "\n%d resource(s) not written — a secret did not resolve:" (count unresolved)))
+    (doseq [o unresolved]
+      (println "  ⚠" (name (:tool o)) (name (:kind o)) (u/kw->str (:id o)) "—"
+               (str/replace (:summary o) #"^⚠ " "")))))
 
 (defn cmd-apply-host
   "`apply`/`apply!` for one declared host. The working directory says nothing
@@ -194,56 +236,64 @@
     (throw (ex-info "--only does not apply with --host: a host is planned as a whole" {})))
   (let [cfg (load! opts)
         findings (check-config! cfg opts)
+        ;; the config's format holds for a host as it does here: a kind it
+        ;; never plans is refused before the host is looked up or reached
+        warnings (check-kinds! cfg opts)
         host (hosts/lookup cfg (:host opts))
         st (state/load-host-state (:id host))
         planned (hosts/plan-host host st opts)
         ops (:ops planned)
-        changes (filter plan/mutating? ops)]
-    (if (:json opts)
-      (println (json/generate-string {:host (name (:id host))
-                                      :ops (map op->data ops)
-                                      :skipped (map name (:skipped planned))
-                                      :findings (mapv finding->data findings)
-                                      :summary (plan/summary-line ops)}
-                                     {:pretty true}))
-      (do
-        (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
-        (when-let [missing (seq (:skipped planned))]
-          (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
-        (if (plan/show-plan? ops opts)
-          (println (plan/render-plan ops opts))
-          (println "\nno changes — host matches agents.edn"))
-        (println)
-        (println (plan/summary-line ops))))
+        changes (filter plan/mutating? ops)
+        ;; under --json, printed once, when the run is over: apply! adds
+        ;; what it applied, so stdout stays one document
+        doc {:host (name (:id host))
+             :ops (map op->data ops)
+             :skipped (map name (:skipped planned))
+             :warnings warnings
+             :findings (mapv finding->data findings)
+             :summary (plan/summary-line ops)}]
+    (when-not (:json opts)
+      (doseq [w warnings] (println (str "  ⚠ " w)))
+      (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
+      (when-let [missing (seq (:skipped planned))]
+        (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
+      (if (plan/show-plan? ops opts)
+        (println (plan/render-plan ops opts))
+        (println "\nno changes — host matches agents.edn"))
+      (println)
+      (println (plan/summary-line ops)))
     (cond
       (not mutate?)
-      (System/exit (if (seq changes) 2 0))
+      (do (when (:json opts) (print-json doc))
+          (System/exit (if (seq changes) 2 0)))
 
       (empty? changes)
       (do (state/save-host! (:id host) (hosts/sync-host-state st planned [] []))
+          (when (:json opts) (print-json (assoc doc :applied (applied->data [] []))))
           (System/exit 0))
 
       :else
       (do
         (confirm! opts changes)
-        (let [{:keys [plan done failed]} (hosts/converge! cfg host st opts planned)]
+        (let [{:keys [plan done failed]} (hosts/converge! cfg host st opts planned)
+              backups (remote/backup-dir host (get-in plan [:inventory :home]))]
           (state/save-host! (:id host) (hosts/sync-host-state st plan done failed))
-          (println (format "\napplied %d change(s)%s"
-                           (count done)
-                           (if (seq failed) (str ", " (count failed) " failed") "")))
-          (doseq [f failed]
-            (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
-          (println (str "backups on host: " (remote/backup-dir host (get-in plan [:inventory :home]))))
+          (if (:json opts)
+            (print-json (assoc doc :applied (applied->data done failed) :backups backups))
+            (do
+              (println (format "\napplied %d change(s)%s"
+                               (count done)
+                               (if (seq failed) (str ", " (count failed) " failed") "")))
+              (doseq [f failed]
+                (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+              (println (str "backups on host: " backups))))
           (System/exit (if (seq failed) 1 0)))))))
 
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
         st (state/load-state)
-        findings (check-config! cfg opts)]
-    ;; a kind is only checked against every kind before the config is read;
-    ;; one this config's format never plans would narrow the run to nothing
-    (when-let [[flag v msg] (first (core/dead-selectors cfg opts))]
-      (throw (ex-info (str flag " " v ": " msg) {})))
+        findings (check-config! cfg opts)
+        kind-warnings (check-kinds! cfg opts)]
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
@@ -258,40 +308,50 @@
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)
+          unresolved (core/unresolved ops)
           ;; a selector that names nothing narrows the run to nothing, which
           ;; reads as converged — in either output, so --json carries them too
           warnings (concat
+                    kind-warnings
                     (for [p (core/unmatched-projects cfg opts)]
                       (str "-p " p " — no declared project there"))
                     (for [o (core/unmatched-only cfg st opts)]
-                      (str "--only " o " — nothing declared or owned by that id")))]
-      (if (:json opts)
-        (println (json/generate-string
-                  (cond-> {:ops (map op->data ops)
-                           :warnings (vec warnings)
-                           :findings (mapv finding->data findings)
-                           :summary (plan/summary-line ops)}
-                    scope (assoc :scope {:where (u/kw->str (:where scope))
-                                         :path (:path scope)
-                                         :projects (mapv u/kw->str (sort (:projects scope)))}))
-                  {:pretty true}))
-        (do
-          (when scope (println (scope-note cfg scope)))
-          (doseq [w warnings] (println (str "  ⚠ " w)))
-          (when-let [missing (seq (core/missing-tools cfg opts))]
-            (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
-          (if (plan/show-plan? ops opts)
-            (println (plan/render-plan ops opts))
-            (println "\nno changes — environment matches agents.edn"))
-          (println)
-          (println (plan/summary-line ops))))
+                      (str "--only " o " — nothing declared or owned by that id")))
+          ;; under --json, printed once, when the run is over: apply! adds
+          ;; what it applied, so stdout stays one document
+          doc (cond-> {:ops (map op->data ops)
+                       :warnings (vec warnings)
+                       :findings (mapv finding->data findings)
+                       :secrets (count (filter #(= :secret (:risk %)) changes))
+                       :summary (plan/summary-line ops)}
+                scope (assoc :scope {:where (u/kw->str (:where scope))
+                                     :path (:path scope)
+                                     :projects (mapv u/kw->str (sort (:projects scope)))}))]
+      (when-not (:json opts)
+        (when scope (println (scope-note cfg scope)))
+        (doseq [w warnings] (println (str "  ⚠ " w)))
+        (when-let [missing (seq (core/missing-tools cfg opts))]
+          (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
+        ;; a resource held back on an unresolved secret is a warning: it has
+        ;; not converged, and "no changes" would say it had
+        (if (plan/show-plan? ops opts)
+          (println (plan/render-plan ops opts))
+          (println "\nno changes — environment matches agents.edn"))
+        (println)
+        (println (plan/summary-line ops)))
       (cond
         (not mutate?)
-        (System/exit (if (seq changes) 2 0))
+        (do (when (:json opts) (print-json doc))
+            (System/exit (if (or (seq changes) (seq unresolved)) 2 0)))
 
         (empty? changes)
-        (do (state/save! (core/sync-state! st cfg #{} (when (core/scoped? opts) #{})))
-            (System/exit 0))
+        (do (state/save! (core/sync-state! st cfg (set (mapcat core/op-keys unresolved))
+                                            (when (core/scoped? opts) #{})))
+            ;; held-back ops are in the document's ops, flagged warn
+            (if (:json opts)
+              (print-json (assoc doc :applied (applied->data [] [])))
+              (report-unresolved! unresolved))
+            (System/exit (if (seq unresolved) 1 0)))
 
         :else
         (do
@@ -302,16 +362,21 @@
             ;; value overwritten if this run actually wrote it — see
             ;; `core/sync-state!`
             (state/save! (core/sync-state! st cfg
-                                            (set (mapcat core/op-keys failed))
+                                            (set (mapcat core/op-keys (concat failed unresolved)))
                                             (when (core/scoped? opts)
                                               (set (mapcat core/op-keys done)))))
-            (println (format "\napplied %d change(s)%s"
-                             (count done)
-                             (if (seq failed) (str ", " (count failed) " failed") "")))
-            (doseq [f failed]
-              (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
-            (println (str "backups: " (u/tilde (u/backup-dir))))
-            (System/exit (if (seq failed) 1 0))))))))
+            (if (:json opts)
+              (print-json (assoc doc :applied (applied->data done failed)
+                                 :backups (u/tilde (u/backup-dir))))
+              (do
+                (println (format "\napplied %d change(s)%s"
+                                 (count done)
+                                 (if (seq failed) (str ", " (count failed) " failed") "")))
+                (doseq [f failed]
+                  (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+                (report-unresolved! unresolved)
+                (println (str "backups: " (u/tilde (u/backup-dir))))))
+            (System/exit (if (or (seq failed) (seq unresolved)) 1 0))))))))
 
 (defn cmd-validate [opts]
   (let [cfg (load! opts)
@@ -395,8 +460,10 @@
       ;; what the command is comes before what its options may be: a typo in
       ;; the command must not be reported as an option it does not take
       (not (commands command))
-      (do (println (str "unknown command: " command "\n"))
-          (println usage)
+      (do (if (:json opts)
+            (println (json/generate-string {:error (str "unknown command: " command)} {:pretty true}))
+            (do (println (str "unknown command: " command "\n"))
+                (println usage)))
           (System/exit 1))
       :else
       (try
@@ -406,6 +473,9 @@
           (throw (ex-info (str command " does not take --host") {})))
         (when (and (or (seq (:only opts)) (:user opts)) (not (#{"apply" "plan" "apply!"} command)))
           (throw (ex-info (str command " does not take --only or --user") {})))
+        ;; stdout is the JSON document; a confirmation prompt has nowhere to go
+        (when (and (= "apply!" command) (:json opts) (not (:yes opts)))
+          (throw (ex-info "apply! --json needs -y: a confirmation prompt cannot share stdout with JSON" {})))
         (let [opts (check-selectors! opts)]
           (case command
             "apply" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
@@ -416,9 +486,13 @@
             "import!" (cmd-import opts true)
             "state" (cmd-state opts)
             "gui" (cmd-gui opts)))
-        (catch clojure.lang.ExceptionInfo e
-          ;; a script reading --json gets its error as JSON too
-          (println (if (:json opts)
-                     (json/generate-string {:error (ex-message e)} {:pretty true})
-                     (str "error: " (ex-message e))))
+        ;; not only agentctl's own refusals: a config that cannot be read (a
+        ;; directory, no permission) throws from the JVM, and a stack trace on
+        ;; stderr with nothing on stdout is no answer, least of all under
+        ;; --json. A script reading --json gets its error as JSON too.
+        (catch Exception e
+          (let [msg (or (ex-message e) (.getName (class e)))]
+            (println (if (:json opts)
+                       (json/generate-string {:error msg} {:pretty true})
+                       (str "error: " msg))))
           (System/exit 1))))))

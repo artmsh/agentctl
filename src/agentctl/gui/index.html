@@ -1629,6 +1629,7 @@ const setupEl = $("setup"), setupSearch = $("setup-search");
 let saved = "";            // file content when read or written
 let allTools = [];
 let picked = new Set();    // empty = config decides
+let narrowed = [];         // the command line's -k / -p; the server applies them
 let last = null;           // last successful plan payload
 let inflight = 0;
 let timer = null;
@@ -2012,6 +2013,9 @@ function show(p) {
   if (p.form) updateForm(p.form);
   const extra = [];
   if (p.missing && p.missing.length) extra.push("Skipped (CLI not installed): " + p.missing.join(", "));
+  // a plan narrowed by flags the page has no control for must say so, or
+  // what it leaves out reads as converged
+  if (narrowed.length) extra.push("Narrowed by the command line: " + narrowed.join(" "));
   renderFindings(p.findings, extra);
   planEl.classList.remove("stale");
   tableEl.classList.remove("stale");
@@ -2510,6 +2514,8 @@ for (const id of ["verbose", "shownoop"]) $(id).addEventListener("change", refre
   $("path").innerHTML = esc(data.path) + (data.exists ? "" : " <span style='color:var(--update);'>(new file)</span>") + ' <span class="copy-hint">📋</span>';
   allTools = data.tools;
   picked = new Set(data.opts.tools);
+  narrowed = [...(data.opts.kinds || []).map((k) => "-k " + k),
+              ...(data.opts.projects || []).map((p) => "-p " + p)];
   $("verbose").checked = data.opts.verbose;
   $("shownoop").checked = data.opts["show-noop"];
 

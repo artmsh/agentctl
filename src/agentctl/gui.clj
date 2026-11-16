@@ -30,12 +30,18 @@
    `keep-projects` does no coercion of its own — a vector of strings there
    would silently select nothing. A tool or kind nothing answers to would
    select nothing too, and is refused the way the CLI refuses `-t`/`-k`:
-   ex-data `:status 400`."
+   ex-data `:status 400`.
+
+   The command line's `-t`, `-k` and `-p` are the starting filter, and a
+   request overrides each one it names — an empty list meaning none. The page
+   sends the tools it shows as picked, which start as `-t`; it has no kind or
+   project controls, so `-k` and `-p` hold for as long as it runs."
   [m base]
-  (let [o (merge base
+  (let [from-request (fn [k] (if (contains? m k) (set (map keyword (get m k))) (set (get base k))))
+        o (merge base
                  {:tools (set (map keyword (:tools m)))
-                  :kinds (set (map keyword (:kinds m)))
-                  :projects (set (map keyword (:projects m)))
+                  :kinds (from-request :kinds)
+                  :projects (from-request :projects)
                   :verbose (boolean (:verbose m))
                   :show-noop (boolean (:show-noop m))})]
     (when-let [[flag v msg] (first (core/unknown-selectors o))]
@@ -61,12 +67,19 @@
   [text path opts]
   (try
     (let [cfg (config/parse-config (buffer-text text) path)
-          ;; the GUI plans this machine, so this machine's findings too
-          findings (concat (config/structural-findings cfg) (statusline/findings cfg opts))
-          errors (filter #(= :error (:level %)) findings)
+          ;; the GUI plans this machine, so this machine's findings too; and
+          ;; a -p naming nothing narrows the plan to nothing, as in the CLI
           ;; the buffer decides the format, and it can change with any edit:
-          ;; a kind it never plans is refused here, not in `opts-from-json`
-          [_ dead msg] (first (core/dead-selectors cfg opts))]
+          ;; a kind it never plans is refused here, not in `opts-from-json` —
+          ;; or, while nothing in the buffer decides a format, only reported
+          {dead-kinds :error undecided :warn} (group-by #(nth % 3) (core/dead-selectors cfg opts))
+          [_ dead msg] (first dead-kinds)
+          findings (concat (config/structural-findings cfg) (statusline/findings cfg opts)
+                           (for [p (core/unmatched-projects cfg opts)]
+                             (config/finding :warn [:project p] "no declared project there"))
+                           (for [[_ k msg] undecided]
+                             (config/finding :warn [:kind k] msg)))
+          errors (filter #(= :error (:level %)) findings)]
       (cond
         (seq errors)
         {:ok false
@@ -146,15 +159,26 @@
               ops (core/build-plan cfg st opts)
               cfg (assoc cfg :planned-ops ops)
               changes (filter plan/mutating? ops)
+              ;; held back on an unresolved secret: reported with the failures,
+              ;; because the run did not converge on them either
+              unresolved (map #(assoc % :error (:summary %)) (core/unresolved ops))
+              rows (fn [failed] (mapv (fn [f] {:tool (name (:tool f))
+                                               :kind (name (:kind f))
+                                               :id (u/kw->str (:id f))
+                                               :error (:error f)})
+                                      failed))
               config-backup (when (u/exists? path) (u/backup! path))]
           (u/write-text! path text)
           (if (empty? changes)
-            (do (state/save! (core/sync-state! st cfg #{} (when (core/scoped? opts) #{})))
-                (merge pre {:status 200 :applied 0 :failed []
+            (do (state/save! (core/sync-state! st cfg (set (mapcat core/op-keys unresolved))
+                                                (when (core/scoped? opts) #{})))
+                (merge pre {:status (if (seq unresolved) 500 200) :applied 0
+                            :failed (rows unresolved)
                             :saved (u/tilde path)
                             :config-backup (some-> config-backup u/tilde)
                             :backups (u/tilde (u/backup-dir))}))
-            (let [{:keys [done failed]} (core/converge! cfg st opts ops)]
+            (let [{:keys [done failed]} (core/converge! cfg st opts ops)
+                  failed (concat failed unresolved)]
               ;; ownership is never claimed for a resource whose creation
               ;; failed — a later prune would delete something we never made;
               ;; on a scoped run (-t/-k/-p/--only/--user) a data-carrying id (hooks) only
@@ -170,11 +194,7 @@
                       :saved (u/tilde path)
                       :config-backup (some-> config-backup u/tilde)
                       :backups (u/tilde (u/backup-dir))
-                      :failed (mapv (fn [f] {:tool (name (:tool f))
-                                             :kind (name (:kind f))
-                                             :id (u/kw->str (:id f))
-                                             :error (:error f)})
-                                    failed)}))))))))
+                      :failed (rows failed)}))))))))
 
 (defn- with-form
   "The controls and the dry run answer the same buffer, so they travel together
@@ -247,7 +267,8 @@
                          :tools (mapv name config/all-tools)
                          :opts {:tools (mapv name (:tools base-opts))
                                 :kinds (mapv name (:kinds base-opts))
-                                :projects (mapv name (:projects base-opts))
+                                ;; id->str: `-p sub/web` is the keyword :sub/web
+                                :projects (mapv u/id->str (:projects base-opts))
                                 :verbose (boolean (:verbose base-opts))
                                 :show-noop (boolean (:show-noop base-opts))}})
 

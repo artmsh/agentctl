@@ -81,27 +81,35 @@
 
 (defn kind-problem
   "Why `k` is no kind to select — with `cfg`, also a kind `cfg`'s format
-   plans nothing as."
+   plans nothing as. A config whose format nothing decides yet (`{}`, or only
+   format-neutral keys; see `config/config-format`) is planned the old way,
+   so the same kinds select nothing in it, but the reason names no format."
   ([k]
    (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
   ([cfg k]
    (when (and (some #{k} kinds) (not (some #{k} (kinds-for cfg))))
-     (let [instead (map name (sort (if (:entity-dsl? cfg)
-                                     (get dsl-refiled k)
-                                     (for [[from to] dsl-refiled :when (contains? to k)] from))))]
-       (str (format-name cfg) " plans nothing as " (name k) "; it files those ops under "
-            (if (next instead) (str (str/join ", " (butlast instead)) " or " (last instead)) (first instead))
-            " (kinds for this config: " (str/join ", " (map name (kinds-for cfg))) ")")))))
+     (if-not (:format cfg)
+       (str "selects nothing in this config: nothing in it decides between the entity DSL"
+            " and the old format yet")
+       (let [instead (map name (sort (if (:entity-dsl? cfg)
+                                       (get dsl-refiled k)
+                                       (for [[from to] dsl-refiled :when (contains? to k)] from))))]
+         (str (format-name cfg) " plans nothing as " (name k) "; it files those ops under "
+              (if (next instead) (str (str/join ", " (butlast instead)) " or " (last instead)) (first instead))
+              " (kinds for this config: " (str/join ", " (map name (kinds-for cfg))) ")"))))))
 
 (defn dead-selectors
-  "`[flag value message]` for each `-k` kind, and each `--only` kind, that is
-   a kind but one `cfg`'s format plans nothing as: `-k projects` on an
-   entity-DSL config, `-k trust` on an old-format one. Such a run plans
-   nothing and exits 0 — exactly what a converged machine looks like."
+  "`[flag value message level]` for each `-k` kind, and each `--only` kind,
+   that is a kind but one `cfg`'s format plans nothing as: `-k projects` on
+   an entity-DSL config, `-k trust` on an old-format one. Such a run plans
+   nothing and exits 0 — exactly what a converged machine looks like — so it
+   is an `:error`. Where the format is still undecided the run is only told,
+   with a `:warn`: the next section added may decide it either way."
   [cfg {:keys [kinds only]}]
-  (concat
-   (for [k kinds :let [p (kind-problem cfg k)] :when p] ["-k" (name k) p])
-   (for [[k id] only :let [p (kind-problem cfg k)] :when p] ["--only" (str (name k) "/" id) p])))
+  (let [level (if (:format cfg) :error :warn)]
+    (concat
+     (for [k kinds :let [p (kind-problem cfg k)] :when p] ["-k" (name k) p level])
+     (for [[k id] only :let [p (kind-problem cfg k)] :when p] ["--only" (str (name k) "/" id) p level]))))
 
 (defn unknown-selectors
   "`[flag value message]` for each `:tools` / `:kinds` value that selects
@@ -605,7 +613,12 @@
    (for [[id decl] (:hooks (get-in cfg [:tools :claude]))
          :let [path [:hooks (keyword (u/kw->str (:event decl)))]]]
      [:claude :hooks id {:path path :value (claude/hook-group decl)}])
-   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))] [t :mcps id])
+   ;; claude's servers carry the env and header names they declare: one
+   ;; dropped from the declaration is agentctl's to remove, the rest the user's
+   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))]
+     (if (= :claude t)
+       [t :mcps id (claude/declared-names (common/for-this-tool m t))]
+       [t :mcps id]))
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)
          :let [m (get-in cfg [:mcps mid])]
@@ -613,7 +626,9 @@
          t (:tools m)
          :when (and (common/project-scopes (common/mcp-scope m t))
                     (contains? common/project-mcp-tools t))]
-     [t :mcps (keyword (name pid) (name mid)) {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}])
+     [t :mcps (keyword (name pid) (name mid))
+      (merge {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}
+             (when (= :claude t) (claude/declared-names m)))])
    ;; a project's skill is owned user-wide only by tools that cannot host one
    ;; inside a project — for them the user's home is the only place it fits
    (for [[id s] (sources/all-skills cfg) t (:tools s)
@@ -670,6 +685,31 @@
           :when (not-any? #(contains? (id-names %) id) (declared kind))]
       (str (name kind) "/" (second sel)))))
 
+(declare op-keys)
+
+(defn- mark-approvals
+  "A Claude `.mcp.json` server whose name agentctl added to the project's
+   `enabledMcpjsonServers` is marked `:approved`, so removing the server can
+   take the approval with it; a name that was there already is the user's,
+   and never marked. Recording rebuilds an entry from the declaration, so
+   the mark is carried over while the server stays at `:project` scope, and
+   set for the servers a completed approval op added (`:approves`)."
+  [s old cfg failed done]
+  (let [ok? (fn [o] (let [k (first (op-keys o))]
+                      (and (not (failed k)) (or (nil? done) (done k)))))
+        project? (fn [s k] (= :project (get-in s [:managed k :scope])))
+        s (reduce (fn [s [k e]]
+                    (cond-> s
+                      (and (:approved e) (= :project (:scope e)) (project? s k))
+                      (assoc-in [:managed k :approved] true)))
+                  s (:managed old))]
+    (reduce (fn [s o]
+              (reduce (fn [s id]
+                        (let [k (state/key-for :claude :mcps id)]
+                          (cond-> s (project? s k) (assoc-in [:managed k :approved] true))))
+                      s (when (ok? o) (:approves o))))
+            s (:planned-ops cfg))))
+
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.
    `failed` (tool kind id) triples are left unrecorded — claiming ownership of
@@ -711,6 +751,7 @@
                    (state/record s t k id (or (data-for t k id data) {})) s))
                $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)
+       (mark-approvals $ st cfg failed done)
        (ownership/record $ cfg failed done)))))
 
 ;; ---------------------------------------------------------------- apply
@@ -726,6 +767,15 @@
    installs a skill for several agents."
   [o]
   (or (:owns o) [[(:tool o) (:kind o) (:id o)]]))
+
+(defn unresolved
+  "Ops held back because a secret did not resolve (`common/unresolved-op`).
+   Nothing was written for them, so a run holding one has not converged:
+   `apply` exits 2 and `apply!` exits 1, and like a failed op none of them is
+   claimed as owned — a later removal from agents.edn would otherwise prune a
+   hand-made server of the same name that agentctl never wrote."
+  [ops]
+  (filter :unresolved ops))
 
 (defn execute!
   "Run every mutating op. Returns {:done [...] :failed [...]}."

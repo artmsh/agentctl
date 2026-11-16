@@ -146,10 +146,14 @@ config's format plans: an entity-DSL config files a project's trust,
 permissions and settings under `trust`, `permissions` and `settings`, so
 `-k projects` there exits 1; an old-format config plans all three as
 `projects`, so `-k trust` there exits 1. The message lists the kinds the
-format has, `--help` marks `projects` as legacy, and the GUI refuses the same
-kinds for the buffer it plans. An `--only` or `-p` that nothing declares or
-owns is reported with `⚠` (under `--json`, in `warnings`), because a run
-narrowed to a typo plans nothing and would otherwise read as converged.
+format has, `--help` marks `projects` as legacy, `--host` runs are held to the
+same rule, and the GUI refuses the same kinds for the buffer it plans. A
+config with nothing that decides the format yet — `{}`, or only `:statusline`,
+`:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
+and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
+because a run narrowed to a typo plans nothing and would otherwise read as
+converged.
 
 ## Claude session retention
 
@@ -208,7 +212,11 @@ what you are editing rather than what is on disk. Edits go through the server,
 which rewrites only the node you touched: comments, blank lines and `$name`
 references survive, and a `:#def` binding is shown as the reference it is rather
 than the value it expands to. The tool chips in the header and the `verbose` /
-`show noop` toggles are `--tool`, `-v` and `--show-noop`.
+`show noop` toggles are `--tool`, `-v` and `--show-noop`, and `-t` given to
+`gui` picks the chips it starts with. `-k` and `-p` given to `gui` narrow
+every plan the page shows, which says so under the findings; the page has no
+control for them, so they hold until the server stops. A `-p` that selects no
+declared project is a warning there, as it is in the CLI.
 
 **Apply** is the only thing that writes. It asks for confirmation, then saves
 the buffer to `agents.edn` (backed up first) and converges, exactly as
@@ -240,17 +248,33 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:scope` | Where it lands | For |
 | --- | --- | --- |
 | `:local` (default for a project's servers) | `~/.claude.json`, under the project's entry | anything with a credential; anything only you run |
-| `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
+| `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
 Codex, Pi and OMP have no project-level MCP config; they report the skip as a
 warning rather than silently installing the server user-wide.
 
+A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
+the project's `.claude/settings.local.json`, the list Claude Code reads, so it
+starts without the approval prompt. Names already there, added by hand or by
+that prompt, are kept. A name agentctl added is removed again when its server is
+dropped or leaves `:project` scope; the manifest records which names those are,
+so a server the user had approved before agentctl declared it stays approved. A
+server held back because a secret did not resolve is not approved either:
+nothing was written for it in `.mcp.json`. Older releases wrote the list under
+the project in `~/.claude.json`; Claude Code moves that copy into
+`settings.local.json` and deletes it on its next run, and agentctl no longer
+plans it.
+
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` reference that resolves at apply time, or a
 token written out literally — puts that credential in the repo. The plan marks
 it `⚠ secret value written into the project`, and `validate` scans every
-project's `.mcp.json`.
+project's `.mcp.json`. In either project placement the plan, and `apply --json`,
+print a resolved env or header secret masked (`"plai…34"`, marked `(changed)`
+when a rotation masks the same), and so is every old env or header value a change
+replaces or removes, whatever the new declaration says: it may have come from a
+reference the declaration no longer makes.
 
 A server written at local scope that is *also* still declared in the project's
 `.mcp.json` is reported, not deleted — agentctl never wrote that file and will
@@ -266,6 +290,78 @@ Claude Code still offers the `.mcp.json` definition.
 
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
+
+Both project placements are merged onto the entry already there, so an env
+var, header or unmodelled key added by hand survives an update; the declared
+type, command, args and url replace their old values. An env var or header
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares, so a dropped secret does not
+stay in the file. A transport change
+(stdio to http, or back) replaces every transport key instead: merged, the
+stdio server's `command`, `args` and `env` would stay beside the new `url`. The
+plan lists the keys that go:
+
+```
+~ projects/sample mcps/docs
+      - args: ["docs-mcp"]
+      - command: "/usr/local/bin/docs-mcp"
+      ~ type: "stdio" -> "http"
+      + url: "https://docs.example.com/mcp"
+```
+
+## Unresolved secrets
+
+A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
+`:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
+that is resolved when `apply!` runs. A settings `env` is where a project's
+`.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
+value:
+
+```clojure
+{:settings [{:env {"DOCS_API_KEY" "!bw://vendor/docs-api-key"} :acli [:claude] :in "projects/sample"}]}
+```
+
+The resolved value is what lands in `settings.json`, so the plan flags the op
+`⚠ secret value written into the project` (or into `~/.claude/settings.json`)
+and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
+same on both sides is marked `(changed)`. An old value that a change replaces
+or drops is masked too, even when the new value is a plain literal. A project's
+`.claude/settings.json` is usually committed; `.claude/settings.local.json` is
+the private one.
+
+When a reference does not resolve — the vault is locked, the variable is unset,
+the Bitwarden field is empty or holds the text `null`, the variable, file or
+command yields nothing but whitespace, the reference is malformed — Claude's server, or the settings `env` object, is not written at
+all, in any scope. Writing the rest of it would leave a server that is
+configured and cannot authenticate, and because the missing value would then be
+missing from the desired entry too, the next plan would report no drift. The plan
+names the server, the key and the reason instead:
+
+```
+= mcps/docs
+    ⚠ secret unresolved: bitwarden vault locked (headers.api-key) — nothing written
+```
+
+Every other change in the run still applies. `apply` exits 2 while such a server
+remains and `apply!` exits 1, listing what it held back, so a partial run is never
+reported as converged. A server held back this way is not recorded as owned: one
+that never got written cannot be pruned later, and a hand-made server of the same
+name stays the user's.
+
+For a user-wide server, whose secret `claude mcp add` stores and agentctl does
+not read back, drift is decided by the env and header *names*: a declared name
+missing from `~/.claude.json` is drift, a changed value is not. A name added by
+hand, such as an `Authorization` header, is not drift either. `claude mcp add`
+cannot edit an entry, so an update removes the server and adds it again, after
+backing up `~/.claude.json`; the add carries every env var (stdio) or header
+(http) the declaration does not name, so a hand-added one survives. A name
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares.
+
+`validate` checks the same references before anything runs: every MCP server's
+`:env` and `:headers` and Claude's settings `:env`, user-wide and per project.
+One a locked vault keeps is reported `?` (unknown, not a failure); one that is
+missing, emptied or malformed is an error (`✗`) and makes `validate` exit 1.
 
 ## Kimi Code
 
@@ -718,14 +814,18 @@ is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and und
 `--json` as ops with `"warn": true` — and still exits 0, since nothing would
 change.
 
-Under `--json`, `apply` (and `validate`) print one JSON document on stdout:
-the plan's `ops`, the selector `warnings`, the config's own warnings and this
-machine's (the status line's) in `findings` (`level`, `where`, `message`, as
-`validate --json` prints them) and the `summary`. An error is `{"error": …}`
-with exit 1 instead — a config with errors carries its `findings` too, an
-unknown option or a missing file only the message. `apply! --json` prints the
-plan document the same way, then the confirmation prompt and the result of
-the run as text.
+Under `--json`, `apply`, `apply!` and `validate` print one JSON document on
+stdout: the plan's `ops`, the selector `warnings`, the config's own warnings
+and this machine's (the status line's) in `findings` (`level`, `where`,
+`message`, as `validate --json` prints them), the number of changes that write
+a resolved secret in `secrets`, and the `summary`. `apply!` adds `applied` —
+`done` and `failed`, each op with its `tool`, `kind`, `id` and `action`, a
+failed one with its `error` — and `backups`. A confirmation prompt cannot share
+stdout with that document, so `apply! --json` needs `-y`. An error is
+`{"error": …}` with exit 1 instead — a config with errors carries its
+`findings` too; an unknown command or option, or a config file missing,
+unreadable or not a file, only the message. Without `--json` the same errors
+are one `error: …` line.
 
 A skill whose source is not on disk, such as a `:per-tool :path` into a
 project copy that has since gone, is not linked: the plan says `source
