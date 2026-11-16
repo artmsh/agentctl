@@ -607,7 +607,7 @@
     (testing "keys kimi already stores survive a rewrite"
       (is (= "keep" (:someNativeKey (entry local {:someNativeKey "keep"})))))
     (testing "a transport change leaves no stdio keys behind"
-      ;; the bug agentctl already fixed for claude (#18): merging onto the old
+      ;; the bug agentctl already fixed for claude: merging onto the old
       ;; entry would keep `command` next to `url`, and both transports would
       ;; then be on record at once
       (let [e (entry remote {:command "/bin/echo" :args ["hi"] :transport "stdio"})]

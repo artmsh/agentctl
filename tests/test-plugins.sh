@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end: Claude Code plugins (#25). A `claude` stub reproduces what the
+# End-to-end: Claude Code plugins. A `claude` stub reproduces what the
 # real CLI does and refuses (checked against Claude Code's `plugin` commands):
 #   - `marketplace add` rejects file:// sources
 #   - `install` rejects plugin@marketplace together with --marketplace
