@@ -334,7 +334,19 @@ and are never rewritten.
 
 ### `:hooks`
 
-Claude Code only, global scope, declared under `:executors :claude :hooks`:
+Claude Code only. In the entity DSL a hook is a `:hooks` row placed like any other entity:
+`:in :all` writes `~/.claude/settings.json`, and a project selector writes that
+repository's `.claude/settings.json`:
+
+```clojure
+:hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
+         :command "$HOME/.claude/hooks/memory-file-lock.sh acquire" :timeout 25 :in :all}
+        {:id :session-start :event :SessionStart :command "./scripts/session-start.sh"
+         :in "projects/sample"}]
+```
+
+The old format declares user-scope hooks under `:executors :claude :hooks`; a
+hook under a project's `:executors :claude` there is reported, not written:
 
 ```clojure
 :executors
@@ -685,10 +697,13 @@ end up writing a resolved secret into a tool's config file are tagged
 ```
 -f, --file PATH    config file (default ~/.config/agents.edn)
 -t, --tool TOOL    restrict to a tool (repeatable)
--k, --kind KIND    restrict to settings|mcps|skills|providers|memory|projects|skill-packs
+-k, --kind KIND    restrict to a kind (repeatable; --help lists them, an unknown
+                   one exits 1)
 -p, --project ID   restrict to one declared project — selects everything that
                    project owns, whatever its kind (its servers and skills are
                    :mcps / :skills ops, so --kind projects would miss them)
+    --only KIND/ID apply/apply!: one entity wherever it is placed (repeatable)
+    --user         apply/apply!: user scope only, no project
     --json         machine-readable output
 -v, --verbose      per-field diffs and target paths
     --show-noop    include unchanged and informational entries

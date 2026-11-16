@@ -38,8 +38,93 @@
   (let [wanted (or (not-empty (set tools)) (config/active-tools cfg))]
     (filter #(and (contains? wanted %) ((get-in registry [% :present?]))) config/all-tools)))
 
-(defn- keep-kinds [ops {:keys [kinds]}]
-  (if (seq kinds) (filter #(contains? (set kinds) (:kind %)) ops) ops))
+(def kinds
+  "Every kind an op can carry: the DSL's sections and every kind a tool is
+   provisioned with. An old-format config plans a project's trust and
+   settings as `:projects`, and extensions have no DSL section. `-k` and
+   `--only` are checked against this, because a kind no op carries selects
+   nothing, and an empty plan reads exactly like a converged machine."
+  (vec (sort (into (set scope/kinds) (mapcat val config/capabilities)))))
+
+(defn kind-problem
+  "Why `k` is no kind to select."
+  [k]
+  (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
+
+(defn unknown-selectors
+  "`[flag value message]` for each `:tools` / `:kinds` value that selects
+   nothing — the CLI's `-t`/`-k` and the GUI's filters alike. A tool without
+   an adapter or a kind no op carries plans nothing, and an empty plan reads
+   exactly like a converged machine."
+  [{:keys [tools] :as opts}]
+  (concat
+   (for [t tools :when (not (some #{t} config/all-tools))]
+     ["-t" t (str (config/tool-problem t) " (tools: " (str/join ", " (map name config/all-tools)) ")")])
+   (for [k (:kinds opts) :when (not (some #{k} kinds))]
+     ["-k" k (kind-problem k)])))
+
+(defn kind-selected?
+  "Does `-k` let ops of `kind` through? Selecting skills lets the
+   `:skill-packs` ops through too: a pack op exists only because some skill
+   placement needs its clone, and without it a skill from a pack not on disk
+   yet is never linked while the run reports nothing to change."
+  [{:keys [kinds]} kind]
+  (or (empty? kinds)
+      (contains? (set kinds) kind)
+      (and (= :skill-packs kind) (contains? (set kinds) :skills))))
+
+(defn- keep-kinds
+  "`-k` keeps ops of the kinds named, and skills keep their packs. Later
+   filters (`-p`, `--only`, `--user`) narrow the packs with everything else."
+  [ops opts]
+  (filter #(kind-selected? opts (:kind %)) ops))
+
+(defn- id-names
+  "The spellings `--only` accepts for an id: whole, and its last segment.
+   A project's copy of an entity carries the project in its id
+   (`target-…/review`), and the selector names the entity, not the copy."
+  [id]
+  (let [s (u/id->str id)] (hash-set s (last (str/split s #"/")))))
+
+(defn- only-match? [[kind id] o]
+  (and (or (= kind (:kind o)) (= kind (:shown-kind o)))
+       (some? (:id o))
+       (contains? (id-names (:id o)) id)))
+
+(defn- only-skill-packs
+  "The packs `--only skills/<sid>` has to fetch. A declared skill (by the
+   config's `:skills`, a pack of that name, or a project's `:skills`) brings
+   the packs `sources/packs-for-skill` names for it. Any other id brings at
+   most the pack it already sits in on disk: the lookup for an undeclared id
+   falls back to every pack not fetched yet, so a typo — or a skill dropped
+   from the config, whose removal needs no clone — would fetch them all."
+  [cfg sid]
+  (if (or (get-in cfg [:skills sid]) (get-in cfg [:skill-packs sid])
+          (some #(some #{sid} (:skills %)) (vals (:projects cfg))))
+    (sources/packs-for-skill cfg sid)
+    (for [[pid p] (:skill-packs cfg) d (sources/skill-dirs p)
+          :when (= (name sid) (str (fs/file-name d)))]
+      pid)))
+
+(defn- keep-only
+  "`--only kind/id` keeps the ops of one entity wherever it is placed, user
+   scope and projects alike. A selected skill keeps the op that fetches its
+   pack, for the reason `keep-projects` gives: without the clone there is
+   nothing to link, and `converge!` never gets its second pass."
+  [ops cfg {:keys [only]}]
+  (if (empty? only)
+    ops
+    (let [packs (set (for [[kind id] only :when (= :skills kind)
+                           p (only-skill-packs cfg (keyword id)) :when p] p))]
+      (filter #(or (some (fn [sel] (only-match? sel %)) only)
+                   (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
+              ops))))
+
+(defn- keep-user
+  "`--user` keeps what lands outside every project: user-wide files, and the
+   packs cloned for them, which belong to no project either."
+  [ops {:keys [user]}]
+  (if user (remove #(or (:project %) (:project-path %)) ops) ops))
 
 (defn- project-ids
   "The declared projects one `--project` value selects: a project id as is,
@@ -149,10 +234,12 @@
           {:projects children :where :root :path cwd})))))
 
 (defn scoped?
-  "Did `-t`/`-k`/`-p` narrow this run to less than the whole config? Callers
-   use this to decide what `done` to pass `sync-state!` — see its docstring."
-  [{:keys [tools kinds projects]}]
-  (boolean (or (seq tools) (seq kinds) (seq projects))))
+  "Did `-t`/`-k`/`-p`/`--only`/`--user` narrow this run to less than the
+   whole config? Callers use this to decide what `done` to pass
+   `sync-state!` — see its docstring. A scoped run forgets only what it
+   removed itself, so nothing outside the selection is ever pruned."
+  [{:keys [tools kinds projects only user]}]
+  (boolean (or (seq tools) (seq kinds) (seq projects) (seq only) user)))
 
 (defn- project-hook-ops [cfg st]
   (let [desired (into {} (for [[pid p] (:projects cfg) [id h] (get-in p [:tools :claude :hooks])]
@@ -163,7 +250,10 @@
                           {:tool :claude :kind :hooks :id id :project project
                            :file (str project-path "/.claude/settings.json")
                            :path [:hooks (keyword (u/kw->str (:event decl)))]
-                           :old (:value (state/entry st :claude :hooks id)) :value (claude/hook-group decl)})]
+                           :old (:value (state/entry st :claude :hooks id)) :value (claude/hook-group decl)
+                           ;; as user-scope hooks do: under --show-noop a
+                           ;; converged hook is the confirmation a change landed
+                           :report-converged? true})]
                (assoc o :project-path project-path))) desired)
      (keep (fn [[[t k sid] data]]
              (let [id (keyword sid)]
@@ -395,6 +485,8 @@
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
         (keep-kinds opts)
         (keep-projects cfg opts)
+        (keep-only cfg opts)
+        (keep-user opts)
         defer-unmet-removals
         (->> (annotate-skill-ops cfg))
         same-command
@@ -469,13 +561,38 @@
    (for [[id p] (:projects cfg) t (:for-tools p)]
      [t :projects id {:entity-id id :project-id id :project-path (:path p)}]))))
 
+(def ^:private field-kinds
+  "Kinds whose op ids name a field or a file, not a declared entity, so there
+   is no declaration to check an `--only` id against."
+  #{:settings :permissions :trust :projects})
+
+(defn unmatched-only
+  "`--only` selectors whose id names nothing declared or owned, as written.
+   Checked against declarations, never against ops: a converged entity plans
+   no op, and a run narrowed to a typo plans nothing, which reads exactly like
+   a converged machine."
+  [cfg st {:keys [only]}]
+  (let [declared (fn [kind]
+                   (concat (for [[_ k id] (inventory cfg) :when (= k kind)] id)
+                           (for [[[_ k id] _] (:managed st) :when (= k kind)] id)
+                           (for [e (:entities cfg) :when (= kind (:kind e))] (:id e))
+                           (let [section (get cfg kind)] (when (map? section) (keys section)))
+                           (when (= :skills kind)
+                             (concat (mapcat :skills (vals (:projects cfg)))
+                                     (for [[_ p] (:skill-packs cfg) d (sources/skill-dirs p)]
+                                       (fs/file-name d))))))]
+    (for [[kind id :as sel] only
+          :when (not (field-kinds kind))
+          :when (not-any? #(contains? (id-names %) id) (declared kind))]
+      (str (name kind) "/" (second sel)))))
+
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.
    `failed` (tool kind id) triples are left unrecorded — claiming ownership of
    something we never managed to create would make a later prune delete it.
 
-   `done` (tool kind id) triples are the ops a *scoped* run (`-t`/`-k`/`-p`)
-   actually executed — pass nil, not `#{}`, for an unfiltered run. Most
+   `done` (tool kind id) triples are the ops a *scoped* run (`-t`/`-k`/`-p`/
+   `--only`/`--user`, or the working directory) actually executed — pass nil, not `#{}`, for an unfiltered run. Most
    inventory tuples carry no `data` (an id is enough to say ownership), but a
    few — hooks' `:path`/`:value` — carry the exact value written to disk. On
    an unfiltered run a hook with no op is positive evidence the declared

@@ -123,6 +123,9 @@ command the run will execute ([reading a plan](docs/GUIDE.md#reading-a-plan)).
 
 `-t TOOL`, `-k KIND` and `-p PATH` narrow a run, and inside a declared project `apply` already
 plans only that project unless you pass `--all` ([how the working directory scopes a run](docs/GUIDE.md#where-you-run-it-is-a-scope)).
+`--only KIND/ID` (say `--only skills/review`) plans one entity wherever it is placed, and `--user`
+plans user scope alone; a narrowed run never prunes what lies outside it
+([applying one entity](docs/GUIDE.md#applying-one-entity)).
 `--host NAME` runs `apply`, `apply!`, `validate` or `state` against a machine declared under
 `:hosts`, over SSH, while `AGENTCTL_HOME` points every managed path, and the CLIs agentctl
 drives, at a scratch tree for testing. `agentctl gui` serves the screen above on 127.0.0.1
