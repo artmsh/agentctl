@@ -47,6 +47,7 @@
     "OPTIONS"
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi dsh"
+    "                       (and awl with --host)"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"]
    (wrap-words "                       " 92 (map name core/kinds))
    ["  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"

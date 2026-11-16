@@ -103,15 +103,21 @@ out=$(cd "$SB" && run apply -f "$AWL/m.edn" -t nope 2>&1); code=$?
 set -e
 [ "$code" = 1 ] && echo "$out" | grep -q 'unknown tool :nope' || { echo "$out"; fail "-t nope was not rejected"; }
 
-# a host takes the same value, and is not probed or written for it
+# a host has no agents.edn for awl to read, so what it selects is placed in
+# ~/.agents/skills there. awl is not looked for (it is often a shell alias), so
+# it is never skipped. tests/test-hosts.sh covers the rest.
 cat > "$AWL/host.edn" <<EDN
 {:hosts {:box {:ssh "box" :os :linux :home "$AWL/far"
                :skill-packs {[:uri "file://$AWL/kit"] {:acli [:awl]}}}}}
 EDN
 mkdir -p "$AWL/far"
 export AGENTCTL_SSH_CMD="$ROOT/tests/ssh-stub"
-out=$(cd "$SB" && run apply -f "$AWL/host.edn" --host box) || { echo "$out"; fail ":acli [:awl] on a host planned something"; }
-if echo "$out" | grep -q 'awl'; then echo "$out"; fail "a host was probed for awl"; fi
+set +e
+out=$(cd "$SB" && run apply -f "$AWL/host.edn" --host box); code=$?
+set -e
+[ "$code" = 2 ] && echo "$out" | grep -q "$AWL/far/.agents/skills/wrap-up" \
+  || { echo "$out"; fail ":acli [:awl] on a host did not plan ~/.agents/skills"; }
+if echo "$out" | grep -q 'skipped'; then echo "$out"; fail "a host skipped awl"; fi
 cat > "$AWL/host.edn" <<EDN
 {:hosts {:box {:ssh "box" :os :linux :home "$AWL/far"
                :skill-packs {[:uri "file://$AWL/kit"] {:acli [:codex :awl]}}}}}

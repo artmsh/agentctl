@@ -64,14 +64,24 @@
              " — expected [:gh \"owner/repo\"] or [:uri \"…\"]")))
     {:kind kind :key k})))
 
+(defn- consumers-of
+  "The consumers a selection names, which `provisioned` drops."
+  [ts]
+  (let [xs (if (keyword? ts) [ts] ts)]
+    (when (coll? xs) (not-empty (filterv consumers xs)))))
+
 (defn- row
-  "Common row shape: `:alias` names the entity, `:acli` selects the CLIs."
+  "Common row shape: `:alias` names the entity, `:acli` selects the CLIs. The
+   consumers it names are kept apart as `:consumers`: nothing here provisions
+   them, but a host does (see `agentctl.hosts`)."
   [id v]
   (when-not (or (nil? v) (map? v)) (throw (ex-info "keyed entry value must be a map" {:id id})))
-  (let [v (or v {})]
-    (cond-> (-> (dissoc v :acli) (assoc :id (if-let [a (:alias v)] (keyword (name a)) id)))
+  (let [v (or v {})
+        cs (consumers-of (if (contains? v :acli) (acli (:acli v)) (:tools v)))]
+    (cond-> (-> (dissoc v :acli :consumers) (assoc :id (if-let [a (:alias v)] (keyword (name a)) id)))
       (contains? v :tools) (update :tools provisioned)
-      (contains? v :acli) (assoc :tools (provisioned (acli (:acli v)))))))
+      (contains? v :acli) (assoc :tools (provisioned (acli (:acli v))))
+      cs (assoc :consumers cs))))
 
 (defn- pack-rows [packs]
   (vec (for [[k v] packs
@@ -200,7 +210,7 @@
   (subs (format "%064x" (java.math.BigInteger. 1 (.digest (java.security.MessageDigest/getInstance "SHA-256")
                                                        (.getBytes (pr-str x) "UTF-8")))) 0 16))
 (defn target-id [p] (keyword (str "target-" (digest p))))
-(def metadata-keys [:id :in :tools :for :at :scope :acli])
+(def metadata-keys [:id :in :tools :for :at :scope :acli :consumers])
 (defn entities [raw]
   (let [raw (lower-keyed raw)
         resolve-targets (memoize targets)
