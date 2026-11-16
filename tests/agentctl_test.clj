@@ -1561,6 +1561,28 @@
   (is (true? (core/scoped? {:only [[:skills "review"]]})))
   (is (true? (core/scoped? {:user true}))))
 
+(deftest a-converged-plan-still-shows-its-warnings
+  ;; "no changes" says the environment matches the config; a warning says part
+  ;; of the config went nowhere. A converged plan carrying one is not the
+  ;; first report, in the cli text or in the gui's
+  (let [f (str (temp-dir) "/settings.json")
+        text "{:executors {:claude {:bogus-setting true}}}"
+        cfg (config/parse-config text "test")]
+    (u/write-json! f {:$schema claude/settings-schema-url})
+    (with-redefs [claude/settings-file f]
+      (let [ops (core/build-plan cfg state/empty-state {:tools #{:claude}})]
+        (is (not-any? plan/mutating? ops) "setup: converged")
+        (is (some :warn ops) "setup: carries a warning")
+        (is (plan/show-plan? ops {}))
+        (is (str/includes? (plan/render-plan ops {}) "unsupported setting :bogus-setting")))
+      (let [res (gui/plan-for-text text "test" {:tools #{:claude}})]
+        (is (:ok res))
+        (is (zero? (:changes res)))
+        (is (str/includes? (:plan res) "unsupported setting :bogus-setting"))))
+    (let [quiet [(plan/op {:action :noop :tool :claude :kind :settings :id :model})]]
+      (is (not (plan/show-plan? quiet {})) "a converged plan without a warning reads as converged")
+      (is (plan/show-plan? quiet {:show-noop true}) "--show-noop shows it anyway"))))
+
 (deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
   ;; `-k` is checked against `core/kinds`; a kind missing from it would be
   ;; refused, and one missing from --help is a kind nobody knows to ask for

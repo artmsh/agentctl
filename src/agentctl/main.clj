@@ -186,7 +186,7 @@
         (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
         (when-let [missing (seq (:skipped planned))]
           (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
-        (if (or (seq changes) (:show-noop opts) (some :warn ops))
+        (if (plan/show-plan? ops opts)
           (println (plan/render-plan ops opts))
           (println "\nno changes — host matches agents.edn"))
         (println)
@@ -251,7 +251,7 @@
           (doseq [w warnings] (println (str "  ⚠ " w)))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
-          (if (or (seq changes) (:show-noop opts))
+          (if (plan/show-plan? ops opts)
             (println (plan/render-plan ops opts))
             (println "\nno changes — environment matches agents.edn"))
           (println)

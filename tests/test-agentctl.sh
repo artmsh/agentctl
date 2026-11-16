@@ -1074,4 +1074,35 @@ grep -q 'git clone exited' "$FAILSB/apply.txt" || { cat "$FAILSB/apply.txt"; fai
 [ ! -e "$SB/.pi/agent/skills/gone-skill" ] || fail "a skill was linked against a pack that failed to clone"
 if grep -q ":gone" "$SB/.config/agentctl/state.edn" 2>/dev/null; then fail "a failed clone was recorded as owned"; fi
 
+echo "23. a converged plan still prints its warnings, and exits 0"
+CW="$SB/converged-warn"
+mkdir -p "$CW"
+cw() { (cd "$CW" && AGENTCTL_HOME="$CW" run "$@"); }
+# claude has no :bogus-setting: every plan reports it, converged or not
+cat > "$CW/agents.edn" <<'EDN'
+{:executors {:claude {:model "opus" :bogus-setting true}}}
+EDN
+cw apply! -f "$CW/agents.edn" -t claude -y > "$CW/first.txt"
+grep -q '"model" *: *"opus"' "$CW/.claude/settings.json" || { cat "$CW/first.txt"; fail "setup: claude settings not written"; }
+for cmd in apply apply!; do
+  set +e
+  cw "$cmd" -f "$CW/agents.edn" -t claude -y > "$CW/$cmd.txt"; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning exited $code"; }
+  grep -q 'unsupported setting :bogus-setting' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd hid its warning behind no changes"; }
+  grep -q '^0 to add, 0 to change, 0 to remove' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning planned a change"; }
+done
+set +e
+cw apply -f "$CW/agents.edn" -t claude --json > "$CW/plan.json"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$CW/plan.json"; fail "a converged apply --json with a warning exited $code"; }
+python3 - "$CW/plan.json" <<'PY' || { cat "$CW/plan.json"; fail "--json dropped the warning of a converged plan"; }
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert not [o for o in ops if o["action"] in ("create", "update", "delete")], ops
+assert any(o.get("warn") and "bogus-setting" in o["summary"] for o in ops), ops
+PY
+
 echo "all agentctl e2e checks passed"

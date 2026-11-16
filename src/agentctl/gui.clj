@@ -77,8 +77,11 @@
            ;; the rendered plan, not the ops: `render-val` is where a
            ;; credential read out of an existing config file gets masked, and
            ;; serializing `:diffs` would route around it
+           ;; printed when the CLI prints it: `index.html` shows its
+           ;; up-to-date state for exactly the "no changes" line, so a
+           ;; converged plan carrying a warning has to arrive as a plan
            :plan (binding [plan/*color* false]
-                   (if (seq changes)
+                   (if (plan/show-plan? ops opts)
                      (str/triml (plan/render-plan ops opts))
                      "no changes — environment matches agents.edn"))
            ;; the same plan as a table: grouped and masked in Clojure, because

@@ -624,6 +624,13 @@ their ids in braces (`mcps/{docs search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
 
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere, such as an unsupported setting. That plan
+is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and under
+`--json` as ops with `"warn": true` — and still exits 0, since nothing would
+change.
+
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a
 throwaway home.
