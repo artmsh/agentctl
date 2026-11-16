@@ -88,7 +88,8 @@ if a[:2] == ["get", "item"]:
     items = json.load(open(os.path.join(os.environ["HOME"], "bw-items.json")))
     if a[2] not in items:
         print("Not found.", file=sys.stderr); sys.exit(1)
-    print(json.dumps({"fields": [{"name": k, "value": v} for k, v in items[a[2]].items()]})); sys.exit(0)
+    item = dict(items[a[2]]); login = item.pop("_login", None)
+    print(json.dumps(dict({"fields": [{"name": k, "value": v} for k, v in item.items()]}, **({"login": login} if login else {})))); sys.exit(0)
 sys.exit(1)
 STUB
 for cli in codex pi omp llm agy kimi; do printf '#!/bin/sh\nexit 0\n' > "$SB/bin/$cli"; done
@@ -709,5 +710,19 @@ validate
 [ "$code" = 1 ] || { cat "$SB/validate.txt"; fail "validate let an empty ref value through: exit $code"; }
 grep -qF "✗ fenv.headers.x-key" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "validate does not report the empty env var"; }
 unset AGENTCTL_TEST_EMPTY
+
+echo "33. a field name the vault item lacks is missing, never the login password"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :typo :type :http :url "https://mcp.example.com/t" :headers {"x-key" "!bw://login/KEYY"} :in :all :acli [:claude]}]}
+EDN
+# the item has a login, whose password a misspelt field used to reach
+vault '{"login": {"KEY": "sk-test-field", "_login": {"username": "u", "password": "'$PLAIN'"}}}'
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a misspelt field read as converged: exit $code"; }
+grep -qF "⚠ secret unresolved: field not found on bw item: login/KEYY (headers.x-key)" "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the misspelt field is not reported"; }
+apply -k mcps
+[ "$(user_entry typo)" = null ] || { user_entry typo; fail "a misspelt field was written"; }
+grep -q "$PLAIN" "$SB/.claude.json" && fail "the login password was written for a misspelt field"
 
 echo "all claude mcp e2e checks passed"

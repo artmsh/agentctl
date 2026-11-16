@@ -703,7 +703,8 @@ stdin in the OEM codepage. An operation that does not end with a final `OK` line
 |---|---|
 | `$FOO` or `"!env://FOO"` | environment variable |
 | `"$HOME/bin/x"` | a literal: `$VAR`, `${VAR}` and a leading `~` are expanded when the file is read. Only a whole `$NAME` is a reference |
-| `"!bw://item/field"`, `"!bw://folder/item/field"` | Bitwarden item field |
+| `"!bw://item/field"`, `"!bw://folder/item/field"` | Bitwarden item field; `password` and `username` read the item's login, as does the login's own username for its password |
+| `"!bw://item"` | the item's login password |
 | `"!file://~/path"` | file contents, trimmed |
 | `"!cmd://some command"` | stdout of a command |
 | `"anything else"` | literal |
@@ -714,7 +715,9 @@ end up writing a resolved secret into a tool's config file are tagged
 
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
-`$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace. Claude's
+`$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
+A field name the item does not have is missing too: a misspelt field never
+falls back to the login password. Claude's
 settings `:env` takes the same forms as an MCP server's `:env`. A Claude MCP
 server or settings `env` with any ref that does not resolve is held back whole,
 as [GUIDE.md](GUIDE.md#unresolved-secrets) describes; a resolved one is printed

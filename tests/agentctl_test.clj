@@ -172,8 +172,15 @@
           (is (nil? (:value r))))))
     (testing "a field with a value resolves to it"
       (is (= {:status :ok :value "sk-test-other"} (resolve (item nil) "!bw://vendor/OTHER"))))
-    (testing "a field the item does not name still falls back to the login"
-      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor/password"))))
+    (testing "the login's password and username are reached by those names"
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor/password")))
+      (is (= {:status :ok :value "u"} (resolve (item nil) "!bw://vendor/username")))
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor/u")) "the login's username names its password")
+      (is (= {:status :ok :value "pw-test-login"} (resolve (item nil) "!bw://vendor")) "a bare item is its password"))
+    (testing "any other name the item lacks is missing, never the login password"
+      (let [r (resolve (item nil) "!bw://vendor/KEYY")]
+        (is (= :missing (:status r)))
+        (is (= "field not found on bw item: vendor/KEYY" (:message r)))))
     (reset! @#'refs/cache {})))
 
 ;; ---------------------------------------------------------------- config
