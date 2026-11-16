@@ -178,6 +178,8 @@ use `validate --deep` to fetch the current schema.
 Codex keeps its TUI settings in nested `[tui.*]` tables of
 `~/.codex/config.toml`, next to state it writes for itself. Each declared
 setting below is written key by key into its own table, so that state survives.
+A `config.toml` that is a symlink, into a dotfiles checkout say, is left alone:
+agentctl does not write through it, and the plan says so in one warning.
 
 A model switch two keys away: bind the presets browser and put `/model` in slot 0.
 

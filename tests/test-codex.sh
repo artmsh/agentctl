@@ -218,4 +218,21 @@ c=$(code_of run apply! -f "$SB/g.edn" --all -t codex -y)
 [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "apply! on a broken hooks.json exited $c, not 1"; }
 cmp -s "$HOOKS" "$SB/before.json" || fail "a hooks.json that does not parse was rewritten"
 
+echo "9. a config.toml that is a symlink is not written through: one warning instead"
+mkdir -p "$SB/dotfiles"
+printf 'model = "m-a"\n' > "$SB/dotfiles/config.toml"
+rm -f "$CONF" "$HOOKS"; ln -s "$SB/dotfiles/config.toml" "$CONF"
+cp "$SB/dotfiles/config.toml" "$SB/before.toml"
+cat > "$SB/l.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b" :sandbox "net"
+             :permission-profiles {:net {:extends ":workspace"}}}]}
+EDN
+c=$(code_of run apply -f "$SB/l.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "a linked config.toml planned changes (exit $c)"; }
+grep -q 'is a symlink' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the plan does not say config.toml is a link"; }
+c=$(code_of run apply! -f "$SB/l.edn" --all -t codex -y)
+cmp -s "$SB/dotfiles/config.toml" "$SB/before.toml" || fail "written through the config.toml link"
+[ -L "$CONF" ] || fail "the config.toml link was replaced"
+rm -f "$CONF"
+
 echo "all codex e2e checks passed"

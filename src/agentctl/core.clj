@@ -609,6 +609,7 @@
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st))
                 (when (selected :claude) (claude-agents/plan-ops cfg st)))
+        codex/link-guard
         (keep-kinds opts)
         (keep-projects cfg opts)
         (keep-only cfg opts)

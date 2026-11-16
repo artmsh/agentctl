@@ -12,6 +12,7 @@
             [agentctl.state :as state]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
+            [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as str]))
 
@@ -597,6 +598,24 @@
     op))
 
 ;; ---------------------------------------------------------------- entry
+
+(defn link-guard
+  "agentctl edits config.toml key by key, in a file that stays codex's. A
+   symlink there, dangling or not, means the file lives somewhere else,
+   usually a dotfiles checkout: it is not written through, nor replaced by a
+   copy that would leave that checkout behind. The ops of a whole plan —
+   this adapter's, ownership prunes, entity extras — that would change it
+   become one warning."
+  [ops]
+  (if-not (fs/sym-link? config-file)
+    ops
+    (let [{hit true keep false} (group-by #(boolean (and (plan/mutating? %) (= config-file (:target %)))) ops)]
+      (if (empty? hit)
+        ops
+        (concat keep
+                [(plan/op {:tool tool :kind :settings :id :config-link :warn true :target config-file
+                           :summary (str (u/tilde config-file) " is a symlink: agentctl does not write through it"
+                                         " — " (count hit) " change(s) not made")})])))))
 
 (defn plan [cfg state]
   (concat (settings-ops cfg state)
