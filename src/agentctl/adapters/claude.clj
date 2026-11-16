@@ -6,6 +6,7 @@
    ever mutated through `claude mcp` or narrowly-scoped project keys."
   (:require [agentctl.adapters.common :as common]
             [agentctl.plan :as plan]
+            [agentctl.refs :as refs]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
             [agentctl.util :as u]
@@ -29,6 +30,37 @@
   "Run the claude CLI with a project as its cwd and the managed HOME."
   [dir & args]
   (u/sh-env-in dir {:HOME u/home} args))
+
+(defn- hide
+  "`s` with each of `values` replaced by its mask, the longest first so a
+   value that contains another is not left half shown."
+  [s values]
+  (reduce (fn [s v] (str/replace s v (refs/mask v)))
+          (str s)
+          (sort-by (comp - count) (distinct (remove str/blank? (map str values))))))
+
+(defn- ok!
+  "Turn a non-zero CLI exit into a real failure, so apply! reports the op as
+   failed and claims no ownership of what the CLI never wrote — a server it
+   refused to add, a plugin it never installed.
+
+   The message names the command, and `claude mcp add` carries its env and
+   header values on the command line, where the CLI may echo them back:
+   `secrets` are masked wherever they appear, since the message is printed,
+   and served to the GUI."
+  ([result argv] (ok! result argv nil))
+  ([{:keys [exit err out]} argv secrets]
+   (when-not (zero? exit)
+     (let [argv (mapv #(hide % secrets) argv)]
+       (throw (ex-info (str (str/join " " argv) " failed: "
+                            (hide (first (remove str/blank? [err out])) secrets))
+                       {:exit exit :argv argv}))))
+   true))
+
+(defn- claude-ok!
+  "Run the claude CLI and fail on a non-zero exit."
+  ([argv] (claude-ok! argv nil))
+  ([argv secrets] (ok! (claude-sh argv) argv secrets)))
 
 (def setting-keys
   {:model :model
@@ -60,6 +92,41 @@
                                     (assoc acc k [nk v])))
                {})))
 
+(defn- env-setting-op
+  "The `env` object of a settings file. Its values take the reference forms an
+   MCP server's env does and resolve the same way: written as declared, a
+   `!bw://` ref would land in the file as its own text. A ref that does not
+   resolve holds the whole object back, as it does an MCP server, and a
+   resolved secret is masked in the plan and flagged by `note`.
+
+   `base` is what `plan/json-set-op` takes, less the value."
+  [base env note]
+  (let [{parsed :refs invalid :invalid}
+        (reduce (fn [acc [k v]]
+                  ;; a malformed ref is one key's problem, not the whole plan's
+                  (try (assoc-in acc [:refs k] (refs/parse v))
+                       (catch clojure.lang.ExceptionInfo e
+                         (update acc :invalid conj {:key k :status :error :message (ex-message e)
+                                                    :where "env"}))))
+                {:refs {} :invalid []}
+                env)
+        resolved (common/resolve-env parsed)
+        issues (concat invalid (common/issues-in "env" resolved))
+        secrets (common/secret-keys parsed env)]
+    (if (seq issues)
+      (common/unresolved-op (-> (select-keys base [:tool :kind :id :project])
+                                (assoc :target (:file base)))
+                            issues)
+      (when-let [op (plan/json-set-op (assoc base
+                                             :value (:values resolved)
+                                             :risk (if (seq secrets) :secret :low)
+                                             :note (when (seq secrets) note)))]
+        (cond-> op
+          (seq (:diffs op))
+          (update :diffs (partial mapv (fn [{:keys [before after] :as d}]
+                                         (let [[b a] (common/mask-secrets before after secrets)]
+                                           (assoc d :before b :after a))))))))))
+
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
         kvs (declared-settings settings)
@@ -76,10 +143,13 @@
      ;; keyed by the name agents.edn uses: a reader checking the plan against
      ;; the file they wrote should not have to translate back
      (for [[k [nk v]] kvs
-           :let [op (plan/json-set-op {:tool tool :kind :settings :id k
-                                       :file settings-file :path [nk] :value v
-                                       :report-converged? true
-                                       :summary (str "settings.json " (name nk))})]
+           :let [base {:tool tool :kind :settings :id k
+                       :file settings-file :path [nk]
+                       :report-converged? true
+                       :summary (str "settings.json " (name nk))}
+                 op (if (= :env nk)
+                      (env-setting-op base v "⚠ secret value written into ~/.claude/settings.json")
+                      (plan/json-set-op (assoc base :value v)))]
            :when op]
        op)
      (for [k unsupported]
@@ -159,19 +229,89 @@
 (defn current-mcps []
   (or (:mcpServers (u/read-json runtime-file)) {}))
 
-(defn- desired-shape [m]
-  (u/prune-nils
-   {:type (name (:transport m))
-    :command (:command m)
-    :args (vec (:args m))
-    :url (:url m)}))
+(defn- key-names
+  "Sorted names of an env or header map. Shapes compare names, never values:
+   the value is a secret `claude mcp add` stores and nothing here reads back,
+   while a missing name is a server that cannot authenticate."
+  [m]
+  (not-empty (vec (sort (map u/key-str (keys m))))))
+
+(defn- str-keys
+  "JSON reads a key back as a keyword and a resolved value carries a string:
+   merged as they are, one name would be written twice."
+  [m]
+  (into {} (map (fn [[k v]] [(u/key-str k) v])) m))
+
+(defn declared-names
+  "The env and header names a server declares, kept in the manifest beside
+   it. A name agentctl declared and the declaration has since dropped is
+   agentctl's to remove; a name it never declared was added by hand, and is
+   kept."
+  [m]
+  (u/prune-nils {:env-names (key-names (:env m)) :header-names (key-names (:headers m))}))
+
+(defn- dropped-names
+  "Names under `k` (`:env-names`, `:header-names`) that the manifest entry
+   `old` says agentctl declared, and `m` no longer does. An entry recorded
+   before names were kept says nothing, so nothing is dropped."
+  [old m k]
+  (let [now (set (get (declared-names m) k))]
+    (into #{} (remove now) (get old k))))
+
+(defn- entry-type
+  "The transport an entry is written for. Claude Code infers it when `type`
+   is absent, and so does this."
+  [entry]
+  (or (:type entry) (if (:url entry) "http" "stdio")))
+
+(defn- desired-shape
+  "What `claude mcp add` will write: env for a stdio server, headers for an
+   http one — the other is never passed, so counting it would be drift that
+   no apply can clear. `carried` are the current values kept beside the
+   declared ones (`carried-values`), so their names are part of the entry."
+  [m carried]
+  (let [http? (= :http (:transport m))
+        names (fn [declared] (key-names (merge carried (str-keys declared))))]
+    (u/prune-nils
+     {:type (name (:transport m))
+      :command (:command m)
+      :args (not-empty (vec (:args m)))
+      :url (:url m)
+      :env (when-not http? (names (:env m)))
+      :headers (when http? (names (:headers m)))})))
+
+(defn- carried-values
+  "The env (stdio) or header (http) values in the current entry that the
+   declaration does not name. `claude mcp add` cannot edit an entry, so an
+   update is a remove and an add, and a value left off the add is gone: an
+   `Authorization` header or an env var added by hand would be wiped by an
+   unrelated change. They are passed to the add as they are, except a name
+   agentctl declared and the declaration has since dropped."
+  [m cur old]
+  (let [http? (= :http (:transport m))
+        declared (if http? (:headers m) (:env m))]
+    (apply dissoc (str-keys (if http? (:headers cur) (:env cur)))
+           (concat (map u/key-str (keys declared))
+                   (dropped-names old m (if http? :header-names :env-names))))))
 
 (defn- current-shape [entry]
   (u/prune-nils
-   {:type (or (:type entry) (if (:url entry) "http" "stdio"))
+   {:type (entry-type entry)
     :command (:command entry)
-    :args (vec (:args entry))
-    :url (:url entry)}))
+    :args (not-empty (vec (:args entry)))
+    :url (:url entry)
+    :env (key-names (:env entry))
+    :headers (key-names (:headers entry))}))
+
+(defn- resolve-mcp
+  "A server's env and headers with every ref resolved, and the refs that did
+   not resolve: a server holding one is not written, and not approved."
+  [m]
+  (let [env (common/resolve-env (:env m))
+        headers (common/resolve-env (:headers m))]
+    {:env env
+     :headers headers
+     :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))}))
 
 (defn mcp-ops [cfg st]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
@@ -181,28 +321,41 @@
      (for [[id m] desired
            :let [nm (u/kw->str id)
                  cur (get current (keyword nm))
-                 want (desired-shape m)
+                 carried (carried-values m cur (state/entry st tool :mcps id))
+                 ;; the declared names plus the ones carried over: drift is a
+                 ;; declared name the entry lacks, or a dropped one it still has
+                 want (desired-shape m carried)
                  have (some-> cur current-shape)
-                 env (common/resolve-env (:env m))
-                 headers (common/resolve-env (:headers m))]
-           :when (not= (u/norm want) (u/norm have))]
-       (plan/op {:action (if cur :update :create)
-                 :tool tool :kind :mcps :id id
-                 :target runtime-file
-                 :summary (common/mcp-summary m)
-                 :note (when (common/holds-secret? (merge (:env m) (:headers m)))
-                         "⚠ secret value stored in ~/.claude.json")
-                 :diffs (plan/field-diffs (or have {}) want)
-                 :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
-                 :exec! (fn []
-                          (when cur (claude-sh "claude" "mcp" "remove" "--scope" "user" nm))
-                          (if (= :http (:transport m))
-                            (claude-sh (concat ["claude" "mcp" "add" "--scope" "user"
-                                           "--transport" "http" nm (:url m)]
-                                          (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers))))
-                            (claude-sh (concat ["claude" "mcp" "add" "--scope" "user" nm]
-                                          (mapcat (fn [[k v]] ["-e" (str k "=" v)]) (:values env))
-                                          ["--"] [(:command m)] (:args m)))))}))
+                 {:keys [env headers issues]} (resolve-mcp m)]
+           ;; an unresolved secret is reported even when the shapes agree: the
+           ;; value cannot be checked, so the run cannot call itself converged
+           :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
+       (if (seq issues)
+         (common/unresolved-op {:tool tool :kind :mcps :id id :target runtime-file} issues)
+         (plan/op {:action (if cur :update :create)
+                   :tool tool :kind :mcps :id id
+                   :target runtime-file
+                   :summary (common/mcp-summary m)
+                   :note (when (common/holds-secret? (merge (:env m) (:headers m)))
+                           "⚠ secret value stored in ~/.claude.json")
+                   :diffs (plan/field-diffs (or have {}) want)
+                   :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
+                   :exec! (fn []
+                            (when cur
+                              ;; the remove drops what the add may fail to put back
+                              (u/backup! runtime-file)
+                              (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                            (claude-ok!
+                             (vec (if (= :http (:transport m))
+                                    (concat ["claude" "mcp" "add" "--scope" "user"
+                                             "--transport" "http" nm (:url m)]
+                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)])
+                                                    (merge carried (:values headers))))
+                                    (concat ["claude" "mcp" "add" "--scope" "user" nm]
+                                            (mapcat (fn [[k v]] ["-e" (str k "=" v)])
+                                                    (merge carried (:values env)))
+                                            ["--"] [(:command m)] (:args m))))
+                             (concat (vals (:values env)) (vals (:values headers)) (vals carried))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
@@ -213,7 +366,7 @@
                  :target runtime-file
                  :summary "removed from agents.edn"
                  :risk :medium
-                 :exec! (fn [] (claude-sh "claude" "mcp" "remove" "--scope" "user" (u/kw->str id)))})))))
+                 :exec! (fn [] (claude-ok! ["claude" "mcp" "remove" "--scope" "user" (u/kw->str id)]))})))))
 
 ;; ---------------------------------------------------------------- skills
 
@@ -298,16 +451,6 @@
                    (local-uri? uri) {:source "directory" :path (uri-path uri)}
                    (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
                    :else {:source "git" :url uri})}))
-
-(defn- ok!
-  "Turn a non-zero CLI exit into a real failure so apply! reports it instead
-   of writing settings for a plugin that was never installed."
-  [{:keys [exit err out]} argv]
-  (when-not (zero? exit)
-    (throw (ex-info (str (str/join " " argv) " failed: "
-                         (first (remove str/blank? [err out])))
-                    {:exit exit :argv argv})))
-  true)
 
 (def installed-plugins-file (str home "/plugins/installed_plugins.json"))
 
@@ -431,21 +574,37 @@
     (concat (keep plugin-install-op desired)
             (keep plugin-uninstall-op managed))))
 
+(def ^:private transport-keys
+  "The keys that say how Claude Code reaches a server, for any transport."
+  [:type :command :args :url :env :headers])
+
 (defn- mcp-json-entry
-  "Merged onto whatever .mcp.json already holds: the file is checked into the
-   project and may carry servers agentctl knows nothing about."
-  [m cur]
-  (let [env (common/resolve-env (:env m))
-        headers (common/resolve-env (:headers m))]
-    (merge cur
+  "The entry as Claude Code reads it, in `.mcp.json` or a project's local
+   scope. On the same transport the declared fields are merged onto what is
+   there, so an env var, header or unmodelled key the user added survives:
+   neither file is agentctl's alone. The declared type, command, args and url
+   are the server itself and replace what was there.
+
+   A transport change replaces every transport key instead. Merged, a stdio
+   server's command, args and env would stay beside the new url, and the
+   entry would describe two servers at once.
+
+   An env var or header agentctl declared and the declaration has since
+   dropped (`old`, the server's manifest entry) is removed: merged, a
+   dropped secret would stay in the file with no drift to show it."
+  [m cur env headers old]
+  (let [same? (and cur (= (name (:transport m)) (entry-type cur)))
+        kept (if same? cur (apply dissoc cur transport-keys))
+        keep-map (fn [cur-map k] (apply dissoc (str-keys cur-map) (dropped-names old m k)))]
+    (merge (dissoc kept :type :command :args :url :env :headers)
            (:extra m)
            (u/prune-nils
             {:type (name (:transport m))
              :command (:command m)
              :args (not-empty (vec (:args m)))
              :url (:url m)
-             :env (not-empty (merge (:env cur) (:values env)))
-             :headers (not-empty (merge (:headers cur) (:values headers)))}))))
+             :env (not-empty (merge (keep-map (:env kept) :env-names) (:values env)))
+             :headers (not-empty (merge (keep-map (:headers kept) :header-names) (:values headers)))}))))
 
 (defn- project-mcp-target
   "Where a project's server is written. Local scope — the default — is the
@@ -463,25 +622,54 @@
      :label "~/.claude.json (local scope)"
      :shared? false}))
 
-(defn- project-mcp-writes [cfg id proj]
+(defn- declared-secret-keys
+  "Names in a declared env or header map whose value is a credential."
+  [refs-map]
+  (common/secret-keys refs-map (into {} (map (fn [[k r]] [k (if (refs/ref? r) (:ref/raw r) r)])) refs-map)))
+
+(defn- mask-entry-diffs
+  "An MCP entry's diff as a plan may print it. The entry carries resolved
+   values, and rendering masks only a credential-shaped name or value, so a
+   secret under `DOCS_KEY` would print in clear — in the plan and in --json.
+   Values under a declared secret name are masked, and so is every value the
+   change replaces or removes (`common/mask-secrets`)."
+  [op env-ks header-ks]
+  (letfn [(mask [d k ks]
+            (let [b (get (:before d) k)
+                  a (get (:after d) k)
+                  [b' a'] (common/mask-secrets b a ks)]
+              (cond-> d
+                (map? b) (assoc-in [:before k] b')
+                (map? a) (assoc-in [:after k] a'))))]
+    (cond-> op
+      (seq (:diffs op))
+      (update :diffs (partial mapv #(-> % (mask :env env-ks) (mask :headers header-ks)))))))
+
+(defn- project-mcp-writes [cfg st id proj]
   (for [[mid m] (common/project-mcps cfg proj tool)
         :let [{:keys [file path shared?]} (project-mcp-target proj m mid)
+              oid (keyword (str (name id) "/" (name mid)))
               current (get-in (u/read-json file) path)
+              {:keys [env headers issues]} (resolve-mcp m)
               secret? (common/holds-secret? (merge (:env m) (:headers m)))
-              op (plan/json-set-op
-                  {:tool tool :kind :mcps :project id
-                   :id (keyword (str (name id) "/" (name mid)))
-                   :file file
-                   :path path
-                   :value (mcp-json-entry m current)
-                   :risk (if secret? :secret :low)
-                   :summary (common/mcp-summary m)
-                   :note (when (and secret? shared?)
-                           "⚠ secret value written into the project — .mcp.json is usually tracked")})]
+              op (if (seq issues)
+                   (common/unresolved-op {:tool tool :kind :mcps :project id :id oid :target file} issues)
+                   (some-> (plan/json-set-op
+                            {:tool tool :kind :mcps :project id
+                             :id oid
+                             :file file
+                             :path path
+                             :value (mcp-json-entry m current env headers (state/entry st tool :mcps oid))
+                             :risk (if secret? :secret :low)
+                             :summary (common/mcp-summary m)
+                             :note (when (and secret? shared?)
+                                     "⚠ secret value written into the project — .mcp.json is usually tracked")})
+                           (mask-entry-diffs (declared-secret-keys (:env m))
+                                             (declared-secret-keys (:headers m)))))]
         :when op]
     op))
 
-(defn- project-mcp-ops [cfg id proj]
+(defn- project-mcp-ops [cfg st id proj]
   (let [tracked (or (:mcpServers (u/read-json (project-mcp-file proj))) {})]
     (concat
      ;; a copy left behind in .mcp.json still ships the server — and its token —
@@ -497,7 +685,9 @@
                                (when (common/holds-secret?
                                       (:env (get tracked (keyword (u/kw->str mid)))))
                                  ", the copy carries a credential"))}))
-     (project-mcp-writes cfg id proj))))
+     (project-mcp-writes cfg st id proj))))
+
+(defn project-local-settings-file [proj] (str (:path proj) "/.claude/settings.local.json"))
 
 (defn- project-mcp-prune-ops
   "A project's server dropped from agents.edn. The user-wide prune loop skips a
@@ -506,7 +696,11 @@
    moving a server out of a project would leak it forever.
 
    Both scopes are checked because the entry may have been written under either
-   one, and a scope flip is indistinguishable from a removal in the manifest."
+   one, and a scope flip is indistinguishable from a removal in the manifest.
+
+   A `.mcp.json` server whose approval agentctl added (`:approved` in the
+   manifest, see `mcp-approval-op`) loses it too; one the user approved
+   before agentctl did keeps it."
   [cfg st]
   (let [desired (into #{} (for [[pid proj] (:projects cfg)
                                 :when (contains? (:for-tools proj) tool)
@@ -523,15 +717,62 @@
           ;; Version 2 state records the path even after the project declaration
           ;; disappears. Version 1 cannot recover a path it never stored.
           :when proj
-          [file path] (let [local [runtime-file [:projects (keyword (:path proj)) :mcpServers (keyword (name id))]]
-                            repo [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
-                        (case (:scope old) :local [local] :project [repo] [local repo]))
-          :let [op (plan/json-unset-op {:tool tool :kind :mcps :id id
-                                        :project (keyword (namespace id))
-                                        :file file :path path
-                                        :summary "removed from agents.edn"})]
-          :when op]
+          op (concat
+              (for [[file path] (let [local [runtime-file [:projects (keyword (:path proj)) :mcpServers (keyword (name id))]]
+                                      repo [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
+                                  (case (:scope old) :local [local] :project [repo] [local repo]))
+                    :let [op (plan/json-unset-op {:tool tool :kind :mcps :id id
+                                                  :project (keyword (namespace id))
+                                                  :file file :path path
+                                                  :summary "removed from agents.edn"})]
+                    :when op]
+                ;; the entry carries resolved secrets, and the declaration that
+                ;; named them is gone: print none of its env or header values
+                (update op :diffs (partial mapv (fn [d] (update d :before #(cond-> %
+                                                                              (:env %) (update :env common/mask-all)
+                                                                              (:headers %) (update :headers common/mask-all)))))))
+              (when (and (:approved old) (= :project (:scope old)))
+                (some-> (plan/json-array-unset-op {:tool tool :kind :mcps :id id
+                                                   :project (keyword (namespace id))
+                                                   :file (project-local-settings-file proj)
+                                                   :path [:enabledMcpjsonServers]
+                                                   :old (name id)
+                                                   :summary "approval agentctl added, removed with the server"})
+                        vector)))]
       op)))
+
+(defn- mcp-approval-op
+  "Approve the project's `.mcp.json` servers, so Claude Code starts them
+   without asking. Only those need approving: a local-scope server is already
+   the user's own. Claude Code honours `enabledMcpjsonServers` in the
+   project's `.claude/settings.local.json`; the same key under the project in
+   `~/.claude.json` is migrated into that file and deleted on the next
+   `claude` run, so written there it came back as drift after every run.
+
+   The list is shared with the user and with Claude Code's own approval
+   prompt, so declared servers are added to it and nothing else is touched.
+   `:approves` names the servers this op adds: `core/sync-state!` marks them
+   `:approved` in the manifest, and `project-mcp-prune-ops` takes the name
+   out again when the server goes. A name already in the list was approved
+   by someone else, and stays. It is an MCP op, not a settings one: it
+   belongs with the servers it approves, and stays out of the settings
+   ownership pass, which records keys a declared setting owns.
+
+   A server held back on an unresolved secret is not approved: nothing was
+   written to `.mcp.json` for it, and an approval would start whatever entry
+   is there under that name."
+  [cfg id proj]
+  (when-let [shared (not-empty (keys (filter (fn [[_ m]] (and (= :project (:scope m))
+                                                              (empty? (:issues (resolve-mcp m)))))
+                                             (common/project-mcps cfg proj tool))))]
+    (when-let [op (plan/json-union-op {:tool tool :kind :mcps :project id
+                                       :id (keyword (name id) "enabledMcpjsonServers")
+                                       :file (project-local-settings-file proj)
+                                       :path [:enabledMcpjsonServers]
+                                       :values (mapv u/kw->str (sort shared))
+                                       :risk :medium
+                                       :summary "approve the project's .mcp.json servers"})]
+      (assoc op :approves (mapv #(keyword (name id) %) (:added op))))))
 
 (defn- project-ops-for [cfg id proj]
   (let [pfile (project-settings-file proj)
@@ -557,11 +798,15 @@
      ;; per-project settings file: model / output style / permissions
      (keep identity
            (concat
-            (for [[k v] kvs]
-              (plan/json-set-op {:tool tool :kind :projects :project id
-                                 :id (keyword (str (name id) "/" (name k)))
-                                 :file pfile :path [k] :value v
-                                 :summary (str (u/tilde pfile) " " (name k))}))
+            (for [[k v] kvs
+                  :let [base {:tool tool :kind :projects :project id
+                              :id (keyword (str (name id) "/" (name k)))
+                              :file pfile :path [k]
+                              :summary (str (u/tilde pfile) " " (name k))}]]
+              (if (= :env k)
+                (env-setting-op base v (str "⚠ secret value written into the project — "
+                                            ".claude/settings.json is usually tracked"))
+                (plan/json-set-op (assoc base :value v))))
             ;; one op per declared bucket: writing the whole :permissions map
             ;; would drop defaultMode / additionalDirectories the CLI put there
             (for [[bucket rules] (:permissions proj)]
@@ -570,7 +815,7 @@
                                  :file pfile :path [:permissions bucket] :value rules
                                  :compare-as (when (coll? rules) :set)
                                  :summary (str (u/tilde pfile) " permissions." (u/kw->str bucket))}))))
-     ;; trust and MCP enablement live in the runtime blob
+     ;; trust lives in the runtime blob
      (keep identity
            [(when (some? (:trusted proj))
               (plan/json-set-op {:tool tool :kind :projects :project id
@@ -580,17 +825,7 @@
                                  :value (boolean (:trusted proj))
                                  :risk :medium
                                  :summary "trust project in ~/.claude.json"}))
-            ;; only servers that live in .mcp.json need enabling: a local-scope
-            ;; server is already the user's own and this list never names it
-            (when-let [shared (not-empty (keys (filter (fn [[_ m]] (= :project (:scope m)))
-                                                       (common/project-mcps cfg proj tool))))]
-              (plan/json-set-op {:tool tool :kind :projects :project id
-                                 :id (keyword (str (name id) "/mcp"))
-                                 :file runtime-file
-                                 :path [:projects (keyword (:path proj)) :enabledMcpjsonServers]
-                                 :value (mapv u/kw->str (sort shared))
-                                 :risk :medium
-                                 :summary "enable project MCP servers"}))]))))
+            (mcp-approval-op cfg id proj)]))))
 
 (defn project-skills-dir [proj] (str (:path proj) "/.claude/skills"))
 
@@ -605,7 +840,7 @@
    (mapcat (fn [[id proj]]
              (when (contains? (:for-tools proj) tool)
                (concat (project-ops-for cfg id proj)
-                       (project-mcp-ops cfg id proj)
+                       (project-mcp-ops cfg st id proj)
                        (project-skill-ops cfg id proj st))))
            (:projects cfg))
    (project-mcp-prune-ops cfg st)))

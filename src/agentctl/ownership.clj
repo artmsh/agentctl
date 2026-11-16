@@ -1,6 +1,7 @@
 (ns agentctl.ownership
   "Resolved placement records for entity DSL resources, independent of discovery."
   (:require [agentctl.config :as config]
+            [agentctl.adapters.common :as common]
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.pi :as pi]
@@ -84,7 +85,11 @@
                     (:array-element o) (plan/json-array-unset-op (assoc args :old project-path))
                     (and (= :settings kind) (= "$schema" (last path))
                          (or (seq (owners cfg o))
-                             (seq (owners cfg (assoc o :kind :permissions))))) nil
+                             (seq (owners cfg (assoc o :kind :permissions)))
+                             ;; the claude adapter writes the user settings
+                             ;; file's $schema whenever it runs: pruned here, it
+                             ;; came straight back on the next apply!
+                             (= target claude/settings-file))) nil
                     (and (= :settings kind) ((desired-fields cfg o) (last path))) nil
                     (str/ends-with? target ".json")
                     ;; Trust arrays contain unmanaged members too: subtract only
@@ -108,5 +113,10 @@
                     (or (str/ends-with? target ".yaml") (str/ends-with? target ".yml"))
                     (plan/yaml-remove-op args)
                     :else nil)]
-           (when op (assoc op :action :delete :project-path project-path :array-element (:array-element o)
-                          :ownership-prune true))))) (:writes st))))
+           (when op
+             (cond-> (assoc op :action :delete :project-path project-path :array-element (:array-element o)
+                            :ownership-prune true)
+               ;; a settings `env` holds resolved secrets, and the declaration
+               ;; that named them is gone: print none of its values
+               (= "env" (some-> path last u/kw->str))
+               (update :diffs (partial mapv #(update % :before common/mask-all)))))))) (:writes st))))

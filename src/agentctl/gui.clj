@@ -159,15 +159,26 @@
               ops (core/build-plan cfg st opts)
               cfg (assoc cfg :planned-ops ops)
               changes (filter plan/mutating? ops)
+              ;; held back on an unresolved secret: reported with the failures,
+              ;; because the run did not converge on them either
+              unresolved (map #(assoc % :error (:summary %)) (core/unresolved ops))
+              rows (fn [failed] (mapv (fn [f] {:tool (name (:tool f))
+                                               :kind (name (:kind f))
+                                               :id (u/kw->str (:id f))
+                                               :error (:error f)})
+                                      failed))
               config-backup (when (u/exists? path) (u/backup! path))]
           (u/write-text! path text)
           (if (empty? changes)
-            (do (state/save! (core/sync-state! st cfg #{} (when (core/scoped? opts) #{})))
-                (merge pre {:status 200 :applied 0 :failed []
+            (do (state/save! (core/sync-state! st cfg (set (mapcat core/op-keys unresolved))
+                                                (when (core/scoped? opts) #{})))
+                (merge pre {:status (if (seq unresolved) 500 200) :applied 0
+                            :failed (rows unresolved)
                             :saved (u/tilde path)
                             :config-backup (some-> config-backup u/tilde)
                             :backups (u/tilde (u/backup-dir))}))
-            (let [{:keys [done failed]} (core/converge! cfg st opts ops)]
+            (let [{:keys [done failed]} (core/converge! cfg st opts ops)
+                  failed (concat failed unresolved)]
               ;; ownership is never claimed for a resource whose creation
               ;; failed — a later prune would delete something we never made;
               ;; on a scoped run (-t/-k/-p/--only/--user) a data-carrying id (hooks) only
@@ -183,11 +194,7 @@
                       :saved (u/tilde path)
                       :config-backup (some-> config-backup u/tilde)
                       :backups (u/tilde (u/backup-dir))
-                      :failed (mapv (fn [f] {:tool (name (:tool f))
-                                             :kind (name (:kind f))
-                                             :id (u/kw->str (:id f))
-                                             :error (:error f)})
-                                    failed)}))))))))
+                      :failed (rows failed)}))))))))
 
 (defn- with-form
   "The controls and the dry run answer the same buffer, so they travel together

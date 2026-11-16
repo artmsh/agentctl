@@ -36,8 +36,10 @@
     "  agentctl <command> [options]"
     ""
     "COMMANDS"
-    "  apply            Show what would change. Read-only. Exit 2 when drift exists."
-    "  apply!           Converge the environment onto agents.edn."
+    "  apply            Show what would change. Read-only. Exit 2 when drift exists"
+    "                   or (claude) a secret did not resolve."
+    "  apply!           Converge the environment onto agents.edn. Exit 1 when a"
+    "                   change failed or (claude) a secret did not resolve."
     "  validate         Check the config and the environment; print a report."
     "  import           Show the agents.edn that the current environment implies."
     "  import!          Write that agents.edn (existing file is backed up first)."
@@ -212,6 +214,16 @@
           (println "aborted")
           (System/exit 1))))))
 
+(defn- report-unresolved!
+  "Name every resource apply! held back on an unresolved secret. The rest of
+   the run applied; these did not, and the exit status says so."
+  [unresolved]
+  (when (seq unresolved)
+    (println (format "\n%d resource(s) not written — a secret did not resolve:" (count unresolved)))
+    (doseq [o unresolved]
+      (println "  ⚠" (name (:tool o)) (name (:kind o)) (u/kw->str (:id o)) "—"
+               (str/replace (:summary o) #"^⚠ " "")))))
+
 (defn cmd-apply-host
   "`apply`/`apply!` for one declared host. The working directory says nothing
    about another machine and `-p` has no project there to select, so neither
@@ -296,6 +308,7 @@
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)
+          unresolved (core/unresolved ops)
           ;; a selector that names nothing narrows the run to nothing, which
           ;; reads as converged — in either output, so --json carries them too
           warnings (concat
@@ -319,6 +332,8 @@
         (doseq [w warnings] (println (str "  ⚠ " w)))
         (when-let [missing (seq (core/missing-tools cfg opts))]
           (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
+        ;; a resource held back on an unresolved secret is a warning: it has
+        ;; not converged, and "no changes" would say it had
         (if (plan/show-plan? ops opts)
           (println (plan/render-plan ops opts))
           (println "\nno changes — environment matches agents.edn"))
@@ -327,12 +342,16 @@
       (cond
         (not mutate?)
         (do (when (:json opts) (print-json doc))
-            (System/exit (if (seq changes) 2 0)))
+            (System/exit (if (or (seq changes) (seq unresolved)) 2 0)))
 
         (empty? changes)
-        (do (state/save! (core/sync-state! st cfg #{} (when (core/scoped? opts) #{})))
-            (when (:json opts) (print-json (assoc doc :applied (applied->data [] []))))
-            (System/exit 0))
+        (do (state/save! (core/sync-state! st cfg (set (mapcat core/op-keys unresolved))
+                                            (when (core/scoped? opts) #{})))
+            ;; held-back ops are in the document's ops, flagged warn
+            (if (:json opts)
+              (print-json (assoc doc :applied (applied->data [] [])))
+              (report-unresolved! unresolved))
+            (System/exit (if (seq unresolved) 1 0)))
 
         :else
         (do
@@ -343,7 +362,7 @@
             ;; value overwritten if this run actually wrote it — see
             ;; `core/sync-state!`
             (state/save! (core/sync-state! st cfg
-                                            (set (mapcat core/op-keys failed))
+                                            (set (mapcat core/op-keys (concat failed unresolved)))
                                             (when (core/scoped? opts)
                                               (set (mapcat core/op-keys done)))))
             (if (:json opts)
@@ -355,8 +374,9 @@
                                  (if (seq failed) (str ", " (count failed) " failed") "")))
                 (doseq [f failed]
                   (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+                (report-unresolved! unresolved)
                 (println (str "backups: " (u/tilde (u/backup-dir))))))
-            (System/exit (if (seq failed) 1 0))))))))
+            (System/exit (if (or (seq failed) (seq unresolved)) 1 0))))))))
 
 (defn cmd-validate [opts]
   (let [cfg (load! opts)

@@ -239,17 +239,33 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:scope` | Where it lands | For |
 | --- | --- | --- |
 | `:local` (default for a project's servers) | `~/.claude.json`, under the project's entry | anything with a credential; anything only you run |
-| `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
+| `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
 Codex, Pi and OMP have no project-level MCP config; they report the skip as a
 warning rather than silently installing the server user-wide.
 
+A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
+the project's `.claude/settings.local.json`, the list Claude Code reads, so it
+starts without the approval prompt. Names already there, added by hand or by
+that prompt, are kept. A name agentctl added is removed again when its server is
+dropped or leaves `:project` scope; the manifest records which names those are,
+so a server the user had approved before agentctl declared it stays approved. A
+server held back because a secret did not resolve is not approved either:
+nothing was written for it in `.mcp.json`. Older releases wrote the list under
+the project in `~/.claude.json`; Claude Code moves that copy into
+`settings.local.json` and deletes it on its next run, and agentctl no longer
+plans it.
+
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` reference that resolves at apply time, or a
 token written out literally — puts that credential in the repo. The plan marks
 it `⚠ secret value written into the project`, and `validate` scans every
-project's `.mcp.json`.
+project's `.mcp.json`. In either project placement the plan, and `apply --json`,
+print a resolved env or header secret masked (`"plai…34"`, marked `(changed)`
+when a rotation masks the same), and so is every old env or header value a change
+replaces or removes, whatever the new declaration says: it may have come from a
+reference the declaration no longer makes.
 
 A server written at local scope that is *also* still declared in the project's
 `.mcp.json` is reported, not deleted — agentctl never wrote that file and will
@@ -265,6 +281,78 @@ Claude Code still offers the `.mcp.json` definition.
 
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
+
+Both project placements are merged onto the entry already there, so an env
+var, header or unmodelled key added by hand survives an update; the declared
+type, command, args and url replace their old values. An env var or header
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares, so a dropped secret does not
+stay in the file. A transport change
+(stdio to http, or back) replaces every transport key instead: merged, the
+stdio server's `command`, `args` and `env` would stay beside the new `url`. The
+plan lists the keys that go:
+
+```
+~ projects/sample mcps/docs
+      - args: ["docs-mcp"]
+      - command: "/usr/local/bin/docs-mcp"
+      ~ type: "stdio" -> "http"
+      + url: "https://docs.example.com/mcp"
+```
+
+## Unresolved secrets
+
+A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
+`:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
+that is resolved when `apply!` runs. A settings `env` is where a project's
+`.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
+value:
+
+```clojure
+{:settings [{:env {"DOCS_API_KEY" "!bw://vendor/docs-api-key"} :acli [:claude] :in "projects/sample"}]}
+```
+
+The resolved value is what lands in `settings.json`, so the plan flags the op
+`⚠ secret value written into the project` (or into `~/.claude/settings.json`)
+and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
+same on both sides is marked `(changed)`. An old value that a change replaces
+or drops is masked too, even when the new value is a plain literal. A project's
+`.claude/settings.json` is usually committed; `.claude/settings.local.json` is
+the private one.
+
+When a reference does not resolve — the vault is locked, the variable is unset,
+the Bitwarden field is empty or holds the text `null`, the variable, file or
+command yields nothing but whitespace, the reference is malformed — Claude's server, or the settings `env` object, is not written at
+all, in any scope. Writing the rest of it would leave a server that is
+configured and cannot authenticate, and because the missing value would then be
+missing from the desired entry too, the next plan would report no drift. The plan
+names the server, the key and the reason instead:
+
+```
+= mcps/docs
+    ⚠ secret unresolved: bitwarden vault locked (headers.api-key) — nothing written
+```
+
+Every other change in the run still applies. `apply` exits 2 while such a server
+remains and `apply!` exits 1, listing what it held back, so a partial run is never
+reported as converged. A server held back this way is not recorded as owned: one
+that never got written cannot be pruned later, and a hand-made server of the same
+name stays the user's.
+
+For a user-wide server, whose secret `claude mcp add` stores and agentctl does
+not read back, drift is decided by the env and header *names*: a declared name
+missing from `~/.claude.json` is drift, a changed value is not. A name added by
+hand, such as an `Authorization` header, is not drift either. `claude mcp add`
+cannot edit an entry, so an update removes the server and adds it again, after
+backing up `~/.claude.json`; the add carries every env var (stdio) or header
+(http) the declaration does not name, so a hand-added one survives. A name
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares.
+
+`validate` checks the same references before anything runs: every MCP server's
+`:env` and `:headers` and Claude's settings `:env`, user-wide and per project.
+One a locked vault keeps is reported `?` (unknown, not a failure); one that is
+missing, emptied or malformed is an error (`✗`) and makes `validate` exit 1.
 
 ## Kimi Code
 
