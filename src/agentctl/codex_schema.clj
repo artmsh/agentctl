@@ -86,6 +86,12 @@
    load error (`cannot extend unsupported built-in profile`)."
   #{":read-only" ":workspace"})
 
+(def default-builtin-profiles
+  "What `default_permissions` (`:sandbox`) may name with a leading colon in
+   0.169.0; anything else with one is `unknown built-in profile`. `extends`
+   accepts only `builtin-profiles`."
+  #{":read-only" ":workspace" ":danger-full-access"})
+
 (def filesystem-modes #{"read" "write" "none" "deny"})
 
 (defn- s-of [v] (when (or (keyword? v) (string? v)) (u/key-str v)))
@@ -217,13 +223,14 @@
      (when (contains? settings :hooks)
        (hook-findings (:hooks settings) (conj where :hooks)))
      (when (contains? settings :permission-profiles)
-       (concat
-        (profile-findings (:permission-profiles settings) (conj where :permission-profiles))
-        ;; codex refuses to start on [permissions] tables with no default
-        (when (and (seq (:permission-profiles settings)) (not (contains? settings :sandbox)))
-          [[:warn (conj where :permission-profiles)
-            (str "codex will not start with [permissions] profiles and no default_permissions"
-                 " — declare :sandbox (agentctl writes the profiles only if config.toml already names one)")]]))))))
+       (profile-findings (:permission-profiles settings) (conj where :permission-profiles)))
+     ;; whether :sandbox names a profile config.toml will hold depends on the
+     ;; file and on what agentctl owns in it: `codex/permission-findings`
+     (let [s (s-of (:sandbox settings))]
+       (when (and s (str/starts-with? s ":") (not (default-builtin-profiles s)))
+         [[:error (conj where :sandbox)
+           (str (pr-str s) " is no built-in profile — codex has "
+                (str/join ", " (sort default-builtin-profiles)))]])))))
 
 (defn errors
   "The error messages `findings` has for `settings`, joined, or nil."

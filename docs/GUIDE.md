@@ -140,8 +140,13 @@ and hosts are strings; field names are keywords. `extends` names `:read-only`,
 `:workspace` or another profile. Filesystem keys must be absolute, start with
 `~/` or name a `:special` root, and map to `read`, `write`, `none` or `deny`, or
 to a map of subpaths. Codex refuses to start when profiles exist without a
-default, so declare `:sandbox` too; without it agentctl writes no profile
-unless `config.toml` already names one. Import brings existing profiles in.
+default, or when the default names neither a profile nor a built-in
+(`:read-only`, `:workspace`, `:danger-full-access`). `validate` and `apply`
+therefore check `config.toml` as it would be after the apply: declared
+profiles, plus those agentctl will not prune. A plan that breaks either rule
+is refused before anything is written, for example dropping `:sandbox` while
+a profile stays, or dropping the profile `:sandbox` names. Drop both together.
+Import brings existing profiles in.
 
 `codex sandbox -P local-dev -- touch <path>/x` checks a grant without a model or
 login. `:workspace` already allows the temp directories, so test an undeclared

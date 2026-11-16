@@ -186,20 +186,76 @@
                                    :id-for #(op-id "profile-" (cons nm %))})))
           (sort-by (comp str key) profiles)))
 
-(defn- default-permissions?
-  "Does config.toml already name a default profile? Codex will not start
-   with `[permissions]` tables and none."
-  []
-  (some? (get (toml/read-toml-lenient config-file) "default_permissions")))
+(defn- owned-paths
+  "`[table… key]` for every key agentctl recorded writing in config.toml."
+  [st]
+  (for [[_ w] (:writes st)
+        :when (and (= tool (:tool w)) (= config-file (:target w)))
+        d (:diffs w)]
+    (conj (mapv u/kw->str (:path w)) (u/kw->str (:key d)))))
+
+(defn- leaves [m prefix]
+  (if (and (map? m) (seq m))
+    (mapcat (fn [[k v]] (leaves v (conj prefix k))) m)
+    [prefix]))
+
+(defn permissions-after
+  "The default profile and the profiles config.toml holds once this apply is
+   done: what is declared, plus what is on disk and will not be pruned —
+   anything agentctl did not write, and under the legacy `:executors` form,
+   which never prunes, everything."
+  [settings st entity-dsl?]
+  (let [current (toml/read-toml-lenient config-file)
+        owned (if entity-dsl? (vec (owned-paths st)) [])
+        owned? (fn [leaf] (some #(and (<= (count %) (count leaf)) (= % (subvec leaf 0 (count %)))) owned))
+        declared (set (map u/key-str (keys (:permission-profiles settings))))
+        kept (set (for [[p m] (get current "permissions")
+                        :when (and (not (declared p)) (not-every? owned? (leaves m ["permissions" p])))]
+                    p))]
+    {:default (cond (contains? settings :sandbox) (some-> (:sandbox settings) u/key-str)
+                    (owned? ["default_permissions"]) nil
+                    :else (get current "default_permissions"))
+     :declared declared
+     :kept kept
+     :profiles (into declared kept)
+     :involved? (boolean (or (contains? settings :sandbox) (seq declared)
+                             (some #(#{"permissions" "default_permissions"} (first %)) owned)))}))
+
+(defn permission-findings
+  "[level where message] for what Codex 0.169.0 would make of config.toml's
+   permissions after this apply: it refuses to start on profiles with no
+   default, on a default naming no profile the file holds, and on an
+   unknown built-in. Checked only when agentctl touches permissions, so a
+   file broken by hand does not block an unrelated setting."
+  [settings st entity-dsl?]
+  (let [{:keys [default declared kept profiles involved?]} (permissions-after settings st entity-dsl?)
+        names (str "declared profiles: " (if (seq declared) (str/join ", " (sort declared)) "none")
+                   (when (seq kept) (str "; left in config.toml: " (str/join ", " (sort kept))))
+                   "; built-in: " (str/join ", " (sort schema/default-builtin-profiles)))
+        error (fn [msg] [[:error [:executors :codex :sandbox] (str "codex would refuse config.toml: " msg " (" names ")")]])]
+    (when involved?
+      (cond
+        (and (seq profiles) (nil? default))
+        (error "it would hold [permissions] profiles and no default_permissions — declare :sandbox naming one")
+        (nil? default) nil
+        (str/starts-with? default ":")
+        (when-not (schema/default-builtin-profiles default)
+          (error (str "default_permissions " (pr-str default) " is no built-in profile")))
+        (not (profiles default))
+        (error (str "default_permissions " (pr-str default) " names no profile it would hold"))))))
 
 (def nested-settings
   "Declared settings with an op of their own rather than a root key."
   [:keymap :presets :status-line :permission-profiles :hooks])
 
-(defn settings-ops [cfg]
+(defn settings-ops
+  ([cfg] (settings-ops cfg nil))
+  ([cfg st]
   (let [settings (common/settings-for cfg tool)
         _ (when-let [e (schema/errors settings [:executors :codex])]
             (throw (ex-info (str "codex settings: " e) {:path [:executors :codex]})))
+        _ (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg))))]
+            (throw (ex-info (str/join "; " (map last es)) {:path [:executors :codex :sandbox]})))
         ;; Claude's status line is a command object; in a unified settings
         ;; row it reaches codex too, and stays an unsupported setting here
         footer? (schema/status-line? (:status-line settings))
@@ -215,16 +271,11 @@
      bindings
      (preset-ops (:presets settings))
      (when footer? (keep identity [(status-line-op (:status-line settings))]))
-     (when-let [profiles (not-empty (:permission-profiles settings))]
-       (if (or (contains? settings :sandbox) (default-permissions?))
-         (permission-profile-ops profiles config-file)
-         [(plan/op {:action :noop :tool tool :kind :settings :id :permission-profiles :warn true
-                    :summary (str "permission profiles not written: codex will not start with them"
-                                  " and no default_permissions — declare :sandbox")})]))
+     (permission-profile-ops (:permission-profiles settings) config-file)
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")
-                 :warn true})))))
+                 :warn true}))))))
 
 ;; ---------------------------------------------------------------- hooks
 
@@ -539,7 +590,7 @@
 ;; ---------------------------------------------------------------- entry
 
 (defn plan [cfg state]
-  (concat (settings-ops cfg)
+  (concat (settings-ops cfg state)
           (hook-ops cfg state)
           (mcp-ops cfg state)
           (provider-ops cfg)

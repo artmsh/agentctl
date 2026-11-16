@@ -148,4 +148,44 @@ c=$(code_of run apply! -f "$SB/d.edn" --all -t codex -y)
 toml 'assert "presets" not in t.get("tui", {}), t' || fail "the dropped slot was not removed whole"
 grep -q 'tui.presets' "$CONF" && fail "a bare [tui.presets.5] header was left behind"
 
+echo "6. a plan that would leave codex unable to start is refused, and config.toml stays as it was"
+printf 'model = "m-a"\n' > "$CONF"
+cat > "$SB/e.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a" :sandbox "dev"
+             :permission-profiles {:dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}}}]}
+EDN
+c=$(code_of run apply! -f "$SB/e.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! exited $c"; }
+toml 'assert t["default_permissions"] == "dev" and t["permissions"]["dev"]["extends"] == ":read-only", t' \
+  || fail "profile and default not written"
+cp "$CONF" "$SB/before.toml"
+refused() {  # edn-without, expected message
+  printf '%s\n' "$1" > "$SB/e2.edn"
+  for cmd in apply apply!; do
+    c=$(code_of run $cmd -f "$SB/e2.edn" --all -t codex -y)
+    [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "$cmd exited $c, not 1, for: $2"; }
+    grep -q "$2" "$SB/out.txt" || { cat "$SB/out.txt"; fail "$cmd does not say: $2"; }
+    cmp -s "$CONF" "$SB/before.toml" || fail "$cmd changed config.toml for: $2"
+  done
+  c=$(code_of run validate -f "$SB/e2.edn")
+  [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "validate exited $c, not 1, for: $2"; }
+  grep -q "$2" "$SB/out.txt" || { cat "$SB/out.txt"; fail "validate does not say: $2"; }
+}
+# dropping :sandbox would prune the default agentctl wrote; the profile stays
+refused '{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"
+             :permission-profiles {:dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}}}]}' \
+  'no default_permissions'
+# dropping the profile :sandbox names would prune the profile agentctl wrote
+refused '{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a" :sandbox "dev"}]}' \
+  '"dev" names no profile'
+# a name nothing defines: the error lists what could be named
+refused '{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a" :sandbox "nope"
+             :permission-profiles {:dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}}}]}' \
+  'declared profiles: dev; built-in: :danger-full-access, :read-only, :workspace'
+# dropping both leaves nothing that needs a default
+printf '%s\n' '{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]}' > "$SB/e2.edn"
+c=$(code_of run apply! -f "$SB/e2.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "dropping profile and default together exited $c"; }
+toml 'assert "permissions" not in t and "default_permissions" not in t, t' || fail "profile or default left behind"
+
 echo "all codex e2e checks passed"

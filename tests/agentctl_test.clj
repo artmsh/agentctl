@@ -1294,17 +1294,70 @@
       (is (some #(re-find msg (:message %)) (filter #(= :error (:level %)) (config/structural-findings cfg)))
           (pr-str profiles))
       (is (thrown? clojure.lang.ExceptionInfo (doall (codex/settings-ops cfg))))))
-  (testing "a valid profile passes; without :sandbox it warns and, with no default on disk, writes nothing"
+  (testing "a valid profile passes; without :sandbox it is refused unless config.toml already names a default"
     (let [f (str (temp-dir) "/config.toml")
           cfg (config/normalize {:executors {:codex {:permission-profiles
                                                      {:p {:extends ":read-only" :description "d"
                                                           :workspace_roots {"/w" true}
                                                           :filesystem {"/x" "write" "glob_scan_max_depth" 3}}}}}} nil)]
-      (is (= [:warn] (map :level (config/structural-findings cfg))))
+      (is (empty? (config/structural-findings cfg)))
       (with-redefs [codex/config-file f]
-        (is (= [[:noop true]] (map (juxt :action :warn) (codex/settings-ops cfg))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                              (doall (codex/settings-ops cfg))))
+        (is (not (u/exists? f)))
         (u/write-text! f "default_permissions = \"p\"\n")
-        (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough")))))
+        (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough"))))
+  (testing ":sandbox naming an unknown built-in is a config error"
+    (let [cfg (config/normalize {:executors {:codex {:sandbox ":full-access"}}} nil)
+          [e] (filter #(= :error (:level %)) (config/structural-findings cfg))]
+      (is (re-find #":danger-full-access, :read-only, :workspace" (:message e)))
+      (is (empty? (config/structural-findings
+                   (config/normalize {:executors {:codex {:sandbox ":danger-full-access"}}} nil)))))))
+
+(deftest codex-sandbox-must-name-a-profile-config-toml-will-hold
+  ;; codex 0.169.0 refuses to start on [permissions] profiles with no
+  ;; default_permissions, and on a default naming no profile; agentctl must
+  ;; not plan its way into either by pruning what it wrote
+  (let [f (str (temp-dir) "/config.toml")
+        dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}
+        row (fn [m] {:settings [(merge {:id :user-codex :acli [:codex] :in :all :model "m-a"} m)]})
+        full (row {:sandbox "dev" :permission-profiles {:dev dev}})
+        refused (fn [raw st re]
+                  (let [before (slurp f)]
+                    (is (thrown-with-msg? clojure.lang.ExceptionInfo re (codex-drift raw st)))
+                    (is (some #(and (= :error (:level %)) (re-find re (:message %)))
+                              (:findings (validate/run (config/normalize raw "test") {})))
+                        "validate reports it as an error")
+                    (is (= before (slurp f)))))]
+    (u/write-text! f "model = \"m-a\"\n")
+    (with-redefs [codex/config-file f
+                  state/load-state (fn [] state/empty-state)]
+      (let [{st :st} (converge-codex full state/empty-state)]
+        (is (= "dev" (get (toml/read-toml f) "default_permissions")))
+        (with-redefs [state/load-state (constantly st)]
+          (testing "dropping :sandbox while the profile stays: the default agentctl wrote would go"
+            (refused (row {:permission-profiles {:dev dev}}) st #"no default_permissions"))
+          (testing "dropping the profile :sandbox names: the profile agentctl wrote would go"
+            (refused (row {:sandbox "dev"}) st #"\"dev\" names no profile"))
+          (testing "a name nothing defines lists what could be named"
+            (refused (row {:sandbox "nope" :permission-profiles {:dev dev}}) st
+                     #"names no profile.*declared profiles: dev; built-in: :danger-full-access, :read-only, :workspace"))
+          (testing "dropping both is fine: nothing is left that needs a default"
+            (is (seq (codex-drift (row {}) st))))
+          (testing "a built-in default with the profile gone is fine too"
+            (is (seq (codex-drift (row {:sandbox ":workspace"}) st)))))))
+    (testing "a profile written by hand stays, so a default may name it"
+      (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
+      (with-redefs [codex/config-file f]
+        (is (= ["default_permissions"]
+               (map :key (mapcat :diffs (codex-drift (row {:sandbox "mine"}) state/empty-state))))
+            "no error, and only the default to write")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"left in config.toml: mine"
+                              (codex-drift (row {:sandbox "other"}) state/empty-state)))))
+    (testing "a file broken by hand does not block a setting that does not touch permissions"
+      (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
+      (with-redefs [codex/config-file f]
+        (is (seq (codex-drift (row {:model "m-b"}) state/empty-state)))))))
 
 (def vendor-codex-hooks
   "A hooks.json a vendor installer wrote: one SessionStart and one Stop hook."
