@@ -102,6 +102,13 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid TOML"
                             (toml/update-file! f (fn [t] (str t "b = [\n")))))
       (is (= "a = 1\n" (slurp f)))))
+  (testing "a file that did not parse before is written unchecked, not refused, and the reason is said"
+    (let [f (str (temp-dir) "/c.toml") err (java.io.StringWriter.)]
+      (u/write-text! f "a = 1\na = 2\n")
+      (binding [*err* err]
+        (toml/update-file! f (fn [t] (str t "b = 3\n"))))
+      (is (= "a = 1\na = 2\nb = 3\n" (slurp f)))
+      (is (str/includes? (str err) "not TOML 1.0"))))
   (testing "an interpreter without tomllib is never picked, and AGENTCTL_PYTHON gets no fallback"
     (let [dir (temp-dir) old-py (str dir "/python-without-tomllib")]
       (u/write-text! old-py "#!/bin/sh\nexit 1\n")

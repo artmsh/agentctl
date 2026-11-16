@@ -344,14 +344,26 @@
     (when-not (zero? exit)
       (or (last (remove str/blank? (str/split-lines (str err)))) "invalid TOML"))))
 
+(defonce ^:private unchecked-files (atom #{}))
+
 (defn update-file!
-  "Apply `f` to the file text (or \"\" when absent) and write it back. A
-   result that no longer parses is refused rather than written: these files
-   are the CLIs' own, and a broken one stops the CLI from starting."
+  "Apply `f` to the file text (or \"\" when absent) and write it back. An
+   edit that breaks a file which parsed before is refused: these files are
+   the CLIs' own, and a broken one stops the CLI from starting. A file that
+   did not parse to begin with — Codex reads TOML 1.1, a multi-line inline
+   table, which tomllib before python 3.15 rejects — cannot be checked; the
+   edit is written, and the reason said once."
   [path f]
   (let [text (or (u/slurp-safe path) "")
         out (f text)]
-    (when-let [e (and (not= text out) (parse-error out))]
-      (throw (ex-info (str "refusing to write " (u/tilde path) ": the edit would leave invalid TOML (" e ")")
-                      {:path path})))
+    (when (not= text out)
+      (when-let [e (parse-error out)]
+        (if-let [e0 (parse-error text)]
+          (when-not (contains? @unchecked-files path)
+            (swap! unchecked-files conj path)
+            (binding [*out* *err*]
+              (println (str "warning: " (u/tilde path) " is not TOML 1.0 as this python's tomllib reads it ("
+                            e0 "); edit written unchecked"))))
+          (throw (ex-info (str "refusing to write " (u/tilde path) ": the edit would leave invalid TOML (" e ")")
+                          {:path path})))))
     (u/write-text! path out)))

@@ -52,4 +52,13 @@ c=$(AGENTCTL_PYTHON="$SB/bin/old-python" code_of run apply! -f "$SB/a.edn" --all
 [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "a first write without tomllib exited $c, not 1"; }
 [ ! -e "$CONF" ] || fail "config.toml written without an interpreter to check it"
 
+echo "2. a config.toml tomllib cannot read is edited, not refused, and the reason is said"
+# what tomllib before python 3.15 makes of Codex's TOML 1.1; a repeated key
+# is rejected by every version, so the check does not depend on which one runs
+printf 'model = "m-a"\nmodel = "m-a"\n' > "$CONF"
+c=$(code_of run apply! -f "$SB/a.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "an edit to an unreadable config.toml exited $c"; }
+grep -q 'not TOML 1.0' "$SB/out.txt" || { cat "$SB/out.txt"; fail "no warning that the edit went unchecked"; }
+grep -q '^model = "m-b"' "$CONF" || fail "the declared model was not written"
+
 echo "all codex e2e checks passed"
