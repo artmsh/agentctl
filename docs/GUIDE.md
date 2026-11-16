@@ -169,7 +169,11 @@ what you are editing rather than what is on disk. Edits go through the server,
 which rewrites only the node you touched: comments, blank lines and `$name`
 references survive, and a `:#def` binding is shown as the reference it is rather
 than the value it expands to. The tool chips in the header and the `verbose` /
-`show noop` toggles are `--tool`, `-v` and `--show-noop`.
+`show noop` toggles are `--tool`, `-v` and `--show-noop`, and `-t` given to
+`gui` picks the chips it starts with. `-k` and `-p` given to `gui` narrow
+every plan the page shows, which says so under the findings; the page has no
+control for them, so they hold until the server stops. A `-p` that selects no
+declared project is a warning there, as it is in the CLI.
 
 **Apply** is the only thing that writes. It asks for confirmation, then saves
 the buffer to `agents.edn` (backed up first) and converges, exactly as

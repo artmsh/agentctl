@@ -1320,4 +1320,56 @@ set -e
 [ "$code" = 1 ] && grep -q '^unknown command: bogus' "$EF/bogus.txt" && grep -q '^USAGE' "$EF/bogus.txt" \
   || { cat "$EF/bogus.txt"; fail "bogus without --json stopped printing the usage"; }
 
+echo "28. gui -k and -p are the page's starting filter, as -t is"
+GD="$SB/gui-filter"
+mkdir -p "$GD/sub/web"
+cat > "$GD/agents.edn" <<'EDN'
+{:mcps [{:id :inproj :cmd "/bin/echo" :in "sub/web" :acli [:claude]}
+        {:id :global :cmd "/bin/echo" :in :all :acli [:claude]}]
+ :settings [{:model "opus" :acli [:claude] :in :all}]}
+EDN
+(cd "$GD" && AGENTCTL_HOME="$GD" exec "$ROOT/agentctl" gui -f "$GD/agents.edn" -k mcps -p sub/web \
+   --port 0 --no-open) > "$GD/gui.log" 2>&1 &
+GD_PID=$!
+trap 'kill ${GUI_PID:-} ${GD_PID:-} 2>/dev/null || true; rm -rf "$SB"' EXIT
+for _ in $(seq 1 100); do grep -q 'http://127.0.0.1' "$GD/gui.log" && break; sleep 0.1; done
+GD_URL=$(grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$GD/gui.log" | head -1)
+[ -n "$GD_URL" ] || { cat "$GD/gui.log"; fail "gui -k -p did not start"; }
+gd_post() { # gd_post <extra-json> <out>: plan the file's text with extra request fields
+  python3 -c 'import json,sys; d=json.loads(sys.argv[2]); d["text"]=open(sys.argv[1]).read(); print(json.dumps(d))' \
+    "$GD/agents.edn" "$1" > "$GD/req.json"
+  curl -sS -X POST -H "X-Agentctl-Token: ${GD_URL##*t=}" -H 'content-type: application/json' \
+    --data-binary "@$GD/req.json" "${GD_URL%%/\?t=*}/api/plan" > "$2"
+}
+curl -sS -H "X-Agentctl-Token: ${GD_URL##*t=}" "${GD_URL%%/\?t=*}/api/config" > "$GD/config.json"
+python3 - "$GD/config.json" <<'PY' || { cat "$GD/config.json"; fail "gui did not hand the page its -k and -p"; }
+import json, sys
+o = json.load(open(sys.argv[1]))["opts"]
+assert o["kinds"] == ["mcps"] and o["projects"] == ["sub/web"], o
+PY
+# a request that says nothing about kinds or projects gets the command line's
+gd_post '{"tools": ["claude"]}' "$GD/narrow.json"
+python3 - "$GD/narrow.json" <<'PY' || { cat "$GD/narrow.json"; fail "gui ignored -k / -p"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"], d
+assert "inproj" in d["plan"], d["plan"]
+assert "global" not in d["plan"] and "opus" not in d["plan"], d["plan"]
+PY
+# one that does say overrides them, an empty list meaning none
+gd_post '{"tools": ["claude"], "kinds": [], "projects": []}' "$GD/whole.json"
+python3 - "$GD/whole.json" <<'PY' || { cat "$GD/whole.json"; fail "the page could not widen the gui's filter"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"] and "inproj" in d["plan"] and "global" in d["plan"] and "opus" in d["plan"], d["plan"]
+PY
+# a -p that selects nothing is said, as the cli says it
+gd_post '{"tools": ["claude"], "projects": ["sub/nope"]}' "$GD/nope.json"
+python3 - "$GD/nope.json" <<'PY' || { cat "$GD/nope.json"; fail "gui -p naming nothing was not reported"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and "sub/nope" in f["where"] for f in d["findings"]), d["findings"]
+PY
+kill "$GD_PID" 2>/dev/null || true
+
 echo "all agentctl e2e checks passed"

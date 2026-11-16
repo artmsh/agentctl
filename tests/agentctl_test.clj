@@ -1604,6 +1604,13 @@
          (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
                       [:only :user]))))
 
+(deftest gui-command-line-kinds-and-projects-hold-unless-a-request-names-them
+  (let [base (main/parse-args ["gui" "-k" "mcps" "-p" "sub/web"])
+        sel #(select-keys (gui/opts-from-json % base) [:kinds :projects])]
+    (is (= {:kinds #{:mcps} :projects #{:sub/web}} (sel {:tools ["claude"]})))
+    (is (= {:kinds #{} :projects #{}} (sel {:kinds [] :projects []})) "an empty list means none")
+    (is (= {:kinds #{:skills} :projects #{:sub/web}} (sel {:kinds ["skills"]})))))
+
 (deftest each-config-format-has-its-own-kinds
   ;; the DSL refiles every :projects op under :trust/:permissions/:settings, and
   ;; the old format plans no :trust — so -k projects on the one and -k trust on
