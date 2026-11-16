@@ -864,7 +864,10 @@ changing built-in models in place.
                :os :windows           ; :windows, :linux or :macos
                :home "C:\\scratch"     ; optional: pins the remote home, ignoring CODEX_HOME
                :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex :awl]}}
-               :skills {[:gh "owner/skill"] {:acli [:codex]}}}}}
+               :skills {[:gh "owner/skill"] {:acli [:codex]}}
+               :settings [{:acli [:codex] :sandbox "net"
+                           :permission-profiles {:net {:extends ":workspace"
+                                                       :network {:enabled true}}}}]}}}
 ```
 
 A host holds its own declarations instead of selecting from the top level. A source
@@ -873,9 +876,17 @@ also be placed user-wide on a host for another. Top-level declarations stay loca
 host ones never reach a local plan.
 
 A host has no projects: `:in` is `:all` (or `:none` on a pack that a `[pack "skill"]`
-key names), and anything else is a config error, as is a non-keyed section. Host
+key names), and anything else is a config error, as is a non-keyed `:skills` or
+`:skill-packs`, or `:settings` that is not a vector of rows. Host
 keys other than the ones above, and any tool but codex and awl, are reported as not
 provisioned.
+
+Codex settings on a host are planned by the codex adapter's own ops against a local
+copy of the host's `config.toml`, read in the inventory's round trip. Once they have
+run, the copy is written back whole: staged, checksummed and refused if the file's
+SHA-256 is no longer the one read. The replaced file goes into the host's backups.
+Ownership of host settings is not recorded yet, so a dropped setting stays on the
+host.
 
 A host has no `agents.edn` for awl to read, so `:awl` there places copies, in
 `~/.agents/skills/<name>`. Codex keeps `$CODEX_HOME/skills`, and from 0.95.0 on also

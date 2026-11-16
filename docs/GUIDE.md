@@ -861,23 +861,42 @@ Declare one host for each side you want provisioned; neither sees the other's sk
 
 Host sections take the keyed `:skills` and `:skill-packs` forms, and a pack there
 defaults to `:in :all`. A source already placed at the top level can be placed
-again on a host, for different tools. User-wide skills for codex and awl are
-provisioned so far: other tools and kinds are reported in the plan and by
+again on a host, for different tools. User-wide skills for codex and awl, and
+codex's settings, are provisioned so far: other tools and kinds are reported in the plan and by
 `validate`, never dropped silently. `:home` overrides the remote home, for a
 scratch tree.
+
+`:settings` on a host takes the top level's rows, user-wide only:
+
+```clojure
+{:hosts {:box {:ssh "box.example.com" :os :linux
+               :settings [{:acli [:codex] :sandbox "net"
+                           :permission-profiles {:net {:extends ":workspace"
+                                                       :network {:enabled true}}}}]}}}
+```
+
+The host's `config.toml` (`$CODEX_HOME/config.toml`) is read with the
+inventory, edited in a local copy by the same ops a local run plans, and written
+back whole. The plan names the host's path. Keys and tables the declaration does
+not name stay as they are. The write is refused if the file changed on the host
+since it was read, and the file it replaces goes into the host's backups. A
+setting dropped from a host's declaration is not removed from the host yet. Other
+tools' settings are reported, not written.
 
 Locally awl reads its skills out of `agents.edn`, but a host has none, so there
 `:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
 not awl's alone: codex 0.95.0 and later read it as well, and list a skill once
 for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
-when the host's `codex --version` is 0.95.0 or later. An older codex gets its own
-copy in `~/.codex/skills`, and so does a codex whose version can't be read, with a
-warning. Changing the declaration or the codex version moves the copy on the next
+when the host's `codex --version` reports `codex-cli` 0.95.0 or later (a
+pre-release of 0.95.0 counts as older). An older codex gets its own copy in
+`~/.codex/skills`, with a warning, and so does a codex whose version can't be
+read, or that hasn't answered within 5 seconds where the host has `timeout`. Changing the declaration or the codex version moves the copy on the next
 apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
 since it is often a shell alias, so an awl skill is placed whether or not `awl` is
 on the host's `PATH`. When codex reads both directories and one holds a hand-made
 copy of a skill agentctl places in the other, the plan warns that codex lists the
-skill twice. `-t awl` selects `~/.agents/skills`; it is valid only with `--host`.
+skill twice. `-t awl` selects `~/.agents/skills`, and the codex copies that
+placing a skill there made redundant; it is valid only with `--host`.
 
 Skills are copied, not linked: sources are read on this machine (a git pack is
 fetched here) and sent over SSH. Drift is a per-file comparison of byte hashes,
