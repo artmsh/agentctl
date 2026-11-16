@@ -348,7 +348,13 @@ set +e
 # user-wide kinds are expected to come back converged
 run apply -f "$SB/imported15.edn" -t antigravity -k settings -k mcps -k memory > "$SB/plan15b.txt"; code=$?
 set -e
-[ "$code" = 0 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config should already be converged"; }
+# the redacted header is a placeholder the vault does not hold yet: the server
+# is held back on it, and nothing else differs
+[ "$code" = 2 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config: expected the placeholder held back, got exit $code"; }
+grep -q "0 to add, 0 to change, 0 to remove, .*1 unresolved" "$SB/plan15b.txt" \
+  || { cat "$SB/plan15b.txt"; fail "imported antigravity config should otherwise be converged"; }
+grep -q "secret unresolved: .*(headers.Authorization)" "$SB/plan15b.txt" \
+  || { cat "$SB/plan15b.txt"; fail "the unresolved placeholder is not named"; }
 
 echo "15b. kimi converges, and its own spellings are written the way kimi reads them"
 mkdir -p "$SB/kproj" "$SB/packs/demo/skills/local-skill"
@@ -1193,7 +1199,7 @@ fk_code() {
 }
 for cmd in apply apply!; do
   fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
-  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: extensions, ' "$FK/dsl-$cmd.txt" \
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: agents, extensions, ' "$FK/dsl-$cmd.txt" \
     || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
   grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
   fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y
@@ -1885,7 +1891,7 @@ set -e
 python3 -c 'import sys,tomllib; t=tomllib.load(open(sys.argv[1],"rb")); assert t["tui"]["model_availability_nux"] == {"m-a": 4}, t; assert t["tui"]["status_line"] == ["model-with-reasoning", "context-used"], t' \
   "$SB/.codex/config.toml" || fail "codex [tui] state or footer wrong"
 
-echo "42. what a config no longer declares is pruned, whatever is left of it"
+echo "47. what a config no longer declares is pruned, whatever is left of it"
 PR="$SB/prune-any"
 # pr <home> <args…>: each case gets a home of its own
 pr() { local h="$PR/$1"; shift; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }
@@ -1920,7 +1926,7 @@ pr switch apply! -f "$PR/switch/dsl.edn" --all -t codex -y > /dev/null
 pr switch apply! -f "$PR/switch/old.edn" --all -t codex -y > "$PR/switch/old.txt"
 trusted switch || { cat "$PR/switch/old.txt"; fail "rewriting the DSL trust the old way pruned it"; }
 
-echo "43. --debug and AGENTCTL_DEBUG add the stack trace on stderr, nothing on stdout"
+echo "48. --debug and AGENTCTL_DEBUG add the stack trace on stderr, nothing on stdout"
 DB="$SB/debug"
 mkdir -p "$DB/dir.edn"
 db() { (cd "$DB" && AGENTCTL_HOME="$DB" run "$@"); }
@@ -1949,8 +1955,174 @@ set -e
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$DB/json.out" \
   || { cat "$DB/json.out"; fail "--debug broke the --json document"; }
 grep -q 'FileNotFoundException' "$DB/json.err" || { cat "$DB/json.err"; fail "--json --debug printed no trace"; }
+echo "42. skills add never writes over a project's own copy, a whole pack's or a named skill's"
+(
+  # git_pack NAME SHAPE OWN: the git pack kit (review, audit) for codex and
+  # claude in proj, whole (SHAPE=whole) or by name (SHAPE=named), beside the
+  # project's own review: committed (OWN=committed) or hand-made (OWN=handmade)
+  git_pack() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    G="$H/remote/kit"; P="$H/projects/proj"
+    mkskill "$G/review" review theirs; mkskill "$G/audit" audit theirs
+    git -C "$G" init -q; commit_all "$G"
+    mkdir -p "$P"; touch "$P/README"; git -C "$P" init -q
+    [ "$3" = committed ] && mkskill "$P/.agents/skills/review" review ours
+    commit_all "$P"
+    [ "$3" = handmade ] && mkskill "$P/.agents/skills/review" review ours
+    if [ "$2" = whole ]; then
+      cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git :in "projects/proj" :acli [:codex :claude]}}}
+EDN
+    else
+      cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex :claude]}
+          [kit "audit"] {:in "projects/proj" :acli [:codex :claude]}}}
+EDN
+    fi
+    (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+    ! grep -q -- '-s "\*"' "$H/plan.txt" && ! grep -q -- "-s review" "$H/plan.txt" \
+      || { cat "$H/plan.txt"; fail "$1: skills add is planned over the project's review"; }
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+    ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "$1: an op failed"; }
+    grep -q "body ours" "$P/.agents/skills/review/SKILL.md" || fail "$1: the project's review was written over"
+    [ -d "$P/.agents/skills/audit" ] && [ ! -L "$P/.agents/skills/audit" ] \
+      && grep -q '"audit"' "$P/skills-lock.json" \
+      || fail "$1: audit was not installed by the skills CLI"
+    [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "$1: tracked files changed"; }
+    run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "$1: not converged"; }
+    (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan3.txt" 2>&1
+    grep -q "project copy ~/projects/proj/.agents/skills/review kept" "$H/plan3.txt" \
+      || { cat "$H/plan3.txt"; fail "$1: the kept review is not reported"; }
+  }
+  git_pack whole-committed whole committed
+  # before the clone the names are unknown: the plan says what is at stake
+  grep -q 'not installed until the pack is cloned and its names are known: the `skills` CLI could write over ~/projects/proj/.agents/skills/review' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the whole pack's dry plan does not say why it waits"; }
+  git_pack whole-handmade whole handmade
+  git_pack named-committed named committed
+  git_pack named-handmade named handmade
+  grep -q 'project copy ~/projects/proj/.agents/skills/review kept — the `skills` CLI did not install it' "$H/plan3.txt" \
+    || { cat "$H/plan3.txt"; fail "the hand-made review is not reported as kept"; }
 
-echo "44. --only statusline/ID: config is its one id, and it is named like -k statusline"
+  # a copy the CLI installed from elsewhere is the CLI's to replace, after a backup
+  H=$(fresh_home cli-copy-replaced); export AGENTCTL_HOME="$H"
+  G="$H/remote/kit"; P="$H/projects/proj"
+  mkskill "$G/review" review theirs
+  git -C "$G" init -q; commit_all "$G"
+  mkskill "$P/.agents/skills/review" review older
+  printf '{"version":2,"skills":{"review":{"source":"elsewhere/kit","sourceType":"git"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "cli-copy-replaced: apply! failed"; }
+  grep -q "body theirs" "$P/.agents/skills/review/SKILL.md" || fail "the CLI's own copy was not replaced"
+  grep -rqs "body older" "$H/.config/agentctl/backups" || fail "the replaced copy was not backed up"
+)
+
+echo "43. codex links a user-wide skill before it removes the project copy that repeats it"
+(
+  H=$(fresh_home codex-order); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills"; cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  git -C "$P" init -q
+  # pi asks before reading the project, so codex is the one that removes it
+  mkdir -p "$H/.pi/agent"; printf '{"defaultProjectTrust": "ask"}\n' > "$H/.pi/agent/settings.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi :codex]}
+          [shared "other"] {:in "projects/proj" :acli [:codex :pi]}}}
+EDN
+  run apply! -f "$H/agents.edn" --all -t pi -t codex -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "codex-order: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "the first apply! removed the copy before linking the skill"; }
+  [ ! -e "$P/.agents/skills/wrap-up" ] && [ -f "$H/.codex/skills/wrap-up/SKILL.md" ] \
+    || fail "codex-order: the copy is not replaced by the user-wide skill in one run"
+  run apply -f "$H/agents.edn" --all -t pi -t codex > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-order: not converged"; }
+)
+
+echo "44. pi's collision is not reported for a copy the same plan removes"
+(
+  H=$(fresh_home moot-collision); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex :pi]}}
+ :trust [{:in "projects/game" :acli [:pi]}]}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q "remove wrap-up -y" "$H/plan.txt" && ! grep -q 'pi loads' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a collision is reported for the copy the plan removes"; }
+)
+
+echo "45. a scoped run adopts the placements it selects that are already on disk, and nothing else"
+(
+  # adopt NAME WANT SKIP FLAGS...: links already made by hand for the user-wide
+  # wrap-up (pi) and proj's review (claude); a run scoped by FLAGS owns the
+  # ones named in WANT and none in SKIP. `other` (pi, not on disk) sends a run
+  # that selects it down the path that applies changes.
+  adopt() {
+    local name=$1 want=$2 skip=$3; shift 3
+    H=$(fresh_home "adopt-$name"); export AGENTCTL_HOME="$H"
+    K="$H/projects/shared/skills"; P="$H/projects/proj"
+    mkskill "$K/wrap-up" wrap-up; mkskill "$K/review" review; mkskill "$K/other" other
+    mkdir -p "$P/.claude/skills" "$H/.pi/agent/skills"; git -C "$P" init -q
+    ln -s "$K/wrap-up" "$H/.pi/agent/skills/wrap-up"
+    ln -s "$K/review" "$P/.claude/skills/review"
+    cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}
+          [shared "other"] {:in :all :acli [:pi]}
+          [shared "review"] {:in "projects/proj" :acli [:claude]}}}
+EDN
+    run apply! -f "$H/agents.edn" "$@" -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$name: apply! failed"; }
+    S="$H/.config/agentctl/state.edn"
+    for n in $want; do
+      grep -Eq "\[:[a-z]+ :skills \"([^\"]*/)?$n\"\]" "$S" 2>/dev/null || { cat "$S"; fail "$name: $n on disk is not adopted"; }
+    done
+    for n in $skip; do
+      ! grep -Eq "\[:[a-z]+ :skills \"([^\"]*/)?$n\"\]" "$S" 2>/dev/null || { cat "$S"; fail "$name: $n is adopted outside the selection"; }
+    done
+  }
+  adopt tool "wrap-up" "review" -t pi
+  # the scoped run's adoption is what lets a later removal take the link away
+  sed -i.bak 's/\[shared "wrap-up"\] {:in :all :acli \[:pi\]}/[shared "wrap-up"] {:in :all :acli []}/' "$H/agents.edn"
+  (run apply -f "$H/agents.edn" -t pi || true) > "$H/plan.txt" 2>&1
+  grep -q -- "- skill \[agents: pi\] ~/projects/shared/skills/wrap-up" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a link adopted under -t is not removed with its placement"; }
+  adopt other-tool "" "wrap-up review" -t codex
+  adopt kind "wrap-up review" "" -k skills
+  adopt other-kind "" "wrap-up review" -k mcps
+  adopt only "review" "wrap-up" --only skills/review
+  adopt project "review" "wrap-up" -p projects/proj
+  adopt user "wrap-up" "review" --user
+)
+
+echo "46. an unscoped run owns no skill whose pack failed to clone"
+(
+  H=$(fresh_home unsourced); export AGENTCTL_HOME="$H"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {:gone {:uri "file://$H/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}
+          :local {:path "$H/projects/shared/skills/local" :tools [:pi]}}}
+EDN
+  mkskill "$H/projects/shared/skills/local" local
+  (run apply! -f "$H/agents.edn" -y || true) > "$H/apply.txt" 2>&1
+  grep -q 'git clone exited' "$H/apply.txt" || { cat "$H/apply.txt"; fail "unsourced: the clone did not fail"; }
+  [ -L "$H/.pi/agent/skills/local" ] || { cat "$H/apply.txt"; fail "unsourced: the other skill was not linked"; }
+  grep -q '\[:pi :skills "local"\]' "$H/.config/agentctl/state.edn" || fail "unsourced: the linked skill is not owned"
+  ! grep -q 'gone-skill' "$H/.config/agentctl/state.edn" || fail "a skill never linked is owned, so a later prune would remove a path agentctl never wrote"
+)
+
+echo "49. --only statusline/ID: config is its one id, and it is named like -k statusline"
 SO="$SB/statusline-only"
 mkdir -p "$SO"
 so() { (cd "$SO" && AGENTCTL_HOME="$SO" run "$@"); }
@@ -1978,7 +2150,7 @@ set -e
 [ "$code" = 0 ] && grep -q -- '--only statusline/config — nothing declared or owned' "$SO/none.txt" \
   || { cat "$SO/none.txt"; fail "--only statusline/config with nothing declared was silent"; }
 
-echo "45. :statusline :acli derives Claude's statusLine and Pi's extension; a hand-written one wins"
+echo "50. :statusline :acli derives Claude's statusLine and Pi's extension; a hand-written one wins"
 SD="$SB/statusline-derive"
 mkdir -p "$SD/bin" "$SD/renderer/adapters/pi-extension"
 printf 'export default function () {}\n' > "$SD/renderer/adapters/pi-extension/index.ts"
@@ -2068,7 +2240,7 @@ for n in 1 2; do
 done
 [ "$(status_line)" = edited ] || fail "the hand-edited statusLine was changed"
 
-echo "46. an old-format run takes over, key by key, what a DSL run wrote that it declares too"
+echo "51. an old-format run takes over, key by key, what a DSL run wrote that it declares too"
 OT="$SB/old-takes-over"
 # ot <case> <args…>: each case gets a home of its own
 ot() { local h="$OT/$1"; shift; mkdir -p "$h/proj"; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }

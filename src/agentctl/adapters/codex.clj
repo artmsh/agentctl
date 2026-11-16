@@ -69,7 +69,7 @@
 
 ;; ---------------------------------------------------------------- settings
 
-(defn- keymap-ops [keymap]
+(defn- keymap-ops [keymap file]
   ;; Keep native context/action spelling. Codex validates which actions and
   ;; key names its installed version supports; only validate the value shape.
   (when-not (and (map? keymap)
@@ -88,7 +88,7 @@
   (keep (fn [[context actions]]
           (plan/toml-set-op {:tool tool :kind :settings
                              :id (keyword "keymap" (u/kw->str context))
-                             :file config-file :table ["tui" "keymap" (u/kw->str context)]
+                             :file file :table ["tui" "keymap" (u/kw->str context)]
                              :kvs actions
                              :field-prefix (str "keymap." (u/kw->str context))
                              :summary (str "codex keymap " (u/kw->str context))}))
@@ -142,8 +142,8 @@
   "One `[tui.presets.<n>]` table per declared slot, made to hold exactly the
    declared fields (`whole-table?`). Codex writes its own state into `[tui]`
    (`model_availability_nux`), so nothing above the slot is replaced."
-  [presets]
-  (let [current (toml/read-toml-lenient config-file)]
+  [presets file]
+  (let [current (toml/read-toml-lenient file)]
     (for [[k p] (sort-by (comp str key) presets)
           :let [n (schema/preset-slot k)
                 table ["tui" "presets" n]
@@ -152,19 +152,19 @@
                 diffs (plan/field-diffs (or have {}) want)]
           :when (seq diffs)]
       (plan/op {:action (if have :update :create) :tool tool :kind :settings
-                :id (keyword (str "preset-" n)) :target config-file :path table
+                :id (keyword (str "preset-" n)) :target file :path table
                 :summary (str "codex preset " n) :diffs diffs :risk :low
                 :field-prefix (str "presets." n)
                 :exec! (fn []
-                         (u/backup! config-file)
-                         (toml/update-file! config-file #(toml/set-table % table want)))}))))
+                         (u/backup! file)
+                         (toml/update-file! file #(toml/set-table % table want)))}))))
 
 (defn- status-line-op
   "The native footer: `[tui] status_line`, an item list. One key of `[tui]`,
    set by surgery — the table also holds Codex's own state."
-  [items]
+  [items file]
   (plan/toml-set-op {:tool tool :kind :settings :id :status-line
-                     :file config-file :table ["tui"]
+                     :file file :table ["tui"]
                      :kvs {"status_line" (mapv u/key-str items)}
                      :summary "codex footer items"}))
 
@@ -191,9 +191,9 @@
 
 (defn- owned-paths
   "`[table… key]` for every key agentctl recorded writing in config.toml."
-  [st]
+  [st file]
   (for [[_ w] (:writes st)
-        :when (and (= tool (:tool w)) (= config-file (:target w)))
+        :when (and (= tool (:tool w)) (= file (:target w)))
         d (:diffs w)]
     (conj (mapv u/kw->str (:path w)) (u/kw->str (:key d)))))
 
@@ -207,9 +207,9 @@
    done: what is declared, plus what is on disk and will not be pruned —
    anything agentctl did not write, and under the legacy `:executors` form,
    which never prunes, everything."
-  [settings st entity-dsl?]
-  (let [current (toml/read-toml-lenient config-file)
-        owned (if entity-dsl? (vec (owned-paths st)) [])
+  [settings st entity-dsl? file]
+  (let [current (toml/read-toml-lenient file)
+        owned (if entity-dsl? (vec (owned-paths st file)) [])
         owned? (fn [leaf] (some #(and (<= (count %) (count leaf)) (= % (subvec leaf 0 (count %)))) owned))
         declared (set (map u/key-str (keys (:permission-profiles settings))))
         kept (set (for [[p m] (get current "permissions")
@@ -229,9 +229,11 @@
    permissions after this apply: it refuses to start on profiles with no
    default, on a default naming no profile the file holds, and on an
    unknown built-in. Checked only when agentctl touches permissions, so a
-   file broken by hand does not block an unrelated setting."
-  [settings st entity-dsl?]
-  (let [{:keys [default declared kept profiles involved?]} (permissions-after settings st entity-dsl?)
+   file broken by hand does not block an unrelated setting. `file` defaults to
+   this machine's config.toml; a host's is read into a local copy."
+  ([settings st entity-dsl?] (permission-findings settings st entity-dsl? config-file))
+  ([settings st entity-dsl? file]
+  (let [{:keys [default declared kept profiles involved?]} (permissions-after settings st entity-dsl? file)
         names (str "declared profiles: " (if (seq declared) (str/join ", " (sort declared)) "none")
                    (when (seq kept) (str "; left in config.toml: " (str/join ", " (sort kept))))
                    "; built-in: " (str/join ", " (sort schema/default-builtin-profiles)))
@@ -245,19 +247,22 @@
         (when-not (schema/default-builtin-profiles default)
           (error (str "default_permissions " (pr-str default) " is no built-in profile")))
         (not (profiles default))
-        (error (str "default_permissions " (pr-str default) " names no profile it would hold"))))))
+        (error (str "default_permissions " (pr-str default) " names no profile it would hold")))))))
 
 (def nested-settings
   "Declared settings with an op of their own rather than a root key."
   [:keymap :presets :status-line :permission-profiles :hooks])
 
 (defn settings-ops
+  "`file` is the config.toml the ops edit: this machine's, or the local copy
+   of a host's (`agentctl.hosts`)."
   ([cfg] (settings-ops cfg nil))
-  ([cfg st]
+  ([cfg st] (settings-ops cfg st config-file))
+  ([cfg st file]
   (let [settings (common/settings-for cfg tool)
         _ (when-let [e (schema/errors settings [:executors :codex])]
             (throw (ex-info (str "codex settings: " e) {:path [:executors :codex]})))
-        _ (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg))))]
+        _ (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg) file)))]
             (throw (ex-info (str/join "; " (map last es)) {:path [:executors :codex :sandbox]})))
         ;; Claude's status line is a command object; in a unified settings
         ;; row it reaches codex too, and stays an unsupported setting here
@@ -265,16 +270,16 @@
         [kvs unsupported] (common/map-settings (apply dissoc settings (cond->> nested-settings
                                                                         (not footer?) (remove #{:status-line})))
                                                setting-keys)
-        bindings (when (contains? settings :keymap) (keymap-ops (:keymap settings)))]
+        bindings (when (contains? settings :keymap) (keymap-ops (:keymap settings) file))]
     (concat
      (keep identity
            [(plan/toml-set-op {:tool tool :kind :settings :id :global
-                               :file config-file :table [] :kvs kvs
+                               :file file :table [] :kvs kvs
                                :summary "global codex settings"})])
      bindings
-     (preset-ops (:presets settings))
-     (when footer? (keep identity [(status-line-op (:status-line settings))]))
-     (permission-profile-ops (:permission-profiles settings) config-file)
+     (preset-ops (:presets settings) file)
+     (when footer? (keep identity [(status-line-op (:status-line settings) file)]))
+     (permission-profile-ops (:permission-profiles settings) file)
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")
@@ -364,12 +369,14 @@
                  cur (get current name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
                  want (mcp-desired-shape m (:values headers))
                  have (some-> cur mcp-current-shape)]
-           :when (or (seq (:issues headers)) (not= (u/norm want) (u/norm have)))]
-       (if (seq (:issues headers))
-         (plan/op {:tool tool :kind :mcps :id id :warn true
-                   :summary "HTTP header reference unresolved — existing server left untouched"})
+           ;; an unresolved env or header ref holds the server back: written
+           ;; without it, it would run and authenticate nothing
+           :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
+       (if (seq issues)
+         (common/unresolved-op {:tool tool :kind :mcps :id id :target config-file} issues)
          (plan/op {:action (if cur :update :create)
                  :tool tool :kind :mcps :id id
                  :target config-file
@@ -452,14 +459,13 @@
                  id (keyword (name pid) name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
-                 issues (concat (:issues env) (:issues headers))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
                  have (get servers name*)
                  want (project-mcp-table m (:values env) (:values headers))
                  secret? (common/holds-secret? (merge (:env m) (:headers m)))]
            :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
        (if (seq issues)
-         (plan/op {:tool tool :kind :mcps :project pid :id id :warn true
-                   :summary "env or header reference unresolved — existing server left untouched"})
+         (common/unresolved-op {:tool tool :kind :mcps :project pid :id id :target file} issues)
          (plan/op {:action (if have :update :create)
                    :tool tool :kind :mcps :project pid :id id
                    :target file
@@ -597,8 +603,9 @@
           (hook-ops cfg state)
           (mcp-ops cfg state)
           (provider-ops cfg)
-          (project-ops cfg state)
+          ;; the user-wide links first: a project copy's removal checks for them
           (skill-ops cfg state)
+          (project-ops cfg state)
           (memory-ops cfg)))
 
 (defn present? [] (some? (u/which "codex")))

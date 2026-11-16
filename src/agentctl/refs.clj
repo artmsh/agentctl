@@ -115,12 +115,29 @@
   (let [{:keys [exit out]} (u/sh "bw" "status")]
     (and (zero? exit) (str/includes? out "\"unlocked\""))))
 
-(def bw-state
+(defn- probe-bw []
   (delay
     (cond
       (nil? (u/which "bw")) :absent
       (bw-unlocked?) :unlocked
       :else :locked)))
+
+(def ^:private bw-probe (atom (probe-bw)))
+
+(def bw-state
+  "The vault: `:absent`, `:locked` or `:unlocked`, asked once and then
+   remembered until `forget!`."
+  (reify clojure.lang.IDeref
+    (deref [_] @@bw-probe)))
+
+(defn forget!
+  "Drop every resolved value and the vault's state, so the next resolution
+   asks again. A CLI run resolves once; a long-lived process (the GUI) calls
+   this per request, or it would never see a rotated secret or an unlocked
+   vault."
+  []
+  (reset! cache {})
+  (reset! bw-probe (probe-bw)))
 
 (defn- bw-fetch [{:ref/keys [item field]}]
   (case @bw-state
@@ -149,7 +166,12 @@
             ;; written out, any of them is a header that authenticates nothing
             (and named? (or (nil? v) (contains? #{"" "null"} (str/trim (str v)))))
             {:status :missing :message (str "field is empty on bw item: " item "/" field)}
-            (nil? v) {:status :missing :message (str "field not found on bw item: " item "/" field)}
+            (nil? v) {:status :missing
+                      :message (str "field not found on bw item: " item "/" field
+                                    ;; a ref that once reached the login through
+                                    ;; a fallback says where to point it now
+                                    (when (and (not named?) (:password login))
+                                      (str " — the item has a login: did you mean " item "/password?")))}
             (contains? #{"" "null"} (str/trim (str v)))
             {:status :missing :message (str "field is empty on bw item: " item "/" field)}
             :else {:status :ok :value v}))))))

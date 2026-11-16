@@ -350,7 +350,8 @@
 
         (empty? changes)
         (do (state/save! (core/sync-state! st cfg (set (mapcat core/op-keys unresolved))
-                                            (when (core/scoped? opts) #{})))
+                                            (when (core/scoped? opts) #{})
+                                            (core/covers cfg opts)))
             ;; held-back ops are in the document's ops, flagged warn
             (if (:json opts)
               (print-json (assoc doc :applied (applied->data [] [])))
@@ -368,7 +369,8 @@
             (state/save! (core/sync-state! st cfg
                                             (set (mapcat core/op-keys (concat failed unresolved)))
                                             (when (core/scoped? opts)
-                                              (set (mapcat core/op-keys done)))))
+                                              (set (mapcat core/op-keys done)))
+                                            (core/covers cfg opts)))
             (if (:json opts)
               (print-json (assoc doc :applied (applied->data done failed)
                                  :backups (u/tilde (u/backup-dir))))
