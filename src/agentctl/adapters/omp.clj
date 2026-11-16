@@ -42,9 +42,12 @@
                  :summary (str "unsupported setting " k " for omp — ignored") :warn true})))))
 
 (defn- mcp-entry
-  "Managed fields merged onto omp's existing entry — unmodelled keys survive."
+  "Managed fields merged onto omp's existing entry — unmodelled keys survive.
+   An http or sse server's `headers` is a string map in omp's mcp.json, as
+   an env is for stdio."
   [m cur]
-  (let [env (common/resolve-env (:env m))]
+  (let [env (common/resolve-env (:env m))
+        headers (common/resolve-env (:headers m))]
     (merge cur
            (:extra m)
            (u/prune-nils
@@ -53,6 +56,7 @@
              :args (not-empty (vec (:args m)))
              :url (:url m)
              :env (not-empty (:values env))
+             :headers (not-empty (:values headers))
              :enabled (:enabled m)}))))
 
 (defn mcp-ops [cfg st]
@@ -61,12 +65,12 @@
         managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
     (concat
      (keep (fn [[id m]]
-             (if-let [issues (seq (common/ref-issues [["env" (:env m)]]))]
+             (if-let [issues (seq (common/mcp-issues m))]
                (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
                (plan/json-set-op {:tool tool :kind :mcps :id id
                                   :file mcp-file :path [:mcpServers (keyword (u/kw->str id))]
                                   :value (mcp-entry m (get current (keyword (u/kw->str id))))
-                                  :risk (if (common/holds-secret? (:env m)) :secret :low)
+                                  :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                                   :summary (common/mcp-summary m)})))
            desired)
      (keep (fn [id]

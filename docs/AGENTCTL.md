@@ -750,6 +750,10 @@ For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `http_headers` table. Codex's `env_http_headers` and `http_headers_helper` are
 not yet modelled by this DSL.
 
+OMP writes an http or sse server's `:headers` resolved into the server's
+`headers` map in `~/.omp/agent/mcp.json`; a header that does not resolve holds
+the server back, as an env value does.
+
 `:cmd "srv --transport stdio"` is one shell-ish line, split on whitespace with
 single and double quotes honoured. `:command` + `:args` is the same thing
 exploded; giving both keeps `:command` and appends `:args`. `:type` is an alias

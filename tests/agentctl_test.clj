@@ -1934,7 +1934,7 @@
     (with-redefs [refs/bw-state (delay :locked)
                   codex/mcp-list (fn [] {})]
       (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs]]
-                              [:omp omp/mcp-ops [:docs]]
+                              [:omp omp/mcp-ops [:docs :web]]
                               [:antigravity antigravity/mcp-ops [:docs :web]]
                               [:kimi kimi/mcp-ops [:docs :web]]
                               [:codex codex/mcp-ops [:docs :web]]]

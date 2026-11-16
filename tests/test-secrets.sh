@@ -44,7 +44,7 @@ cat > "$SB/agents.edn" <<'EDN'
 {:mcps [{:id :sdocs :cmd "/bin/echo s" :env {"DOCS_ENV" "!bw://plant/ENV" "MODE" "fast"} :in :all
          :acli [:pi :omp :kimi :antigravity :codex]}
         {:id :hdocs :type :http :url "https://mcp.example.com/h" :headers {"x-docs" "!bw://plant/HDR"} :in :all
-         :acli [:kimi :antigravity :codex]}]
+         :acli [:omp :kimi :antigravity :codex]}]
  :providers [{:id :gw :url "https://api.example.com/v1" :api "openai-completions" :key "!bw://plant/KEY"
               :models [{:id "m1" :context-window 100000}] :acli [:pi :omp :kimi] :in :all}]}
 EDN
@@ -91,7 +91,7 @@ leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333
 python3 - "$SB/plan.json" <<'PY' || fail "a tool's plan does not carry its masked secrets"
 import json, sys
 ops = json.load(open(sys.argv[1]))["ops"]
-want = {"pi": ["envs…11", "keys…33"], "omp": ["envs…11", "keys…33"],
+want = {"pi": ["envs…11", "keys…33"], "omp": ["envs…11", "hdrs…22", "keys…33"],
         "kimi": ["envs…11", "hdrs…22", "keys…33"],
         "antigravity": ["envs…11", "hdrs…22"], "codex": ["hdrs…22"]}
 for tool, masks in want.items():
@@ -101,6 +101,10 @@ for tool, masks in want.items():
 PY
 grep -q 'hdrs…22' "$SB/verbose.txt" || fail "-v does not show the masked header"
 grep -q envsecretvalue111 "$SB/.pi/agent/mcp.json" || fail "the secret was not written"
+python3 - "$SB/.omp/agent/mcp.json" <<'PY' || fail "omp's http server was written without its header"
+import json, sys
+assert json.load(open(sys.argv[1]))["mcpServers"]["hdocs"]["headers"] == {"x-docs": "hdrsecretvalue222"}
+PY
 
 echo "2. rotated, neither the old values nor the new ones print"
 vault envsecretvalue444 hdrsecretvalue555 keysecretvalue666
