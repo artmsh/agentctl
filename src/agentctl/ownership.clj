@@ -60,10 +60,30 @@
   (or (:entity-dsl? cfg)
       (and (contains? cfg :format) (nil? (:format cfg)))))
 
+(defn- declared-places
+  "Where an old-format config declares something, as [tool path]: a project's
+   path for each tool it is for, and the home for each tool given settings."
+  [cfg]
+  (set (concat
+        (for [[_ p] (:projects cfg) t (concat (:for-tools p) (keys (:tools p))) :when (:path p)]
+          [t (u/abs-path (:path p))])
+        (for [[t settings] (:tools cfg) :when (seq settings)] [t u/home]))))
+
+(defn- hand-over
+  "An old-format config keeps no record of its own writes and prunes none of
+   them. A DSL write it declares again is its now: forgotten here, so a later
+   DSL or empty config does not prune what the old format still declares.
+   One it does not declare stays recorded, and is pruned as before."
+  [st cfg]
+  (let [places (declared-places cfg)
+        theirs? (fn [o] (places [(:tool o) (u/abs-path (or (:project-path o) u/home))]))]
+    (cond-> st
+      (seq (:writes st)) (update :writes #(into {} (remove (comp theirs? val)) %)))))
+
 (defn record
   "Keep the exact destinations of successful writes; planning never claims ownership."
   [st cfg failed done]
-  (if-not (tracked? cfg) st
+  (if-not (tracked? cfg) (hand-over st cfg)
     (let [st (assoc st :placements (merge (:placements st) (placements cfg)))]
       (reduce
        (fn [s o]

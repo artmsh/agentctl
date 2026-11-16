@@ -2061,4 +2061,39 @@ set -e
 python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(1 if any(o["action"]=="delete" for o in ops) else 0)' "$SD/dsl-edited.json" \
   || { cat "$SD/dsl-edited.json"; fail "a hand-edited derived statusLine was planned for removal"; }
 
+echo "46. an old-format run takes over what a DSL run wrote that it declares too, so {} prunes none of it"
+OT="$SB/old-takes-over"
+mkdir -p "$OT/proj"
+ot() { (cd "$OT" && AGENTCTL_HOME="$OT" run "$@"); }
+cat > "$OT/dsl.edn" <<EDN
+{:trust [{:in "$OT/proj" :acli [:codex]}]
+ :settings [{:in "$OT/proj" :acli [:claude] :model "m1"}]}
+EDN
+cat > "$OT/old.edn" <<EDN
+{:projects {:p {:path "$OT/proj" :trusted true
+                :executors {:codex {} :claude {:model "m1"}}}}}
+EDN
+printf '{}\n' > "$OT/empty.edn"
+ot_trusted() { grep -q 'trust_level = "trusted"' "$OT/.codex/config.toml" 2>/dev/null; }
+ot_model() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("model",""))' "$OT/proj/.claude/settings.json" 2>/dev/null; }
+ot apply! -f "$OT/dsl.edn" --all -y > "$OT/dsl.txt" 2>&1 || { cat "$OT/dsl.txt"; fail "setup: DSL apply! failed"; }
+ot_trusted && [ "$(ot_model)" = m1 ] || { cat "$OT/dsl.txt"; fail "setup: DSL trust or model not written"; }
+ot apply! -f "$OT/old.edn" --all -y > "$OT/old.txt" 2>&1 || { cat "$OT/old.txt"; fail "old-format apply! failed"; }
+ot_trusted && [ "$(ot_model)" = m1 ] || { cat "$OT/old.txt"; fail "the old-format run lost trust or model"; }
+set +e
+ot apply -f "$OT/empty.edn" --all > "$OT/empty.txt" 2>&1; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$OT/empty.txt"; fail "{} after an old-format run plans to prune what the DSL run once wrote"; }
+# what the old format does not declare stays the DSL run's, and is pruned
+cat > "$OT/old-trust.edn" <<EDN
+{:projects {:p {:path "$OT/proj" :trusted true :executors {:codex {}}}}}
+EDN
+# a fresh home: a DSL run claims what it writes, not what it finds converged
+rm -rf "$OT/.codex" "$OT/.claude" "$OT/.config/agentctl" "$OT/proj/.claude"
+ot apply! -f "$OT/dsl.edn" --all -y > /dev/null 2>&1
+ot apply! -f "$OT/old-trust.edn" --all -y > "$OT/old-trust.txt" 2>&1 || { cat "$OT/old-trust.txt"; fail "old-format trust-only apply! failed"; }
+ot apply! -f "$OT/empty.edn" --all -y > "$OT/empty2.txt" 2>&1 || { cat "$OT/empty2.txt"; fail "{} apply! failed"; }
+ot_trusted || { cat "$OT/empty2.txt"; fail "{} pruned trust the old format had taken over"; }
+[ -z "$(ot_model)" ] || { cat "$OT/empty2.txt"; fail "{} left the model only the DSL run declared"; }
+
 echo "all agentctl e2e checks passed"

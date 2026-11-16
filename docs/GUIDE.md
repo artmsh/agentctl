@@ -144,7 +144,12 @@ config with nothing that decides the format yet — `{}`, or only `:statusline`,
 `:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
 and is reported with `⚠`, naming no format. Such a config declares nothing,
 so a DSL config emptied to `{}` prunes what it wrote — trust, settings,
-permissions — as `{:mcps []}` does. An `--only` or `-p` that nothing
+permissions — as `{:mcps []}` does. An old-format config prunes none of
+its own writes, and takes over the DSL writes it declares again: for each
+tool, a project it is for and, with user settings, the home. Those writes are
+no longer recorded as the DSL's, so switching to the old format and then to
+`{}` leaves them in place. A DSL write the old format does not declare is
+still pruned. An `--only` or `-p` that nothing
 declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
 because a run narrowed to a typo plans nothing and would otherwise read as
 converged.

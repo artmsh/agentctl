@@ -161,7 +161,10 @@ For MCPs, `:at :machine` (the default) uses the machine-local placement;
 `:at :repo` writes the project's `.mcp.json`. `:scope` remains a deprecated
 alias. Tool support still applies, and unsupported placements produce warnings.
 The ownership manifest records resolved paths so a repository that disappears
-from a selector can still have its owned entries pruned.
+from a selector can still have its owned entries pruned. An old-format run
+records none of its writes. It removes from the manifest the DSL writes it
+declares again, matched by tool and by project or home, so a later `{}` leaves
+them in place.
 
 The older project-registry form remains readable for compatibility. The
 following example and its project-specific sections describe that legacy form;
