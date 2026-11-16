@@ -217,13 +217,22 @@
                         ;; stdin is the rest of this script: a CLI reading it
                         ;; would eat it. One that fails, or has not answered in
                         ;; 5s, has no version. Not `timeout`: stock macOS has
-                        ;; none. Output goes to a file, so a child the CLI
-                        ;; spawned cannot hold a pipe open after the kill.
-                        "o=$(mktemp); " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!; i=0\n"
-                        "while kill -0 \"$p\" 2>/dev/null && [ \"$i\" -lt 50 ]; do sleep 0.1; i=$((i+1)); done\n"
-                        "if kill -0 \"$p\" 2>/dev/null; then kill -9 \"$p\" 2>/dev/null || true; v=\n"
-                        "elif wait \"$p\"; then v=$(head -n 1 \"$o\"); else v=; fi\n"
-                        "rm -f \"$o\"\n"
+                        ;; none. The CLI runs in a process group of its own
+                        ;; (setsid, perl's setpgrp, or job control) and the
+                        ;; whole group is killed, so nothing it started is left
+                        ;; behind. The deadline is read off the clock: a
+                        ;; `sleep 0.1` costs a process, and fifty of them are
+                        ;; far more than 5s. Output goes to a file, so a child
+                        ;; cannot hold a pipe open.
+                        "o=$(mktemp)\n"
+                        "if command -v setsid >/dev/null 2>&1; then setsid " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!\n"
+                        "elif command -v perl >/dev/null 2>&1; then perl -e 'setpgrp(0,0); exec @ARGV or exit 127' " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!\n"
+                        "else set -m 2>/dev/null; " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!; set +m 2>/dev/null; fi\n"
+                        "end=$(( $(date +%s) + 5 ))\n"
+                        "while kill -0 \"$p\" 2>/dev/null && [ \"$(date +%s)\" -lt \"$end\" ]; do sleep 0.1; done\n"
+                        "if kill -0 \"$p\" 2>/dev/null; then v=; else wait \"$p\" && v=$(head -n 1 \"$o\") || v=; fi\n"
+                        "kill -9 \"-$p\" 2>/dev/null || kill -9 \"$p\" 2>/dev/null || true\n"
+                        "wait \"$p\" 2>/dev/null || true; rm -f \"$o\"\n"
                         "printf 'V\\t" t "\\t%s\\n' \"$(e \"$v\")\"\n"
                         "else printf 'T\\t" t "\\t0\\n'; fi\n")))
        (str/join

@@ -20,6 +20,7 @@ mkdir -p "$SB/bin"
 # to answer another one, or nothing
 cat > "$SB/bin/codex" <<'STUB'
 #!/bin/sh
+[ "${CODEX_HANG:-}" = spawn ] && { sleep 3123 & sleep 3124; }
 [ -n "${CODEX_HANG:-}" ] && exec sleep 60
 [ "${1:-}" = --version ] && printf '%s\n' "${CODEX_VERSION-codex-cli 0.169.0}"
 exit 0
@@ -290,6 +291,24 @@ t0=$(date +%s)
 CODEX_HANG=1 AGENTCTL_SSH_CMD="$SB/plain-ssh" expect 2 apply $W
 [ $(( $(date +%s) - t0 )) -lt 30 ] || fail "a hanging codex hung the inventory"
 grep -q 'gave no version' "$SB/out" || fail "a hanging codex not reported: $(cat "$SB/out")"
+echo "    and what a hanging codex started is killed with it, in about 5s"
+t0=$(date +%s)
+CODEX_HANG=spawn AGENTCTL_SSH_CMD="$SB/plain-ssh" expect 2 apply $W
+took=$(( $(date +%s) - t0 ))
+sleep 1
+if pgrep -f 'sleep 312[34]' >/dev/null; then pkill -f 'sleep 312[34]'; fail "the version probe left a stray process"; fi
+[ "$took" -lt 10 ] || fail "the version probe took ${took}s, not about 5"
+if command -v dash >/dev/null 2>&1; then
+  # Debian's /bin/sh: no job control without a terminal
+  cat > "$SB/dash-ssh" <<STUB
+#!/bin/sh
+exec env PATH="$SB/bin:/usr/bin:/bin" dash -c "\$2"
+STUB
+  chmod +x "$SB/dash-ssh"
+  CODEX_HANG=spawn AGENTCTL_SSH_CMD="$SB/dash-ssh" expect 2 apply $W
+  sleep 1
+  if pgrep -f 'sleep 312[34]' >/dev/null; then pkill -f 'sleep 312[34]'; fail "the version probe left a stray process under dash"; fi
+fi
 
 echo "21. a hand-made copy codex reads beside agentctl's is reported, never touched"
 mkdir -p "$CX/beta"; printf 'mine\n' > "$CX/beta/SKILL.md"
