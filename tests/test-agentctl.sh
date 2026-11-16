@@ -2060,6 +2060,13 @@ sd apply -f "$SD/agents.edn" --json > "$SD/dsl-edited.json"; code=$?
 set -e
 python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(1 if any(o["action"]=="delete" for o in ops) else 0)' "$SD/dsl-edited.json" \
   || { cat "$SD/dsl-edited.json"; fail "a hand-edited derived statusLine was planned for removal"; }
+# and it is said on every run while it differs, not once
+for n in 1 2; do
+  sd apply! -y -f "$SD/agents.edn" > "$SD/edited-$n.txt" 2>&1 || { cat "$SD/edited-$n.txt"; fail "apply! with an edited statusLine failed"; }
+  grep -q "edited since agentctl derived it" "$SD/edited-$n.txt" \
+    || { cat "$SD/edited-$n.txt"; fail "run $n did not warn about the hand-edited statusLine"; }
+done
+[ "$(status_line)" = edited ] || fail "the hand-edited statusLine was changed"
 
 echo "46. an old-format run takes over what a DSL run wrote that it declares too, so {} prunes none of it"
 OT="$SB/old-takes-over"

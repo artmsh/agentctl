@@ -450,6 +450,19 @@
                      :target claude-settings
                      :summary "settings.json statusLine was edited since agentctl derived it — left as it is"})])))))
 
+(defn edited-derivation
+  "The state key of a derived Claude `statusLine` that is derived no longer
+   but was edited by hand since: kept, so the plan warns about it on every
+   run until it is removed or put back, not once."
+  [cfg st claude-settings]
+  (let [{:keys [value]} (state/entry st :claude :settings :status-line)
+        current (when value (get (u/read-json claude-settings) :statusLine))]
+    (when (and current
+               (not (contains? (get-in cfg [:statusline :derived]) :claude))
+               (nil? (get-in cfg [:tools :claude :status-line]))
+               (not= (u/norm current) (u/norm value)))
+      (state/key-for :claude :settings :status-line))))
+
 (defn- derive-findings
   "What keeps `:acli` from deriving what it names."
   [sl]
@@ -534,6 +547,13 @@
                [(finding (case status :ok :ok :invalid :error :unknown) [:config]
                          (if (= :invalid status) (str message " — nothing is written") message))])
              (keep identity [(env-finding (System/getenv) (config-path))])
+             ;; Claude would run a renderer nothing builds
+             (let [built (source-bin sl)]
+               (when (and (contains? (:derived sl) :claude) (not (:bin sl)) built
+                          (not (some #{:pi} (:acli sl))) (not (fs/executable? built)))
+                 [(finding :warn [:acli] (str "Claude's statusLine runs " (u/tilde built)
+                                              ", which is not built: build it, or add :pi to :acli"
+                                              " so agentctl builds it"))]))
              ;; a `:warn`, not `:unknown`, when awl cannot be read: `apply`
              ;; prints warnings on every run, and an override awl may never
              ;; honour must not disappear behind "no changes" once the file is

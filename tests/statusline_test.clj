@@ -366,5 +366,12 @@
       (is (empty? (prune)) "already gone")
       (finally (fs/delete-if-exists settings)))))
 
+(deftest a-renderer-nothing-builds-is-said
+  (let [built? (fn [decl] (not-any? #(str/includes? (:message %) "not built")
+                                    (sl/findings (cfg (merge {:defaults {:color :never}} decl)))))]
+    (is (not (built? {:acli [:cc] :source "/nowhere"})) ":cc alone runs a binary nothing builds")
+    (is (built? {:acli [:cc :pi] :source "/nowhere"}) ":pi builds it")
+    (is (built? {:acli [:cc] :source "/nowhere" :bin stub}) ":bin is the user's to provide")))
+
 (let [{:keys [fail error]} (run-tests 'statusline-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

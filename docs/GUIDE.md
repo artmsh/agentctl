@@ -659,7 +659,8 @@ they never drift from the file:
 - Any other CLI is a warning, since awl reads the file itself and codex draws its own status
   line. A name that is no CLI is a config error.
 - `:source` is also where the renderer comes from for `--check`, after `:bin` and once it is
-  built.
+  built. With `:cc` but neither `:bin` nor `:pi`, nothing builds it, and `validate` and
+  `apply` warn until it is built.
 
 Derivation is opt-in. Without `:acli`, `:statusline` writes the file and nothing else.
 
@@ -675,7 +676,8 @@ The derived ops are ordinary Claude settings and Pi extensions. `-t claude`, `-t
 `-k settings` and `-k extensions` select them, and `-k statusline` does not. Each planned
 change is marked "derived from :statusline :acli". Dropping `:cc` from `:acli` removes the
 `statusLine` agentctl wrote, but only while it still holds that value. One edited by hand
-is left in place with a warning, and the Pi extension stays. Dropping `:pi` unlinks the
+is left in place, with a warning on every run until it is removed or put back,
+and the Pi extension stays. Dropping `:pi` unlinks the
 extension the same way any removed extension is unlinked. `import` reads a derived
 `statusLine` back as a hand-written `:status-line`, and it does not recover `:acli` or
 `:source`.

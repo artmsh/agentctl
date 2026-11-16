@@ -738,7 +738,8 @@
          want (set (map (fn [[t k id]] (state/key-for t k id)) owned))
          failed-keys (set (map (fn [[t k id]] (state/key-for t k id)) failed))
          done-keys (set (map (fn [[t k id]] (state/key-for t k id)) done))
-         stale (filter #(and (not (want %)) (not (failed-keys %))
+         kept (statusline/edited-derivation cfg st claude/settings-file)
+         stale (filter #(and (not (want %)) (not (failed-keys %)) (not= kept %)
                              (or (nil? done) (done-keys %))) (keys (:managed st)))
          wrote? (fn [t k id] (or (nil? done) (contains? done [t k id])))
          data-for (fn [t k id data]
