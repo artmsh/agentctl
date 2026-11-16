@@ -275,47 +275,96 @@
             at (- (count lines) tail)]
         (assoc seg :lines (vec (concat (subvec lines 0 at) [new-line] (subvec lines at))))))))
 
-(defn set-key
-  "Set `k` = `v` inside table `table-path` (a vector of segments; [] = root).
-   Returns new text."
-  [text table-path k v]
-  (let [segs (segments text)
-        header (when (seq table-path) (header-for table-path))
-        idx (first (keep-indexed (fn [i s] (when (table-seg? s header) i)) segs))]
-    (if idx
-      (render (update segs idx set-in-segment k v))
-      (render (conj (vec segs)
-                    {:header header
-                     :lines [(str "[" header "]")
-                             (str (quote-key k) " = " (encode-value v))
-                             ""]})))))
-
-(defn set-keys [text table-path kvs]
-  (reduce (fn [t [k v]] (set-key t table-path k v)) text kvs))
-
 (defn- segment-index [segs table-path]
   (let [header (when (seq table-path) (header-for table-path))]
     (first (keep-indexed (fn [i s] (when (table-seg? s header) i)) segs))))
 
-(defn has-key?
-  "Does table `table-path` hold `k` as a key of its own (not a sub-table)?"
-  [text table-path k]
-  (let [segs (segments text)]
-    (boolean (some->> (segment-index segs table-path) (nth segs) :lines (key-span k)))))
+(defn- locate
+  "Where the table `table-path` is defined in `segs`: `{:seg i}` for a
+   `[header]` table (the root is segment 0); `{:seg i :key k :inner [...]}`
+   for an inline table held as key `k` of the header table in segment `i`,
+   `inner` descending through inline tables nested in it; nil when the file
+   does not define it yet. A table defined by dotted keys (`a.b = 1`) is not
+   found, and a header written for it is refused by `update-file!`."
+  [segs table-path]
+  (let [tp (mapv u/kw->str table-path)]
+    (if-let [i (segment-index segs tp)]
+      {:seg i}
+      (some (fn [n]
+              (when-let [i (segment-index segs (subvec tp 0 n))]
+                (when (key-span (nth tp n) (:lines (nth segs i)))
+                  {:seg i :key (nth tp n) :inner (subvec tp (inc n))})))
+            (range (dec (count tp)) -1 -1)))))
 
-(defn remove-key [text table-path k]
+(defn- dissoc-pruning
+  "`m` without `k` under `path`, dropping each map the removal empties."
+  [m path k]
+  (if (empty? path)
+    (dissoc m k)
+    (let [sub (get m (first path))]
+      (if (map? sub)
+        (let [sub' (dissoc-pruning sub (rest path) k)]
+          (if (empty? sub') (dissoc m (first path)) (assoc m (first path) sub')))
+        m))))
+
+(defn- edit-inline
+  "Rewrite the inline table held as `k` in `seg` through `f`, where it
+   stands. Its other entries are kept: they are the ones written by hand. A
+   key holding anything but a table is refused rather than overwritten, and
+   a table `f` empties goes with its key, as a pruned `[table]` does."
+  [seg k f]
+  (let [lines (:lines seg)
+        [s e] (key-span k lines)
+        {:keys [value-at]} (parse-key (nth lines s))
+        v (get (parse-text (str/join "\n" (cons (str "v = " (subs (nth lines s) value-at))
+                                                (subvec lines (inc s) (inc e)))))
+               "v")]
+    (when-not (map? v)
+      (throw (ex-info (str "`" k "` holds " (if (sequential? v) "an array" "a value")
+                           ", not a table — left as it is")
+                      {:key k})))
+    (let [v' (f v)]
+      (if (= v' v)
+        seg
+        (assoc seg :lines (vec (concat (subvec lines 0 s)
+                                       (when (seq v') [(str (quote-key k) " = " (encode-value v'))])
+                                       (subvec lines (inc e)))))))))
+
+(defn set-key
+  "Set `k` = `v` inside table `table-path` (a vector of segments; [] = root).
+   The table may be a `[header]` table or an inline one (`domains = {…}`),
+   which is edited in place; one the file lacks gets a header of its own.
+   Returns new text."
+  [text table-path k v]
   (let [segs (segments text)
-        header (when (seq table-path) (header-for table-path))]
-    (render (mapv (fn [s]
-                    (if (table-seg? s header)
-                      (update s :lines
-                              (fn [lines]
-                                (let [gone (set (mapcat (fn [[a b parts]]
-                                                          (when (= [(u/kw->str k)] parts) (range a (inc b))))
-                                                        (key-spans lines)))]
-                                  (vec (keep-indexed (fn [i l] (when-not (gone i) l)) lines)))))
-                      s))
-                  segs))))
+        {:keys [seg key inner] :as loc} (locate segs table-path)]
+    (cond
+      key (render (update segs seg edit-inline key #(assoc-in % (conj inner (u/kw->str k)) v)))
+      loc (render (update segs seg set-in-segment k v))
+      :else (let [header (header-for table-path)]
+              (render (conj (vec segs)
+                            {:header header
+                             :lines [(str "[" header "]")
+                                     (str (quote-key k) " = " (encode-value v))
+                                     ""]}))))))
+
+(defn set-keys [text table-path kvs]
+  (reduce (fn [t [k v]] (set-key t table-path k v)) text kvs))
+
+(defn remove-key
+  "Remove `k` from table `table-path`, a `[header]` or an inline table."
+  [text table-path k]
+  (let [segs (segments text)
+        {:keys [seg key inner] :as loc} (locate segs table-path)]
+    (cond
+      key (render (update segs seg edit-inline key #(dissoc-pruning % inner (u/kw->str k))))
+      loc (render (update segs seg update :lines
+                          (fn [lines]
+                            (let [gone (set (mapcat (fn [[a b parts]]
+                                                      (when (= [(u/kw->str k)] parts) (range a (inc b))))
+                                                    (key-spans lines)))]
+                              (vec (keep-indexed (fn [i l] (when-not (gone i) l)) lines))))))
+      :else text)))
 
 (defn remove-table-if-empty
   "Drop the table at `table-path` once it holds no key and no comment — the

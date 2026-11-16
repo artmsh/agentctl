@@ -94,4 +94,34 @@ grep -q '^\[permissions.local-dev\]' "$CONF" && fail "[permissions.\"local-dev\"
 c=$(code_of run apply -f "$SB/b.edn" --all -t codex)
 [ "$c" = 0 ] || { cat "$SB/out.txt"; fail "not converged after apply! ($c)"; }
 
+echo "4. a declared rule joins a hand-written inline table, and leaves it alone when dropped"
+cat > "$CONF" <<'TOML'
+default_permissions = "local-dev"
+
+[permissions.local-dev]
+extends = ":workspace"
+
+[permissions.local-dev.network]
+enabled = true
+domains = { "127.0.0.1" = "allow", localhost = "allow" }
+TOML
+cat > "$SB/c.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "local-dev"
+             :permission-profiles {:local-dev {:network {:domains {"example.test" "allow"}}}}}]}
+EDN
+c=$(code_of run apply! -f "$SB/c.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! exited $c"; }
+toml 'd = t["permissions"]["local-dev"]["network"]["domains"]; assert d == {"127.0.0.1": "allow", "localhost": "allow", "example.test": "allow"}, d' \
+  || fail "the hand-written domains were not kept beside the declared one"
+c=$(code_of run apply -f "$SB/c.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "not converged after a state.edn round trip ($c)"; }
+cat > "$SB/c.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "local-dev"
+             :permission-profiles {:local-dev {:extends ":workspace"}}}]}
+EDN
+c=$(code_of run apply! -f "$SB/c.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! of the prune exited $c"; }
+toml 'd = t["permissions"]["local-dev"]["network"]["domains"]; assert d == {"127.0.0.1": "allow", "localhost": "allow"}, d' \
+  || fail "the prune did not remove exactly the declared domain"
+
 echo "all codex e2e checks passed"

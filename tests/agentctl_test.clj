@@ -1195,6 +1195,47 @@
                 (is (= "write" (get-in t ["permissions" "dev" "filesystem" grant])))
                 (is (empty? (codex-drift fewer st3)))))))))))
 
+(deftest codex-permission-profiles-merge-into-an-inline-table-and-prune-by-subtraction
+  (let [f (str (temp-dir) "/config.toml")
+        on-disk (str "default_permissions = \"local-dev\"\n\n"
+                     "[permissions.local-dev]\nextends = \":workspace\"\n\n"
+                     "[permissions.local-dev.network]\nenabled = true\n"
+                     "domains = { \"127.0.0.1\" = \"allow\", localhost = \"allow\" }\n")
+        raw (fn [domains] {:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "local-dev"
+                                       :permission-profiles {:local-dev {:network {:domains domains}}}}]})
+        domains #(get-in (toml/read-toml f) ["permissions" "local-dev" "network" "domains"])]
+    (u/write-text! f on-disk)
+    (with-redefs [codex/config-file f]
+      (let [{st1 :st} (converge-codex (raw {"example.test" "allow"}) state/empty-state)]
+        (is (= {"127.0.0.1" "allow" "localhost" "allow" "example.test" "allow"} (domains))
+            "the declared rule joins the hand-written ones")
+        (is (= 1 (count (re-seq #"(?m)^domains = " (slurp f)))) "still one inline table, where it was")
+        (is (not (str/includes? (slurp f) "[permissions.local-dev.network.domains]")))
+        (is (empty? (codex-drift (raw {"example.test" "allow"}) st1)) "converged")
+        (testing "dropping the declared rule removes it alone"
+          (let [{st2 :st} (converge-codex (raw {"other.test" "deny"}) st1)]
+            (is (= {"127.0.0.1" "allow" "localhost" "allow" "other.test" "deny"} (domains)))
+            (is (empty? (codex-drift (raw {"other.test" "deny"}) st2)))))))
+    (testing "an inline table nested in an inline table is written into the same way"
+      (u/write-text! f (str "default_permissions = \"local-dev\"\n[permissions.local-dev]\n"
+                            "network = { enabled = true, domains = { localhost = \"allow\" } }\n"))
+      (with-redefs [codex/config-file f]
+        (let [{st1 :st} (converge-codex (raw {"example.test" "allow"}) state/empty-state)
+              t (toml/read-toml f)]
+          (is (= {"enabled" true "domains" {"localhost" "allow" "example.test" "allow"}}
+                 (get-in t ["permissions" "local-dev" "network"])))
+          (is (not (str/includes? (slurp f) "[permissions.local-dev.network")))
+          (is (empty? (codex-drift (raw {"example.test" "allow"}) st1))))))
+    (testing "a rule removed from an inline table it alone filled takes the emptied table with it"
+      (is (= "[t]\na = 1\n" (toml/remove-key "[t]\na = 1\nd = { x = 1 }\n" ["t" "d"] "x")))
+      (is (= "[t]\nn = {e = true}\n"
+             (toml/remove-key "[t]\nn = { e = true, d = { x = 1 } }\n" ["t" "n" "d"] "x"))))
+    (testing "a key holding a value or an array is refused, not overwritten with a table"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds a value, not a table"
+                            (toml/set-key "[t]\nd = \"x\"\n" ["t" "d"] "k" 1)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds an array"
+                            (toml/set-key "[t]\nd = [1]\n" ["t" "d"] "k" 1))))))
+
 (deftest codex-permission-profiles-import-without-loss
   (let [f (str (temp-dir) "/config.toml")]
     (u/write-text! f codex-profile-on-disk)

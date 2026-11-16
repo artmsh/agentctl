@@ -385,8 +385,12 @@ rejects anything else in a profile, a non-string or unknown built-in
 
 `plan/toml-tree-ops` turns the nested map into one `toml-set-op` per table,
 each owning only its declared keys. A nested map becomes a sub-table, unless
-`config.toml` already holds that key as an inline table, which is then
-rewritten in place, so a write never defines a table twice. Ownership is key
+`config.toml` already holds that key as an inline table
+(`domains = { localhost = "allow" }`). Then the declared entries are merged
+into it where it stands, the hand-written ones are kept, and a write never
+defines a table twice. An inline table a prune empties goes with its key. A
+table defined by dotted keys (`network.domains = …`) is not recognised, and
+the write is refused as invalid TOML rather than redefining it. Ownership is key
 by key: under the entity DSL, removing a declared rule removes that key, a
 removed profile loses every key agentctl wrote and the tables they leave
 empty, and a rule added by hand is never touched. Codex will not start with
