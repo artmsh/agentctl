@@ -2068,39 +2068,66 @@ for n in 1 2; do
 done
 [ "$(status_line)" = edited ] || fail "the hand-edited statusLine was changed"
 
-echo "46. an old-format run takes over what a DSL run wrote that it declares too, so {} prunes none of it"
+echo "46. an old-format run takes over, key by key, what a DSL run wrote that it declares too"
 OT="$SB/old-takes-over"
-mkdir -p "$OT/proj"
-ot() { (cd "$OT" && AGENTCTL_HOME="$OT" run "$@"); }
-cat > "$OT/dsl.edn" <<EDN
-{:trust [{:in "$OT/proj" :acli [:codex]}]
- :settings [{:in "$OT/proj" :acli [:claude] :model "m1"}]}
+# ot <case> <args…>: each case gets a home of its own
+ot() { local h="$OT/$1"; shift; mkdir -p "$h/proj"; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }
+ot_trusted() { grep -q 'trust_level = "trusted"' "$OT/$1/.codex/config.toml" 2>/dev/null; }
+# ot_key <case> <file under the home> <key>: the key's value, empty when absent
+ot_key() { python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except FileNotFoundError: print("")' "$OT/$1/$2" "$3"; }
+ot_cfg() { mkdir -p "$OT/$1"; cat > "$OT/$1/$2.edn"; }
+ot_apply() { ot "$1" apply! -f "$OT/$1/$2.edn" --all -y > "$OT/$1/$2.out" 2>&1 || { cat "$OT/$1/$2.out"; fail "$1: apply! $2 failed"; }; }
+for c in proj user partial back; do printf '{}\n' | ot_cfg "$c" empty; done
+
+# a project's trust and model, declared both ways: {} after the old format prunes neither
+ot_cfg proj dsl <<EDN
+{:trust [{:in "$OT/proj/proj" :acli [:codex]}]
+ :settings [{:in "$OT/proj/proj" :acli [:claude] :model "m1"}]}
 EDN
-cat > "$OT/old.edn" <<EDN
-{:projects {:p {:path "$OT/proj" :trusted true
+ot_cfg proj old <<EDN
+{:projects {:p {:path "$OT/proj/proj" :trusted true
                 :executors {:codex {} :claude {:model "m1"}}}}}
 EDN
-printf '{}\n' > "$OT/empty.edn"
-ot_trusted() { grep -q 'trust_level = "trusted"' "$OT/.codex/config.toml" 2>/dev/null; }
-ot_model() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("model",""))' "$OT/proj/.claude/settings.json" 2>/dev/null; }
-ot apply! -f "$OT/dsl.edn" --all -y > "$OT/dsl.txt" 2>&1 || { cat "$OT/dsl.txt"; fail "setup: DSL apply! failed"; }
-ot_trusted && [ "$(ot_model)" = m1 ] || { cat "$OT/dsl.txt"; fail "setup: DSL trust or model not written"; }
-ot apply! -f "$OT/old.edn" --all -y > "$OT/old.txt" 2>&1 || { cat "$OT/old.txt"; fail "old-format apply! failed"; }
-ot_trusted && [ "$(ot_model)" = m1 ] || { cat "$OT/old.txt"; fail "the old-format run lost trust or model"; }
+ot_apply proj dsl; ot_apply proj old
 set +e
-ot apply -f "$OT/empty.edn" --all > "$OT/empty.txt" 2>&1; code=$?
+ot proj apply -f "$OT/proj/empty.edn" --all > "$OT/proj/after.txt" 2>&1; code=$?
 set -e
-[ "$code" = 0 ] || { cat "$OT/empty.txt"; fail "{} after an old-format run plans to prune what the DSL run once wrote"; }
-# what the old format does not declare stays the DSL run's, and is pruned
-cat > "$OT/old-trust.edn" <<EDN
-{:projects {:p {:path "$OT/proj" :trusted true :executors {:codex {}}}}}
+[ "$code" = 0 ] || { cat "$OT/proj/after.txt"; fail "{} after an old-format run plans to prune what the old format declares"; }
+
+# the old format declares model, not theme: {} keeps model, prunes theme
+ot_cfg user dsl <<EDN
+{:settings [{:in :all :acli [:claude] :model "m1" :theme "dark"}]}
 EDN
-# a fresh home: a DSL run claims what it writes, not what it finds converged
-rm -rf "$OT/.codex" "$OT/.claude" "$OT/.config/agentctl" "$OT/proj/.claude"
-ot apply! -f "$OT/dsl.edn" --all -y > /dev/null 2>&1
-ot apply! -f "$OT/old-trust.edn" --all -y > "$OT/old-trust.txt" 2>&1 || { cat "$OT/old-trust.txt"; fail "old-format trust-only apply! failed"; }
-ot apply! -f "$OT/empty.edn" --all -y > "$OT/empty2.txt" 2>&1 || { cat "$OT/empty2.txt"; fail "{} apply! failed"; }
-ot_trusted || { cat "$OT/empty2.txt"; fail "{} pruned trust the old format had taken over"; }
-[ -z "$(ot_model)" ] || { cat "$OT/empty2.txt"; fail "{} left the model only the DSL run declared"; }
+ot_cfg user old <<EDN
+{:executors {:claude {:model "m1"}}}
+EDN
+ot_apply user dsl; ot_apply user old; ot_apply user empty
+[ "$(ot_key user .claude/settings.json model)" = m1 ] || { cat "$OT/user/empty.out"; fail "{} pruned the model the old format declares"; }
+[ -z "$(ot_key user .claude/settings.json theme)" ] || { cat "$OT/user/empty.out"; fail "{} left the theme only the DSL run declared"; }
+
+# trust only, the old way: the DSL's project model is still the DSL's
+ot_cfg partial dsl <<EDN
+{:trust [{:in "$OT/partial/proj" :acli [:codex]}]
+ :settings [{:in "$OT/partial/proj" :acli [:claude] :model "m1"}]}
+EDN
+ot_cfg partial old <<EDN
+{:projects {:p {:path "$OT/partial/proj" :trusted true :executors {:codex {}}}}}
+EDN
+ot_apply partial dsl; ot_apply partial old; ot_apply partial empty
+ot_trusted partial || { cat "$OT/partial/empty.out"; fail "{} pruned trust the old format had taken over"; }
+[ -z "$(ot_key partial proj/.claude/settings.json model)" ] || { cat "$OT/partial/empty.out"; fail "{} left the model only the DSL run declared"; }
+
+# DSL, old, DSL again: the DSL takes back what it declares, converged or not, and {} prunes it
+ot_cfg back dsl <<EDN
+{:settings [{:in :all :acli [:claude] :model "m1" :theme "dark"}]}
+EDN
+ot_cfg back old <<EDN
+{:executors {:claude {:model "m1" :theme "dark"}}}
+EDN
+ot_apply back dsl; ot_apply back old; ot_apply back dsl; ot_apply back empty
+[ -z "$(ot_key back .claude/settings.json model)$(ot_key back .claude/settings.json theme)" ] \
+  || { cat "$OT/back/empty.out"; fail "{} after DSL, old, DSL left what the DSL declared"; }
 
 echo "all agentctl e2e checks passed"

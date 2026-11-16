@@ -162,9 +162,9 @@ For MCPs, `:at :machine` (the default) uses the machine-local placement;
 alias. Tool support still applies, and unsupported placements produce warnings.
 The ownership manifest records resolved paths so a repository that disappears
 from a selector can still have its owned entries pruned. An old-format run
-records none of its writes. It removes from the manifest the DSL writes it
-declares again, matched by tool and by project or home, so a later `{}` leaves
-them in place.
+records none of its writes. It takes over from the manifest each key of a DSL
+write that it declares again at the same project or home, so a later `{}` leaves
+that key in place. A later DSL run that declares the key claims it back.
 
 The older project-registry form remains readable for compatibility. The
 following example and its project-specific sections describe that legacy form;
