@@ -1722,4 +1722,25 @@ EDN
   grep -rqs "body older" "$H/.config/agentctl/backups" || fail "the replaced copy was not backed up"
 )
 
+echo "38. codex links a user-wide skill before it removes the project copy that repeats it"
+(
+  H=$(fresh_home codex-order); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills"; cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  git -C "$P" init -q
+  # pi asks before reading the project, so codex is the one that removes it
+  mkdir -p "$H/.pi/agent"; printf '{"defaultProjectTrust": "ask"}\n' > "$H/.pi/agent/settings.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi :codex]}
+          [shared "other"] {:in "projects/proj" :acli [:codex :pi]}}}
+EDN
+  run apply! -f "$H/agents.edn" --all -t pi -t codex -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "codex-order: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "the first apply! removed the copy before linking the skill"; }
+  [ ! -e "$P/.agents/skills/wrap-up" ] && [ -f "$H/.codex/skills/wrap-up/SKILL.md" ] \
+    || fail "codex-order: the copy is not replaced by the user-wide skill in one run"
+  run apply -f "$H/agents.edn" --all -t pi -t codex > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-order: not converged"; }
+)
+
 echo "all agentctl e2e checks passed"

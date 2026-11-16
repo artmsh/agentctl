@@ -367,8 +367,9 @@
   (concat (settings-ops cfg)
           (mcp-ops cfg state)
           (provider-ops cfg)
-          (project-ops cfg state)
+          ;; the user-wide links first: a project copy's removal checks for them
           (skill-ops cfg state)
+          (project-ops cfg state)
           (memory-ops cfg)))
 
 (defn present? [] (some? (u/which "codex")))
