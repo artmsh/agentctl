@@ -8,6 +8,7 @@
             [agentctl.refs :as refs]
             [agentctl.scope :as scope]
             [agentctl.sources :as sources]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -674,6 +675,8 @@
   ;; so they take no part in the entity lowering below
   (assoc (normalize-resources raw path load-findings)
          :extensions (norm-extensions (:extensions raw))
+         ;; one file for the whole machine, outside the entity model too
+         :statusline (statusline/normalize (:statusline raw))
          :hosts (into {} (map (fn [[id decl]] [id (norm-host id decl path)])) (:hosts raw))))
 
 (defn- normalize-resources [raw path & [load-findings]]
@@ -757,7 +760,7 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :settings :permissions :trust :hooks :plugins :extensions :hosts :#def})
+    :settings :permissions :trust :hooks :plugins :extensions :hosts :statusline :#def})
 
 (defn- host-findings
   "A host's `:ssh` goes on an ssh command line and its name into a file name, so
@@ -788,6 +791,7 @@
     (concat
      (:load-findings cfg)
      (host-findings cfg)
+     (statusline/shape-findings cfg)
      (for [{:keys [kind id decl]} (:entities cfg) :when (contains? decl :scope)]
        (finding :warn [kind id :scope] ":scope is deprecated; use :at :machine or :repo"))
      (for [{:keys [kind id in targets]} (:entities cfg)

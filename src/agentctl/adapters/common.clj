@@ -108,11 +108,12 @@
 
 (def project-skill-tools
   "Tools with a project-level skills directory. The rest read skills only from
-   the user's own home. Codex, antigravity, kimi and the DeepSeek Harness walk
-   up from the working directory to the repository root looking for
-   `.agents/skills`, so a project can carry its own — one directory all four
-   of them read."
-  #{:claude :codex :antigravity :kimi :dsh})
+   the user's own home. Codex, antigravity, kimi, pi and the DeepSeek Harness
+   walk up from the working directory to the repository root looking for
+   `.agents/skills`, so a project can carry its own — one directory all five
+   of them read. Pi also reads its own `.pi/skills`, and reads either only in
+   a project it trusts."
+  #{:claude :codex :antigravity :kimi :dsh :pi})
 
 (def project-scopes
   "Scopes that belong to one project: `:local` writes into the user's own

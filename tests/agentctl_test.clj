@@ -14,6 +14,7 @@
             [agentctl.gui :as gui]
             [agentctl.hosts :as hosts]
             [agentctl.imports :as imports]
+            [agentctl.main :as main]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.remote :as remote]
@@ -1950,15 +1951,15 @@
         (is (some #(and (= :error (:level %)) (str/includes? (:message %) "shared")
                        (str/includes? (:message %) "more than one pack"))
                   findings))))
-    (testing "pi has no project skills directory, so a bare-resolved skill still reaches it user-wide"
+    (testing "a bare-resolved skill still reaches pi, in the project that names it"
       ;; regression: dropping the :skills entry must not silently stop pi
-      ;; (and omp, same shape) from installing a skill it only ever
-      ;; discovered by naming a project's executors — see bare-project-skills
+      ;; from installing a skill it only ever discovered by naming a
+      ;; project's executors — see bare-project-skills
       (is (contains? (:skills cfg) :wrap-up))
       (is (contains? (:tools (:wrap-up (:skills cfg))) :pi))
-      (is (contains? (set (core/inventory cfg)) [:pi :skills :wrap-up]))
-      (is (some #(and (= :create (:action %)) (= :wrap-up (:id %)))
-                (pi/skill-ops cfg state/empty-state))))))
+      (is (contains? (set (map #(vec (take 3 %)) (core/inventory cfg))) [:pi :skills :example/wrap-up]))
+      (is (not-any? #(= :wrap-up (:id %)) (pi/skill-ops cfg state/empty-state))
+          "not user-wide: pi reads the project's own"))))
 
 (deftest a-project-skill-is-owned-where-it-was-installed
   (let [dir (temp-dir)
@@ -1970,12 +1971,10 @@
                                                  :skills [:wrap-up]}}}
                               "x")
         inv (set (map #(vec (take 3 %)) (core/inventory cfg)))]
-    (testing "claude and codex own it under the project it belongs to"
-      (doseq [t [:claude :codex]]
+    (testing "each tool owns it under the project it belongs to"
+      (doseq [t [:claude :codex :pi]]
         (is (contains? inv [t :skills :proj/wrap-up]))
-        (is (not (contains? inv [t :skills :wrap-up])))))
-    (testing "pi has no project skills directory, so its copy is user-wide"
-      (is (contains? inv [:pi :skills :wrap-up])))))
+        (is (not (contains? inv [t :skills :wrap-up])))))))
 
 (deftest a-server-left-behind-in-mcp-json-is-reported-not-deleted
   ;; local scope owning a server does not remove the copy the repo still ships
@@ -2110,6 +2109,27 @@
                     (is (= ["reminder.sh"]
                            (map :command (mapcat :hooks (get-in after [:hooks :SessionStart])))))))))))))))
 
+(deftest a-converged-project-hook-is-reported-like-a-user-one
+  ;; the user-scope pass above renders `= hooks/{lock reminder}`; a hook placed
+  ;; in a project has to confirm itself the same way, or a hooks change there
+  ;; can only be checked by reading settings.json by hand
+  (let [root (temp-dir) repo (str root "/repo")]
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [claude/settings-file (str root "/settings.json") claude/runtime-file (str root "/runtime.json")]
+      (let [raw {:hooks [{:id :start :event :SessionStart :command "echo ready" :in repo}]}
+            cfg (config/normalize raw "test")
+            opts {:tools #{:claude} :kinds #{:hooks}}
+            ops (core/build-plan cfg state/empty-state opts)
+            _ (is (empty? (:failed (core/execute! ops))))
+            st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            again (core/build-plan cfg st opts)
+            id (keyword (name (scope/target-id repo)) "start")]
+        (is (= [[:create id]] (map (juxt :action :id) ops)))
+        (is (= [[:noop id]] (map (juxt :action :id) again)))
+        (is (re-find #"(?m)^= \S*/repo hooks/start$"
+                     (binding [plan/*color* false] (plan/render-plan again {:show-noop true}))))
+        (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged" (plan/summary-line again)))))))
+
 (deftest a-scoped-run-that-plans-nothing-for-a-hook-does-not-forget-its-live-value
   ;; `-t`/`-k`/`-p` can filter a hook's op out of the plan entirely while the
   ;; id stays declared in cfg, so `inventory` still calls it owned. Passing
@@ -2146,7 +2166,131 @@
   (is (false? (core/scoped? {})))
   (is (true? (core/scoped? {:tools [:claude]})))
   (is (true? (core/scoped? {:kinds [:hooks]})))
-  (is (true? (core/scoped? {:projects #{"p"}}))))
+  (is (true? (core/scoped? {:projects #{"p"}})))
+  (is (true? (core/scoped? {:only [[:skills "review"]]})))
+  (is (true? (core/scoped? {:user true}))))
+
+(deftest a-converged-plan-still-shows-its-warnings
+  ;; "no changes" says the environment matches the config; a warning says part
+  ;; of the config went nowhere. A converged plan carrying one is not the
+  ;; first report, in the cli text or in the gui's
+  (let [f (str (temp-dir) "/settings.json")
+        text "{:executors {:claude {:bogus-setting true}}}"
+        cfg (config/parse-config text "test")]
+    (u/write-json! f {:$schema claude/settings-schema-url})
+    (with-redefs [claude/settings-file f]
+      (let [ops (core/build-plan cfg state/empty-state {:tools #{:claude}})]
+        (is (not-any? plan/mutating? ops) "setup: converged")
+        (is (some :warn ops) "setup: carries a warning")
+        (is (plan/show-plan? ops {}))
+        (is (str/includes? (plan/render-plan ops {}) "unsupported setting :bogus-setting")))
+      (let [res (gui/plan-for-text text "test" {:tools #{:claude}})]
+        (is (:ok res))
+        (is (zero? (:changes res)))
+        (is (str/includes? (:plan res) "unsupported setting :bogus-setting"))))
+    (let [quiet [(plan/op {:action :noop :tool :claude :kind :settings :id :model})]]
+      (is (not (plan/show-plan? quiet {})) "a converged plan without a warning reads as converged")
+      (is (plan/show-plan? quiet {:show-noop true}) "--show-noop shows it anyway"))))
+
+(deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
+  ;; `-k` is checked against `core/kinds`; a kind missing from it would be
+  ;; refused, and one missing from --help is a kind nobody knows to ask for
+  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
+           :providers :memory :trust :extensions :projects :statusline}
+         (set core/kinds)))
+  (let [lines (->> (str/split-lines main/usage)
+                   (drop-while #(not (str/includes? % "--kind KIND")))
+                   rest
+                   (take-while #(str/starts-with? % (apply str (repeat 23 " ")))))
+        {legacy true current false} (group-by #(str/includes? % "legacy") lines)
+        words #(set (mapcat (fn [l] (str/split (str/trim l) #"\s+")) %))]
+    (testing "--help names every kind: the DSL's, then the old format's own, marked"
+      (is (= (set (map name (core/kinds-for {:entity-dsl? true}))) (words current)))
+      (is (= 1 (count legacy)))
+      (is (= #{"projects"} (set (map name (remove (set (core/kinds-for {:entity-dsl? true})) core/kinds)))))
+      (is (str/ends-with? (first legacy) "in place of trust): projects"))))
+  (is (= {:only ["skills/review" "mcps/search"] :user true}
+         (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
+                      [:only :user]))))
+
+(deftest each-config-format-has-its-own-kinds
+  ;; the DSL refiles every :projects op under :trust/:permissions/:settings, and
+  ;; the old format plans no :trust — so -k projects on the one and -k trust on
+  ;; the other select nothing, and would read as converged
+  (testing "the rule"
+    (let [dsl (set (core/kinds-for {:entity-dsl? true})) old (set (core/kinds-for {}))]
+      (is (= (disj (set core/kinds) :projects) dsl))
+      (is (= (disj (set core/kinds) :trust) old))
+      (is (every? #(and (dsl %) (old %)) [:skill-packs :extensions :permissions :settings]))))
+  (testing "the plans agree with the rule"
+    (let [root (temp-dir) proj (str root "/plain")
+          kinds (fn [raw]
+                  (let [cfg (config/normalize raw "test")]
+                    [cfg (set (map :kind (core/build-plan cfg state/empty-state {:tools #{:codex}})))]))]
+      (fs/create-dirs proj)
+      (with-redefs [codex/config-file (str root "/config.toml") codex/mcp-list (constantly {})]
+        (let [[cfg planned] (kinds {:trust [{:in proj :acli [:codex]}]})]
+          (is (:entity-dsl? cfg))
+          (is (contains? planned :trust) "setup: the DSL plans trust")
+          (is (every? (set (core/kinds-for cfg)) planned)))
+        (let [[cfg planned] (kinds {:projects {:p {:path proj :trusted true :executors #{:codex}}}})]
+          (is (not (:entity-dsl? cfg)))
+          (is (contains? planned :projects) "setup: the old format plans projects")
+          (is (every? (set (core/kinds-for cfg)) planned))))))
+  (testing "a dead kind is named, with what the format files it under and its kinds"
+    (let [dsl (config/normalize {:trust [{:in "/tmp/x" :acli [:codex]}]} "test")
+          old (config/normalize {:projects {:p {:path "/tmp/x" :trusted true}}} "test")
+          [[flag v msg] :as dead] (core/dead-selectors dsl {:kinds #{:projects :skills}})]
+      (is (= 1 (count dead)))
+      (is (= ["-k" "projects"] [flag v]))
+      (is (str/includes? msg "entity-DSL"))
+      (is (str/includes? msg "under permissions, settings or trust"))
+      (is (str/includes? msg "kinds for this config: extensions"))
+      (is (not (str/includes? msg " projects,")))
+      (let [[[flag v msg]] (core/dead-selectors old {:kinds #{:trust}})]
+        (is (= ["-k" "trust"] [flag v]))
+        (is (str/includes? msg "old-format"))
+        (is (str/includes? msg "under projects")))
+      (is (= [["--only" "projects/p"]]
+             (map #(subvec % 0 2) (core/dead-selectors dsl {:only [[:projects "p"]]}))))
+      (is (empty? (core/dead-selectors old {:kinds #{:projects :skills} :only [[:projects "p"]]})))
+      (is (empty? (core/dead-selectors dsl {:kinds #{:trust :permissions}})))))
+  (testing "the gui refuses a kind the buffer's format never plans"
+    (let [dsl-text "{:trust [{:in \"/tmp/x\" :acli [:codex]}]}"
+          old-text "{:projects {:p {:path \"/tmp/x\" :trusted true}}}"]
+      (let [res (gui/plan-for-text dsl-text "test" {:tools #{:codex} :kinds #{:projects}})]
+        (is (false? (:ok res)))
+        (is (str/starts-with? (:error res) "kind projects: an entity-DSL config")))
+      (is (false? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:trust}}))))
+      (is (true? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:projects}})))))))
+
+(deftest only-and-user-select-across-scopes-without-the-rest
+  (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")]
+    (fs/create-dirs (str repo "/.git"))
+    (doseq [s ["review" "lint"]]
+      (fs/create-dirs (str pack "/skills/" s))
+      (spit (str pack "/skills/" s "/SKILL.md") (str "---\nname: " s "\ndescription: d\n---\n")))
+    (let [cfg (config/normalize
+               {:skill-packs {[:uri (str "file://" pack)] {:alias 'p :dir "skills"}}
+                :skills {['p "review"] {:in :all :acli [:claude]}
+                         ['p "lint"] {:in repo :acli [:claude]}}
+                :mcps [{:id :search :cmd "search-mcp" :in :all :acli [:claude]}
+                       {:id :search :cmd "search-mcp" :in repo :acli [:codex]}]}
+               "test")
+          plan (fn [opts] (core/build-plan cfg state/empty-state (merge {:tools #{:claude :codex}} opts)))
+          sel (fn [ops] (set (map (juxt :kind (comp u/kw->str :id) (comp boolean :project)) ops)))]
+      (testing "--only keeps one entity in user scope and in a project, and nothing else"
+        (is (= #{[:mcps "search" false] [:mcps "search" true]}
+               (sel (plan {:only [[:mcps "search"]]}))))
+        (is (= #{[:skills "lint" true]} (sel (plan {:only [[:skills "lint"]]})))))
+      (testing "--user keeps no op that lands in a project"
+        (let [ops (plan {:user true})]
+          (is (seq ops))
+          (is (not-any? #(or (:project %) (:project-path %)) ops))
+          (is (contains? (sel ops) [:skills "review" false]))))
+      (testing "an --only id nothing declares is reported, one that is declared is not"
+        (is (= ["skills/nope"]
+               (core/unmatched-only cfg state/empty-state {:only [[:skills "nope"] [:skills "lint"]]})))))))
 
 (defn- scope-cfg
   "A workspace with two projects and one nested inside the first, so a cwd can
@@ -2844,6 +2988,29 @@
       (is (false? (:show-noop o)))
       (is (= "x" (:file o)) "base opts survive"))))
 
+(deftest gui-refuses-a-filter-that-selects-nothing
+  ;; the CLI exits 1 on `-k bogus`; the GUI answers the same request with a 400
+  ;; naming what is valid, never with a plan of nothing that reads as converged
+  (let [ctx {:tok "t" :path "/tmp/agentctl-gui/agents.edn" :base-opts {} :lock (Object.)}
+        body (fn [m] (java.io.ByteArrayInputStream. (.getBytes (json/generate-string m))))
+        post (fn [uri m] (gui/handler ctx {:request-method :post :uri uri
+                                           :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                           :body (body m)}))]
+    (doseq [uri ["/api/plan" "/api/edit" "/api/apply"]]
+      (let [res (post uri {:text "{}" :kinds ["bogus"] :ops [] :confirm true})
+            data (json/parse-string (:body res) true)]
+        (is (= 400 (:status res)) uri)
+        (is (false? (:ok data)) uri)
+        (is (str/includes? (:error data) "unknown kind :bogus") uri)
+        (is (str/includes? (:error data) "plugins") uri)))
+    (let [res (post "/api/plan" {:text "{}" :tools ["nope"]})
+          data (json/parse-string (:body res) true)]
+      (is (= 400 (:status res)))
+      (is (str/includes? (:error data) "unknown tool :nope"))
+      (is (str/includes? (:error data) "claude")))
+    (testing "valid filters still plan"
+      (is (= 200 (:status (post "/api/plan" {:text "{}" :tools ["pi"] :kinds ["mcps"]})))))))
+
 (deftest gui-plans-from-a-buffer-that-was-never-saved
   (let [dir (temp-dir)
         path (str dir "/agents.edn")
@@ -2852,6 +3019,36 @@
     (is (not (u/exists? path)) "planning writes nothing, not even the config")
     (is (string? (:summary p)))
     (is (nil? (:diffs p)) "ops are rendered, never serialized")))
+
+(deftest gui-pills-count-ops-not-plan-lines
+  ;; a new settings.json renders one `+` line per field under its op, and a
+  ;; command renders a `!` line; the pills are ops, as the summary counts them
+  (let [dir (temp-dir)
+        notes (str dir "/AGENTS.md")
+        text (str "{:executors {:claude {:model \"sonnet\" :thinking \"high\"}}\n"
+                  " :mcps {:search {:cmd \"search-mcp --stdio\" :tools [:claude]}}\n"
+                  " :memory {:shared {:from \"" notes "\" :mode :symlink :tools [:claude]}}}\n")]
+    (spit notes "# notes\n")
+    (with-redefs [claude/settings-file (str dir "/settings.json")
+                  claude/runtime-file (str dir "/claude.json")
+                  claude/memory-file (str dir "/CLAUDE.md")
+                  state/load-state (constantly state/empty-state)]
+      (doseq [verbose [false true]]
+        (let [opts {:tools #{:claude} :kinds #{} :projects #{} :verbose verbose}
+              p (gui/plan-for-text text (str dir "/agents.edn") opts)
+              ops (core/build-plan (config/parse-config text (str dir "/agents.edn")) state/empty-state opts)
+              lines (fn [c] (count (filter #(str/starts-with? (str/triml %) c) (str/split-lines (:plan p)))))
+              [_ adds changes removes] (re-find #"^(\d+) to add, (\d+) to change, (\d+) to remove" (:summary p))]
+          (is (true? (:ok p)))
+          (is (= {:create (parse-long adds) :update (parse-long changes) :delete (parse-long removes)}
+                 (select-keys (:counts p) [:create :update :delete]))
+              "the pills say what the summary line says")
+          (is (> (lines "+") (get-in p [:counts :create]))
+              "the plan has nested field lines a line count would take for creates")
+          (is (= (count (filter #(and (plan/mutating? %) (seq (:cmds %))) ops))
+                 (get-in p [:counts :cmds]))
+              "one per op that runs a command")
+          (is (pos? (get-in p [:counts :cmds]))))))))
 
 (deftest gui-answers-a-half-typed-file-with-a-message
   (testing "the live pane means most keystrokes see invalid edn — that is a payload, not a 500"
@@ -3219,8 +3416,11 @@
       (let [cfg (config/normalize raw "test")
             ops (core/build-plan cfg state/empty-state {:tools #{:pi}})]
         (is (= 1 (count (:projects cfg))))
-        (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) ops))
-        (is (some #(and (= :skills (:kind %)) (:warn %)) ops)))))
+        (is (seq (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops)))
+        (is (every? #(= #{:pi} (set (map first (:owns %))))
+                    (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops))
+            "placed for pi alone")
+        (is (some #(and (= :skills (:kind %)) (:warn %)) ops) "pi does not trust the project"))))
   (let [raw {:settings [{:id :unified :model "a" :on #{:auto-compact} :in :all}
                         {:id :claude :model "b" :off #{:auto-compact} :tools [:claude] :in :all}
                         {:id :later-unified :model "c" :in :all}]}
@@ -3381,30 +3581,30 @@
     (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for)) "converged")))
 
 (deftest keyed-skills-and-packs
-  (let [root (temp-dir) local (str root "/agents-setup") core (str root "/core-vector")
-        clz (str root "/clz")]
+  (let [root (temp-dir) local (str root "/team-skills") core (str root "/app")
+        web (str root "/web")]
     (fs/create-dirs (str local "/skills/wrap-up"))
     (spit (str local "/skills/wrap-up/SKILL.md") "wrap")
-    (doseq [r [core clz]] (fs/create-dirs (str r "/.git")))
-    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias agents-setup}\n"
-                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" clz "\"]}}\n"
-                    " :skills {[agents-setup \"wrap-up\"] {:in :all}\n"
+    (doseq [r [core web]] (fs/create-dirs (str r "/.git")))
+    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias team-skills}\n"
+                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" web "\"]}}\n"
+                    " :skills {[team-skills \"wrap-up\"] {:in :all}\n"
                     "          [:gh \"cyxzdev/Uncodixfy\"] {:in [\"" core "\"] :acli [:codex :cc]}}}")
           cfg (config/parse-config text "test")
           pid (scope/target-id core)]
       (is (:entity-dsl? cfg))
-      (is (= :file (get-in cfg [:skill-packs :agents-setup :type])))
-      (is (= local (get-in cfg [:skill-packs :agents-setup :root])))
+      (is (= :file (get-in cfg [:skill-packs :team-skills :type])))
+      (is (= local (get-in cfg [:skill-packs :team-skills :root])))
       (is (= "https://github.com/obra/superpowers" (get-in cfg [:skill-packs :superpowers :uri])))
       (is (= :git (get-in cfg [:skill-packs :Uncodixfy :type])) "a repo-skill fetches as an implicit pack")
-      (is (= {:from :agents-setup :scope :global}
+      (is (= {:from :team-skills :scope :global}
              (select-keys (get-in cfg [:skills :wrap-up]) [:from :scope])))
       (is (= (str local "/skills/wrap-up") (sources/skill-source cfg (get-in cfg [:skills :wrap-up]))))
       (is (= #{:codex :claude} (get-in cfg [:skills :Uncodixfy :tools])) ":acli maps :cc onto :claude")
       (is (some #{:Uncodixfy} (get-in cfg [:projects pid :skills])))
-      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id clz) :skills])))
+      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id web) :skills])))
       (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
-      (is (= "agents-setup" (get-in cfg [:skill-packs :agents-setup :alias])) "kept for the plan's [alias]")))
+      (is (= "team-skills" (get-in cfg [:skill-packs :team-skills :alias])) "kept for the plan's [alias]")))
   (testing "the key names the skill directory, so an :alias renames without moving it"
     (let [root (temp-dir) local (str root "/pack")]
       (fs/create-dirs (str local "/skills/wrap-up"))
@@ -3590,6 +3790,300 @@
         {:keys [config]} (imports/scan {:existing {:hosts {:win decl}}})]
     (is (= decl (get-in config [:hosts :win])))
     (is (str/includes? (imports/render config) ":hosts"))))
+
+(deftest a-dangling-link-has-no-content
+  (let [root (temp-dir) dir (str root "/skill") gone (str root "/gone")]
+    (fs/create-dirs dir)
+    (spit (str dir "/SKILL.md") "---\nname: skill\n---\n")
+    (fs/create-sym-link gone (str root "/nowhere"))
+    (is (u/exists? gone) "a removal still sees the link")
+    (is (not (u/resolves? gone)))
+    (is (nil? (u/path-sha256 gone)) "hashing a dangling link does not throw")
+    (is (not (u/same-content? gone (str root "/also-nowhere")))
+        "two missing paths are not the same content")
+    (is (u/same-content? dir dir))
+    (is (some? (plan/link-op {:tool :pi :kind :skills :id :skill :src (str root "/missing")
+                              :dest gone :mode :copy}))
+        "a dangling copy of a missing source is not converged")))
+
+(defn- git! [dir & args]
+  (let [{:keys [exit err]} (apply u/sh "git" "-C" dir "-c" "user.email=t@example.com" "-c" "user.name=t" args)]
+    (assert (zero? exit) err)))
+
+(defn- skill-dir! [dir n]
+  (fs/create-dirs dir)
+  (spit (str dir "/SKILL.md") (str "---\nname: " n "\ndescription: d\n---\n")))
+
+(deftest a-symlinked-copy-hashes-as-its-target
+  (let [root (temp-dir) dir (str root "/skill") link (str root "/link")]
+    (skill-dir! dir "skill")
+    (fs/create-sym-link link dir)
+    (is (= (u/path-sha256 dir) (u/path-sha256 link)))
+    (is (not= (u/path-sha256 link) (u/sha256 "")) "a link to a directory is not an empty tree")))
+
+(deftest a-project-copy-git-tracks-is-kept
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs repo)
+    (git! repo "init" "-q")
+    (fs/copy-tree src copy)
+    (git! repo "add" "-A")
+    (git! repo "commit" "-qm" "own copy")
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= copy (:target %)) (plan/mutating? %)) ops) "identical, but committed")
+        (is (some #(and (:warn %) (= copy (:target %))
+                        (str/includes? (str (:summary %)) "tracked by git")) ops))))))
+
+(deftest a-cli-copy-git-tracks-keeps-its-lock-entry
+  (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")
+        skill (str pack "/skills/wrap-up")
+        raw (fn [in] {:skill-packs {[:uri (str "file://" pack)] {:alias 'kit :dir "skills"}}
+                      :skills {['kit "wrap-up"] {:in in :acli [:claude :codex]}
+                               [:uri (str root "/local")] {:in repo :acli [:claude :codex]}}})]
+    (skill-dir! skill "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs repo)
+    (git! repo "init" "-q")
+    (is (zero? (:exit @(p/process (concat (skills-cli/command) ["add" skill "-a" "codex" "-a" "claude-code" "-y"])
+                                  {:dir repo}))))
+    (git! repo "add" "-A")
+    (git! repo "commit" "-qm" "skills")
+    (with-redefs [claude/skills-dir (str root "/claude-skills")
+                  codex/skills-dir (str root "/codex-skills")]
+      (doseq [d [claude/skills-dir codex/skills-dir]]
+        (fs/create-dirs d)
+        (fs/create-sym-link (str d "/wrap-up") skill))
+      (let [cfg (config/normalize (raw :all) "test")
+            ops (core/build-plan cfg state/empty-state {:tools #{:claude :codex}})]
+        (is (not-any? #(some (fn [c] (some #{"remove"} c)) (:cmds %)) ops) "skills remove would take the committed copy")
+        (is (not-any? #(and (plan/mutating? %) (str/includes? (str (:target %)) "/.agents/skills/wrap-up")) ops))
+        (is (some #(and (:warn %) (str/includes? (str (:summary %)) "tracked by git")) ops))
+        (is (empty? (:failed (core/execute! ops))))
+        (is (contains? (skills-cli/read-lock repo) "wrap-up"))
+        (is (fs/directory? (str repo "/.agents/skills/wrap-up")))))))
+
+(deftest a-global-skills-own-source-in-a-project-is-not-its-duplicate
+  ;; the user-wide skill is published from one project's .agents/skills
+  (let [root (temp-dir) repo (str root "/repo") src (str repo "/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= src (:target %)) (plan/mutating? %)) ops))
+        (is (some #(and (:warn %) (str/includes? (str (:summary %)) "codex's wrap-up is linked from it")) ops))))))
+
+(deftest removing-a-project-copy-takes-the-links-into-it
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up") link (str repo "/.claude/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs (str repo "/.git"))
+    (fs/copy-tree src copy)
+    (fs/create-dirs (fs/parent link))
+    (fs/create-sym-link link "../../.agents/skills/wrap-up")
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (fs/create-dirs codex/skills-dir)
+      (fs/create-sym-link (str codex/skills-dir "/wrap-up") src)
+      (let [rm (filter #(and (= copy (:target %)) (plan/mutating? %))
+                       (core/build-plan (cfg) state/empty-state {:tools #{:codex}}))]
+        (is (= 1 (count rm)))
+        (is (= [["rm" "-r" copy] ["unlink" link]] (:cmds (first rm))) "one op, the link with the copy")
+        (is (empty? (:failed (core/execute! rm))))
+        (is (not (u/exists? copy)))
+        (is (not (u/exists? link)) "no link is left dangling")
+        (is (fs/directory? src))))))
+
+(deftest a-copy-claude-reads-through-its-link-stays-while-claude-has-no-user-wide-one
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up")
+        copy (str repo "/.agents/skills/wrap-up") link (str repo "/.claude/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:codex]}
+                                        [:uri (str root "/local")] {:in repo :acli [:codex :claude]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/local") "local")
+    (fs/create-dirs (str repo "/.git"))
+    (fs/copy-tree src copy)
+    (fs/create-dirs (fs/parent link))
+    (fs/create-sym-link link "../../.agents/skills/wrap-up")
+    (with-redefs [codex/skills-dir (str root "/codex-skills")]
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:codex}})]
+        (is (not-any? #(and (= copy (:target %)) (plan/mutating? %)) ops))
+        (is (some #(and (= copy (:target %))
+                        (str/includes? (str (:summary %)) "claude reads it here and has no user-wide wrap-up"))
+                  ops))))))
+
+(deftest a-skill-committed-in-the-project-is-linked-not-moved
+  (doseq [acli [[:claude] [:claude :codex]]]
+    (testing (str acli)
+      (let [root (temp-dir) repo (str root "/repo") src (str repo "/.agents/skills/shared")
+            link (str repo "/.claude/skills/shared")
+            cfg #(config/normalize {:skill-packs {[:uri (str "file://" repo "/.agents/skills")] {:alias 'own}}
+                                    :skills {['own "shared"] {:in repo :acli acli}}} "test")
+            plan-for #(core/build-plan (cfg) state/empty-state {:tools (set acli)})]
+        (skill-dir! src "shared")
+        (git! repo "init" "-q")
+        (git! repo "add" "-A")
+        (git! repo "commit" "-qm" "own skill")
+        (let [ops (filter #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for))]
+          (is (= [[["ln" "-sfn" "../../.agents/skills/shared" link]]] (map :cmds ops))
+              "one relative link: no rm, no skills CLI, nothing linked onto itself")
+          (is (empty? (:failed (core/execute! ops)))))
+        (is (fs/directory? src) "the committed source is intact")
+        (is (not (fs/sym-link? src)))
+        (is (= "../../.agents/skills/shared" (str (fs/read-link link))))
+        (is (u/same-content? link src) "the link resolves")
+        (is (not (u/exists? (str repo "/skills-lock.json"))))
+        (is (str/blank? (:out (u/sh "git" "-C" repo "status" "--porcelain" "--untracked-files=no"))))
+        (is (not-any? plan/mutating? (filter #(= :skills (:kind %)) (plan-for))) "converged")))))
+
+(deftest dropping-a-skill-committed-in-the-project-keeps-it
+  (let [root (temp-dir) repo (str root "/repo") src (str repo "/.agents/skills/shared")
+        link (str repo "/.claude/skills/shared")
+        raw (fn [skills] {:skill-packs {[:uri (str "file://" repo "/.agents/skills")] {:alias 'own}}
+                          :skills skills})
+        keep-repo {[:uri (str root "/other")] {:in repo :acli [:claude :codex]}}]
+    (skill-dir! src "shared")
+    (skill-dir! (str root "/other") "other")
+    (fs/create-dirs (str repo "/.git"))
+    (let [cfg (config/normalize (raw (assoc keep-repo ['own "shared"] {:in repo :acli [:claude :codex]})) "test")
+          ops (core/build-plan cfg state/empty-state {:tools #{:claude :codex}})
+          _ (is (empty? (:failed (core/execute! ops))))
+          st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+          gone (core/build-plan (config/normalize (raw keep-repo) "test") st {:tools #{:claude :codex}})
+          rm (filter #(and (= :skills (:kind %)) (= :delete (:action %))) gone)]
+      (is (= [link] (map :target rm)) "only claude's link goes")
+      (is (empty? (:failed (core/execute! rm))))
+      (is (not (u/exists? link)))
+      (is (fs/directory? src) "the committed source stays"))))
+
+(deftest a-per-tool-path-is-the-source-the-plan-shows
+  (let [root (temp-dir) shared (str root "/shared/wrap-up") pinned (str root "/sample/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri shared] {:in :all :acli [:pi :claude]
+                                                        :per-tool {:pi {:path pinned}}}}} "test")]
+    (skill-dir! shared "wrap-up")
+    (skill-dir! pinned "wrap-up")
+    (with-redefs [pi/skills-dir (str root "/pi-skills") claude/skills-dir (str root "/claude-skills")]
+      (let [pi-dest (str pi/skills-dir "/wrap-up")
+            _ (fs/create-dirs pi/skills-dir)
+            ;; pi still links the base source: the override repoints it
+            _ (fs/create-sym-link pi-dest shared)
+            ops (filter #(= :skills (:kind %)) (core/build-plan (cfg) state/empty-state {:tools #{:pi :claude}}))
+            {[pi-op] :pi [claude-op] :claude} (group-by :tool ops)
+            quiet (plan/render-plan ops {})
+            loud (plan/render-plan ops {:verbose true})]
+        (is (= (u/tilde pinned) (get-in pi-op [:display :source]) (:from pi-op)) "display matches what is linked")
+        (is (= (u/tilde shared) (get-in claude-op [:display :source])))
+        (is (str/includes? quiet (str "~ skill [agents: pi] " (u/tilde pinned))))
+        (is (str/includes? quiet (str "+ skill [agents: claude-code] " (u/tilde shared)))
+            "two sources are two lines, not one line naming the first")
+        (is (not (str/includes? quiet "exec:")) "user-wide commands are for --verbose")
+        (is (str/includes? loud (str "exec: 'ln -sfn " (u/tilde pinned) " " (u/tilde pi-dest) "'")))
+        (is (str/includes? loud (str "    link " (u/tilde pi-dest) " -> " (u/tilde pinned)
+                                     " (was " (u/tilde (u/real-path shared)) ")")))
+        (is (not-any? #(re-find #"^[~+\-!]" (str/triml %))
+                      (remove #(re-find #"^\S*[~+\-] skill" (str/triml (str/replace % #"\u001b\[[0-9;]*m" "")))
+                              (str/split-lines loud)))
+            "verbose detail never starts with a change sigil")))))
+
+(deftest pi-reads-a-projects-skills-from-the-shared-directory
+  (let [root (temp-dir) repo (str root "/repo") review (str root "/review")
+        cfg #(config/normalize {:skills {[:uri review] {:in repo :acli [:pi]}}} "test")]
+    (skill-dir! review "review")
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [pi/skills-dir (str root "/pi-skills") pi/trust-file (str root "/trust.json")
+                  u/home (str root "/home")]
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:pi}})
+            skills (filter #(= :skills (:kind %)) ops)]
+        (is (contains? common/project-skill-tools :pi))
+        (is (some #(= [["ln" "-sfn" (u/abs-path review) (str repo "/.agents/skills/review")]] (:cmds %)) skills)
+            "linked where pi and the skills CLI's pi agent read")
+        (is (not-any? #(str/starts-with? (str (:target %)) pi/skills-dir) skills) "not user-wide")
+        (is (not-any? #(str/includes? (str (:summary %)) "not installed") ops))
+        (is (some #(str/includes? (str (:summary %)) "pi asks before reading project skills here") skills)
+            "an untrusted project's skills are never read by pi")))))
+
+(deftest pi-trust-is-the-nearest-trust-json-decision
+  (let [root (temp-dir) repo (str root "/work/repo") file (str root "/trust.json")]
+    (fs/create-dirs repo)
+    (with-redefs [pi/trust-file file]
+      (is (false? (pi/trusted? {:path repo})) "no decision is no trust")
+      (u/write-json! file {(str root "/work") true})
+      (is (true? (pi/trusted? {:path repo})) "a trusted parent covers the project")
+      (u/write-json! file {(str root "/work") true (u/real-path repo) false})
+      (is (false? (pi/trusted? {:path repo})) "the nearest decision wins")
+      (is (true? (pi/trusted? {:path repo :trusted true})) "the config's own decision counts first"))))
+
+(deftest pi-default-project-trust-decides-where-trust-json-does-not
+  (let [root (temp-dir) repo (str root "/repo") settings (str root "/settings.json")
+        trust-file (str root "/trust.json")]
+    (fs/create-dirs repo)
+    (with-redefs [pi/settings-file settings pi/trust-file trust-file]
+      (is (= :ask (pi/trust {:path repo})) "pi asks by default")
+      (doseq [[v want] [["always" :trusted] ["never" :untrusted] ["sometimes" :ask]]]
+        (u/write-json! settings {:defaultProjectTrust v})
+        (is (= want (pi/trust {:path repo})) v))
+      (u/write-json! settings {:defaultProjectTrust "always"})
+      (u/write-json! trust-file {(u/real-path repo) false})
+      (is (= :untrusted (pi/trust {:path repo})) "a decision for the project beats the default"))))
+
+(deftest pi-collisions-between-user-and-project-skills
+  (let [root (temp-dir) repo (str root "/repo") sub (str repo "/app") pack (str root "/pack")
+        raw (fn [trust?] (cond-> {:skill-packs {[:uri (str "file://" pack)] {:alias 'kit}}
+                                  :skills {['kit "wrap-up"] {:in :all :acli [:pi]}
+                                           ['kit "audit"] {:in :all :acli [:pi]}
+                                           ['kit "linked"] {:in :all :acli [:pi]}
+                                           ['kit "review"] {:in sub :acli [:pi]}}}
+                           trust? (assoc :trust [{:in sub :acli [:pi]}])))
+        plan-for (fn [trust?] (filter #(= :skills (:kind %))
+                                      (core/build-plan (config/normalize (raw trust?) "test")
+                                                       state/empty-state {:tools #{:pi}})))
+        collisions (fn [ops] (filter #(str/includes? (str (:summary %)) "in place of the user-wide") ops))]
+    (doseq [n ["wrap-up" "audit" "linked" "review"]] (skill-dir! (str pack "/" n) n))
+    (fs/create-dirs sub)
+    (git! repo "init" "-q")
+    ;; a different wrap-up in the repository root, which pi reads from a subdirectory too
+    (fs/create-dirs (str repo "/.agents/skills/own"))
+    (spit (str repo "/.agents/skills/own/SKILL.md") "---\nname: wrap-up\ndescription: ours\n---\n")
+    ;; the same bytes as the user-wide audit, in an independent file
+    (fs/copy-tree (str pack "/audit") (str sub "/.pi/skills/audit"))
+    ;; a link to the very file the user-wide link reaches is one skill to pi
+    (fs/create-sym-link (str sub "/.pi/skills/linked") (str pack "/linked"))
+    (with-redefs [pi/skills-dir (str root "/pi-skills") pi/trust-file (str root "/trust.json")
+                  u/home (str root "/home")]
+      (let [ops (plan-for true)
+            [c] (collisions ops)]
+        (is (= 1 (count (collisions ops))) "only the differing wrap-up collides")
+        (is (= (str (u/real-path repo) "/.agents/skills/own") (:target c)) "found above the project, below the repository root")
+        (is (:conflict c) "validate repeats it")
+        (is (some #(and (plan/mutating? %) (= (str sub "/.pi/skills/audit") (:target %))) ops)
+            "the identical copy goes, so it collides with nothing")
+        (let [trusted (update (config/normalize (raw true) "test") :projects
+                              update-vals #(assoc % :trusted true))
+              hits (set (map #(sources/skill-name (:target %)) (pi/collision-ops trusted #{})))]
+          (is (= #{"wrap-up" "audit"} hits)
+              "before the plan runs: a copy is another skill to pi, a link to the same SKILL.md is not")))
+      (is (empty? (collisions (plan-for false))) "pi reads nothing in a project it does not trust")
+      ;; u/home is the test's own here: this writes into the user's ~/.agents/skills
+      (let [user-copy (str u/home "/.agents/skills/wrap-up")]
+        (try
+          (skill-dir! user-copy "wrap-up")
+          (spit (str user-copy "/SKILL.md") "---\nname: wrap-up\ndescription: another\n---\n")
+          (is (some #(str/includes? (str (:summary %)) "pi keeps the one in ~/.pi/agent/skills") (plan-for false))
+              "~/.agents/skills is pi's user directory too")
+          (finally (fs/delete-tree user-copy)))))))
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

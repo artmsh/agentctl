@@ -37,11 +37,11 @@ selector and is unique by construction; the value holds placement and options.
 
 ```edn
 {:skill-packs
- {[:uri "file://$HOME/projects/agents-setup"] {:alias agents-setup}
-  [:gh "obra/superpowers"]                    {:alias superpowers :in ["projects/clz"]}}
+ {[:uri "file://$HOME/projects/team-skills"] {:alias team-skills}
+  [:gh "obra/superpowers"]                   {:alias superpowers :in ["projects/web"]}}
  :skills
- {[agents-setup "wrap-up"]  {:in :all}
-  [:gh "cyxzdev/Uncodixfy"] {:in ["projects/core-vector"] :acli [:codex]}}}
+ {[team-skills "wrap-up"]   {:in :all}
+  [:gh "cyxzdev/Uncodixfy"] {:in ["projects/app"] :acli [:codex]}}}
 ```
 
 | key | in | means |
@@ -86,7 +86,7 @@ The proposal is **entity-first**: an entity carries its own placement.
 ```edn
 {:skill-packs {[:gh "obra/superpowers"] {:in :all}}}
 {:skill-packs {[:gh "obra/superpowers"] {:in ["Brain" "projects"]}}}
-{:skill-packs {[:gh "obra/superpowers"] {:in "projects/clz"}}}
+{:skill-packs {[:gh "obra/superpowers"] {:in "projects/web"}}}
 ```
 
 One declaration, read top to bottom, no cross-section join.
@@ -119,13 +119,13 @@ Read `:scope` as a deprecated alias for `:at` for one release; `import` writes
 ```
 selector := :all | :none | pattern | [pattern …]
 pattern  := path | "!" path        ; "!" subtracts
-path     := "Brain" | "projects/clz" | "~/work/x" | "/abs/path"
+path     := "Brain" | "projects/web" | "~/work/x" | "/abs/path"
 ```
 
 Three rules, and that is the whole language:
 
-1. **A relative path is resolved against `$HOME`.** `"projects/clz"` is
-   `~/projects/clz`. `~/…` and `/…` work as written. `$name` from `:#def`
+1. **A relative path is resolved against `$HOME`.** `"projects/web"` is
+   `~/projects/web`. `~/…` and `/…` work as written. `$name` from `:#def`
    expands as it does everywhere else.
 2. **A path that is a repository root means that repository. A path that is not
    means every repository under it.** `"Brain"` is one target (it is a repo);
@@ -162,7 +162,7 @@ positive tree.
 | tags (`:in [:clojure :work]`) | tags need a registry keyed by project — which is the thing this proposal removes |
 | glob depth (`projects/*` vs `projects/**`) | rule 2 already answers "how deep": as deep as it takes to find repo roots. `*` in a path segment is worth adding later if a real case shows up; it is not needed for any case in the motivating example |
 
-`*` inside a segment (`"projects/clz-*"`) is the one extension with an obvious
+`*` inside a segment (`"projects/web-*"`) is the one extension with an obvious
 shape if it is ever wanted: glob the segment, then apply rule 2 to each hit.
 
 ## Entity types
@@ -176,13 +176,17 @@ every tool that supports the kind.
 |---|---|---|
 | `:skill-packs` | a source of skills (keyed map) | `{[:gh "obra/superpowers"] {:in :all}}` |
 | `:skills` | one skill from a pack, a repo, or a path (keyed map) | `{[superpowers "review"] {:in "projects"}}` |
-| `:mcp` | an MCP server | `{:mcp :tracker :cmd "tracker-mcp -t stdio" :in "projects/clz"}` |
+| `:mcp` | an MCP server | `{:mcp :tracker :cmd "tracker-mcp -t stdio" :in "projects/web"}` |
 | `:provider` | a model provider | `{:provider :gateway :url "…" :key $KEY :in :all}` |
 | `:permissions` | allow/ask/deny rules | `{:permissions {:allow {:Bash ["bb:*"]}} :in "projects/agentctl"}` |
 | `:settings` | unified or per-CLI settings | `{:settings {:model "opus"} :tools [:claude] :in "projects"}` |
 | `:memory` | a memory/AGENTS.md file | `{:memory "~/notes/AGENTS.md" :mode :symlink :in :all}` |
 | `:trust` | mark a path trusted | `{:trust true :in ["Brain" "projects"]}` |
 | `:hooks` | Claude Code or Codex hooks (Claude's unless `:tools` names `:codex`, so `:tools :all` means Claude only; Codex's user-wide only) | `{:hooks {…} :tools [:codex] :in :all}` |
+
+`:extensions`, `:hosts` and `:statusline` are not entities. Each is placed once
+for the whole machine (or, for a host, for that machine), takes no `:in`, and is
+read off the file as written rather than lowered with the vectors above.
 
 `:settings` covers the unified-vs-per-CLI split the current `:executors` map
 handles by nesting. Unified keys (`:model`, `:thinking`, `:on`/`:off`) are
@@ -341,10 +345,10 @@ placement.
 | `config/normalize`'s `:projects` map | **dies.** Sections become vectors; `norm-project` goes |
 | `scope-mcps`, `scope-skills`, `bare-project-skills` | **die.** Placement is declared, not derived |
 | `config/active-tools` — derives the active tool set from `(keys (:tools proj))`, which is what makes "settings for a tool no project names are not applied" work | **loses its input.** Replacement: the union of `:tools` across all declared entities, defaulting to all tools when no entity narrows. Weaker signal — a stray provider stanza now activates a tool. Worth keeping only if `--tool` remains the real control |
-| `-p, --project ID` | **changes meaning:** takes a path or a selector (`-p projects/clz`), and filters resolved targets rather than looking up a declared id. Arguably better; it stops being a lookup into a registry that may not name the repo you are standing in |
+| `-p, --project ID` | **changes meaning:** takes a path or a selector (`-p projects/web`), and filters resolved targets rather than looking up a declared id. Arguably better; it stops being a lookup into a registry that may not name the repo you are standing in |
 | `-k, --kind projects` | **dies** as a kind; `trust` takes its place for the one thing it uniquely did |
 | project `:path` / `:parent` / `~/projects/<key>` default | **die.** A selector *is* the path; there is nothing left to default |
-| `import` — emits `:projects` today | **rewritten.** It must now emit selectors, and the honest output is one literal path per discovered project (`:in "projects/clz"`). Import stays lossy w.r.t. sugar, as documented; it can never infer that two literal paths were meant as `"projects"` |
+| `import` — emits `:projects` today | **rewritten.** It must now emit selectors, and the honest output is one literal path per discovered project (`:in "projects/web"`). Import stays lossy w.r.t. sugar, as documented; it can never infer that two literal paths were meant as `"projects"` |
 | GUI form — controls derived from `config/capabilities` and the adapters | **mostly unchanged** under shape B, since the sections survive. The Projects pane becomes a *resolved targets* pane: which repos each selector currently matches, which is strictly more useful than an editable registry |
 | `state.edn` ownership manifest | **schema change, mandatory.** Must record resolved absolute paths per entity (see Ids above) or prune breaks for discovered targets |
 | `plan` rendering — `<sigil> [projects/<id>] <kind>/<ids>` | **unchanged in shape**, with the bracket carrying a path instead of a declared id |

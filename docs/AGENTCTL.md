@@ -53,7 +53,7 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` | `$DSH_HOME/skills` |
 | `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` | `$DSH_HOME/AGENTS.md` |
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json`; project `.agents/skills` from `:skills` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
@@ -435,8 +435,21 @@ and are never rewritten.
 
 ### `:hooks`
 
-Claude Code and Codex, global scope, declared under `:executors :claude :hooks`
-or `:executors :codex :hooks` (Codex: see below):
+Claude Code and Codex (Codex: see below). In the entity DSL a hook is a `:hooks`
+row placed like any other entity: `:in :all` writes `~/.claude/settings.json`,
+and a project selector writes that repository's `.claude/settings.json`. A row
+reaches Codex only when its `:acli` names `:codex`:
+
+```clojure
+:hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
+         :command "$HOME/.claude/hooks/memory-file-lock.sh acquire" :timeout 25 :in :all}
+        {:id :session-start :event :SessionStart :command "./scripts/session-start.sh"
+         :in "projects/sample"}]
+```
+
+The old format declares user-scope hooks under `:executors :claude :hooks` (or
+`:executors :codex :hooks`); a hook under a project's `:executors :claude` there
+is reported, not written:
 
 ```clojure
 :executors
@@ -639,13 +652,21 @@ relative one) is repointed at the pack cache under `~/.agents/skill-packs`.
 `:scope :global` on an explicit `:skills` declaration keeps a skill user-wide
 even when a project names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
 For current entity-first declarations, a repository placement uses the skills
-CLI. Claude reads `<project>/.claude/skills`, while Codex and Antigravity
-share `<project>/.agents/skills`. The legacy project registry is kept for
+CLI. Claude reads `<project>/.claude/skills`, while Codex, Antigravity, Kimi,
+Pi and the DeepSeek Harness share `<project>/.agents/skills`. Pi reads it only
+in a project it trusts; see [Pi](GUIDE.md#pi) for how that is decided and how
+it settles a skill name found both there and user-wide. A copy there is kept
+while an agent placed in the project reads it and has no user-wide copy. The legacy project registry is kept for
 existing files; see [`SCOPE-DSL.md`](SCOPE-DSL.md) for current placement rules.
 
 ### MCP shorthand
@@ -701,6 +722,11 @@ different value, override just that field:
 
 `import` writes these automatically wherever it finds a resource configured
 differently per tool, preserving those differences in the emitted declaration.
+
+The plan names the source each tool actually links: a skill whose `:per-tool
+:path` differs from its base source is its own line for that tool, and
+`--verbose` adds the `ln` command and `link <dest> -> <source> (was <old>)`
+under every skill line, user-wide ones included.
 
 ### Fields agentctl does not model
 
@@ -810,6 +836,27 @@ or WSL's bash. Hence `powershell.exe` with an `-EncodedCommand` bootstrap that r
 stdin. Scripts are ASCII, with paths and contents in base64, since PowerShell 5.1 reads
 stdin in the OEM codepage. An operation that does not end with a final `OK` line failed.
 
+### `:statusline`
+
+```clojure
+{:statusline {:defaults {:segments [:model :context] :context-style :full
+                         :warning-percent 50 :critical-percent 80}
+              :agents {:pi {:segments [:model :context :cost]}}
+              :bin "~/.local/bin/agent-statusline"}}  ; optional, agentctl's own
+```
+
+The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
+`~/.config/agent-statusline/config.json`, written whole and owned like any other
+resource by path. Keys are the renderer's JSON keys in kebab-case, keyword values
+become strings and `nil` becomes `null` (shown `∅` in a plan). Nothing else is
+interpreted: the renderer's `--check` decides what is valid. Its ops are
+`agentctl statusline/config`, selected by `-k statusline` (which `-t` does not
+narrow) and never by `-t` alone. A symlinked file is replaced, never written through,
+and `import` reads the file back. An `:awl` override plans nothing for awl,
+which reads the same file only when built with `-Dstatusline`. `validate` and
+`apply` report whether the `awl` on `PATH` was built that way. See
+[the guide](GUIDE.md#shared-status-line) for validation, paths, ownership and awl.
+
 ### Secret references
 
 | Form | Meaning |
@@ -833,12 +880,23 @@ end up writing a resolved secret into a tool's config file are tagged
 ```
 -f, --file PATH    config file (default ~/.config/agents.edn)
 -t, --tool TOOL    restrict to a tool (repeatable)
--k, --kind KIND    restrict to settings|mcps|skills|providers|memory|projects|skill-packs
+-k, --kind KIND    restrict to a kind (repeatable; --help lists them). An
+                   unknown one exits 1, and so does one the config's format
+                   plans nothing as: projects in the entity DSL (which plans
+                   trust, permissions and settings instead), trust in the
+                   legacy map form (which plans all three as projects)
 -p, --project ID   restrict to one declared project — selects everything that
                    project owns, whatever its kind (its servers and skills are
-                   :mcps / :skills ops, so --kind projects would miss them)
-    --json         machine-readable output
--v, --verbose      per-field diffs and target paths
+                   :mcps / :skills ops, so --kind trust, or projects in the
+                   legacy form, would miss them)
+    --only KIND/ID apply/apply!: one entity wherever it is placed (repeatable)
+    --user         apply/apply!: user scope only, no project
+    --json         machine-readable output: apply and validate print one JSON
+                   document, apply with config warnings in `findings`; an
+                   error, a refused config included, is {"error": …} with
+                   exit 1 (apply! adds its prompt and result as text)
+-v, --verbose      per-field diffs and target paths; for skills, the link
+                   commands and what each link points at, before and after
     --show-noop    include unchanged and informational entries
     --deep         validate: probe the network (provider /models, git remotes)
     --replace      import!: overwrite instead of merging into the existing file
@@ -874,6 +932,13 @@ one project. Ops writing one file for one project collapse into a single block,
 their ids in braces (`mcps/{repl search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
+
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere (an unsupported setting, a placement a tool
+cannot take). That plan is printed in full, here, under `--host`, in the GUI's
+text view, and under `--json` (as ops with `"warn": true`), and the exit code
+still says only whether anything would change: 0.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the e2e test provisions a throwaway
@@ -992,9 +1057,24 @@ that cache and reports `unknown` if none exists yet. A violation in a key
 agentctl itself manages is an `error`; anything else in the file (it is
 otherwise hand-curated) is a `warn` and never fails the exit code.
 
+`STATUSLINE` is the renderer's own verdict on `:statusline`, from
+`agent-statusline --check` run on the candidate JSON. A rejection is an `error`
+that also stops `apply`, or a `warn` on a run narrowed so that it cannot write the
+file. A missing renderer, or one without `--check`, is
+`unknown`, and a renderer that would read a different file in this environment
+is a `warn`. With an `:awl` override it also says whether the `awl` on `PATH`
+links the renderer (`ok`), does not (`warn`), or cannot be inspected (`warn`).
+All of this describes this machine, so `validate --host` leaves it out.
+
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers
 only in part, is `unknown`, and its drift is not reported as clean.
+
+`SKILLS` also repeats the plan's reports that hold once it has converged: a
+skill whose source is missing, a project copy kept beside a user-wide skill
+and why, one pi loads in place of a
+user-wide skill of the same name, and skills placed in a project pi asks
+about first or does not read. They are warnings and never fail the exit code.
 
 ## Import is lossy w.r.t. sugar
 
@@ -1042,6 +1122,11 @@ tests/run.sh                       # unit, e2e, extensions and hosts, in a scrat
 (`AGENTCTL_SSH_CMD`). No runner has PowerShell, so the Windows scripts are unit-tested
 as text only and need a live pass against a Windows host, under a scratch `:home`,
 whenever they change.
+
+`tests/test-statusline.sh` validates through `tests/statusline-stub`, which answers
+`--check` with the renderer's diagnostic names for the inputs the tests feed it.
+`AGENTCTL_TEST_STATUSLINE_BIN=<built agent-statusline>` runs the same assertions
+against the real renderer.
 
 Use this runner even for local verification. It sets `AGENTCTL_HOME` before
 loading the code and supplies all six CLI stubs; running the unit file directly

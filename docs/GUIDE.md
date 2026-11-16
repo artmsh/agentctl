@@ -14,9 +14,9 @@ under `$HOME/projects` on each apply. Most sections are vectors; for example:
 {:settings [{:model "sonnet" :tools [:claude] :in :all}]
  :mcps [{:id :tracker :cmd "tracker-mcp -t stdio" :in "projects"}]
  :trust [{:in ["Brain" "projects" "!projects/vendor"]}]
- :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/clz"}}
+ :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/web"}}
  :skills {[superpowers "brainstorming"] {:in :all}
-          [:gh "cyxzdev/Uncodixfy"] {:in "projects/core-vector" :acli [:codex]}}}
+          [:gh "cyxzdev/Uncodixfy"] {:in "projects/app" :acli [:codex]}}}
 ```
 
 `:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
@@ -30,11 +30,41 @@ alone plans nothing, and a git pack is not cloned for it.
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
-`.agents/skills` (read by codex, antigravity, kimi and the DeepSeek Harness),
+`.agents/skills` (read by codex, antigravity, kimi, pi and the DeepSeek Harness),
 claude gets a link in `.claude/skills`, and the install is recorded in
 `skills-lock.json`. A dropped
 skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
 into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
+
+A skill a project installed that is now declared `:in :all` is removed from the
+project with `skills remove` once the user-wide one is installed, provided the
+copy still matches its source. The links into the copy and its lock entry go
+in the same step. A lock entry whose copy is already gone, with at most a
+dangling `.claude/skills/<name>` link left behind, is removed the same way.
+A project copy is kept, and the plan says why, when:
+
+- it differs from the user-wide source, or from the source of the project
+  skill that would be linked in its place, because it is another skill of
+  the same name (a copy the `skills` CLI installed is the CLI's to replace);
+- git tracks it, or a link git tracks leads into it, because it is the project's own;
+- a declared placement needs it: a `:per-tool :path`, another skill's source,
+  or a pack that lives there. Removing it would leave that tool's link dangling;
+- an agent placed in the project reads it and has no user-wide copy of that
+  skill: every agent placed there reads the shared `.agents/skills`, a copy
+  or a link alike (pi only where it reads the project's skills), and claude
+  reads a copy its `.claude/skills/<name>` link leads into.
+
+The same holds wherever agentctl would put something: no link and no
+`skills add` lands on a directory that stays, and nothing is linked over the
+skill's own source. A kept copy that the `skills` CLI installed keeps its
+lock entry, since `skills remove` would delete the copy as well — and the CLI
+clears a name from every agent's directory in the repository (`.cursor/skills`
+as much as `.agents/skills`), so a name is not removed while any of those
+must stay. A whole remote pack names its skills only once the CLI has
+fetched it, so its install is not checked this way. A redundant link into a kept
+copy, such as claude's `.claude/skills/<name>`, is still removed. A plan
+with nothing left to change prints no warnings, so `validate` repeats these
+reports under SKILLS for every agent; they do not fail its exit code.
 
 Imports emit this format. The older map-and-project format ([AGENTCTL.md](AGENTCTL.md#legacy-map-form))
 remains supported; use one format per file.
@@ -71,6 +101,46 @@ Two things follow from this that are worth saying out loud: inside a project,
 `apply` exits 0 when only the rest of the machine has drifted, and from the
 workspace root the global settings, MCP servers and providers are not planned
 at all. `--all` is how you ask about the machine.
+
+## Applying one entity
+
+agentctl owns what it wrote, and an unscoped run removes whatever it owns that
+the config no longer declares. A manifest holding only the one entity you want
+to add is therefore not a narrow change: run unscoped, it plans the removal of
+everything else agentctl owns. Narrow the run instead, against the full config:
+
+```sh
+agentctl apply  --only skills/review       # the skill, user-wide and in every project it is placed in
+agentctl apply! --only skills/review --only mcps/search
+agentctl apply  --user                     # user scope only: no project is planned
+agentctl apply  --user -k skills           # selectors combine
+```
+
+`--only KIND/ID` keeps the ops of one entity. The id is the entity's own, so a
+project's copy matches as well as the user-wide one; a declared skill brings the
+op that fetches its pack, so a skill from a pack not on disk yet is cloned and
+linked in one run. A skill no longer declared is only removed, and fetches
+nothing. `--user` keeps every op that lands outside a project, the packs cloned
+for user-wide skills included, and does not combine with `-p`. Both outrank the
+working directory, as `--all` and `-p` do. `-k skills` keeps the pack fetches
+too, for the same reason.
+
+A narrowed run (`-t`, `-k`, `-p`, `--only`, `--user`, or the working
+directory) forgets ownership only of what it removed itself, so nothing outside
+the selection is pruned or orphaned. `--user` still removes user-scope
+resources dropped from the config; only `--only` is a single-entity change.
+
+`-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`
+lists them — or the run exits 1, as do an `--only` whose kind `-k` leaves out
+and any option agentctl does not know. The kind must also be one the loaded
+config's format plans: an entity-DSL config files a project's trust,
+permissions and settings under `trust`, `permissions` and `settings`, so
+`-k projects` there exits 1; an old-format config plans all three as
+`projects`, so `-k trust` there exits 1. The message lists the kinds the
+format has, `--help` marks `projects` as legacy, and the GUI refuses the same
+kinds for the buffer it plans. An `--only` or `-p` that nothing declares or
+owns is reported with `⚠` (under `--json`, in `warnings`), because a run
+narrowed to a typo plans nothing and would otherwise read as converged.
 
 ## Claude session retention
 
@@ -332,8 +402,20 @@ instead of being silently dropped.
 
 ## Hooks
 
-Claude Code and Codex hooks, global scope. Claude's are declared under
-`:executors :claude :hooks` (Codex's are covered after them):
+Claude Code and Codex hooks (Codex's are covered after Claude's). In the entity
+DSL a hook is a `:hooks` row placed like any other entity: `:in :all` writes
+`~/.claude/settings.json`, and a project selector writes that repository's
+`.claude/settings.json`:
+
+```clojure
+:hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
+         :command "$HOME/.claude/hooks/memory-file-lock.sh acquire" :timeout 25 :in :all}
+        {:id :session-start :event :SessionStart :command "./scripts/session-start.sh"
+         :in "projects/sample"}]
+```
+
+The old format declares user-scope hooks under `:executors :claude :hooks`; a
+hook under a project's `:executors :claude` there is reported, not written:
 
 ```clojure
 :executors
@@ -421,6 +503,107 @@ moves, `apply` plans a fetch, a hard reset and a rebuild, so local edits in
 the `defaultTools` entries it brought; the checkout stays as a cache.
 Extensions are user-wide, and `:in` does not apply to them.
 
+## Shared status line
+
+An external renderer, `agent-statusline`, draws the status line of several agents from one
+JSON file: `defaults` for every agent, plus overrides under `agents.cc`, `agents.codex`,
+`agents.awl` and `agents.pi`. `:statusline` declares that file, and agentctl writes it whole:
+
+```clojure
+{:statusline {:defaults {:segments [:model :limits :context :directory :branch]
+                         :separator " · "
+                         :color :auto
+                         :context-style :compact
+                         :short-model true
+                         :show-pacing true
+                         :warning-percent 50
+                         :critical-percent 80}
+              :agents {:pi {:segments [:model :context :directory :branch :cost]}
+                       :codex {:context-style :percent}
+                       :cc {:color nil}}
+              :bin "~/.local/bin/agent-statusline"}}
+```
+
+The EDN is the renderer's JSON with kebab-case keys, which agentctl turns back into the
+renderer's snake_case (`:context-style` is `context_style`). Keyword values are written as
+strings, a namespaced keyword in full (`:x/auto` is `"x/auto"`), and `nil` is JSON `null`,
+which in an agent's override means "inherit the default"; the plan shows it as `∅`. The
+translation knows no option or value. A key agentctl has never heard of is written as
+given, and the renderer judges it, so new renderer options need no agentctl release. Two
+spellings that land on one JSON key (`:context-style` and `:context_style`) are a config
+error. `:bin` is agentctl's own and is not written. Each override lands under its own agent
+only.
+
+**Validation** is the renderer's. `validate` and `apply` write the candidate JSON to a
+temporary file and run `agent-statusline --check --config <tmp>`, which reads no stdin and
+runs no git. Exit 1 is a config error naming the renderer's diagnostic, such as
+`InvalidEnumTag`, `DuplicateSegment` or `InvalidThresholds`, and `apply` refuses to plan
+anything until it is fixed. A run that cannot write the file (narrowed by `-t` or `-k` to
+other things, or to projects) gets the same finding as a warning instead. The binary is
+`:bin`, else `AGENT_STATUSLINE_BIN`, else `agent-statusline` on `PATH`, else the
+`agent-statusline` a declared Claude `:status-line` command runs by path. A binary
+implements `--check` only if it accepts `{}` and rejects a document with an unknown key
+with exit 1. When none is found, or the one found fails either probe (one that predates
+`--check` rejects everything, and something like `true` accepts everything), or it times out
+after 10 s, `validate` reports `unknown`, and the planned write carries a "not validated"
+note. None of these counts as a pass.
+
+**Where.** The renderer reads `--config`, else `AGENT_STATUSLINE_CONFIG`, else
+`$XDG_CONFIG_HOME/agent-statusline/config.json`, else `~/.config/agent-statusline/config.json`.
+agentctl writes the last two, which are the files the renderer finds without being told:
+`$XDG_CONFIG_HOME` when it is set to an absolute path, `~/.config` otherwise, with `.` and
+`..` resolved. Under `AGENTCTL_HOME`, an `XDG_CONFIG_HOME` outside that directory, compared
+after resolving `..` and symlinked directories, is ignored, so a scratch run never writes
+the real home. When the renderer, run in the current environment, would read another file
+(`AGENT_STATUSLINE_CONFIG` is set, or `XDG_CONFIG_HOME` is empty or relative), `validate`
+warns and names both paths. An empty `AGENT_STATUSLINE_CONFIG` gets its own warning,
+because the renderer then fails to read any file.
+
+**Ownership.** `apply!` backs the file up before each write and records the path it wrote
+in `state.edn`; ownership is of that path. Removing `:statusline` deletes the file only if
+agentctl owns it, at the recorded path. When the target moves (`XDG_CONFIG_HOME` changed),
+the file at the old path is removed and the one at the new path is treated as anyone's:
+replacing a file there is flagged and backed up first. A hand-made file is never deleted. A
+file whose settings already match but whose layout differs is rewritten, because agentctl
+owns the bytes. agentctl never writes through a symlink: a `config.json` that links into,
+say, a dotfiles checkout is backed up as the content it resolves to and replaced by a
+regular file, which the plan notes, and the linked file is left as it was. A symlink found
+at an owned path on removal is left in place. `import` reads an existing file back into
+`:statusline`, so `import! --replace` does not drop the declaration and with it the file.
+
+The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it,
+whatever `-t` says.
+A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
+well, as it does every user-wide resource; `--all` includes it. Codex does not read this
+file: its status line is a native setting, and the `codex` override only feeds the
+renderer's `--codex-config` preset. A host is not provisioned with the file, so
+`apply --host` and `validate --host` neither run the local renderer nor report on it.
+Only a malformed `:statusline` (not a map, or two spellings of one key) stops them,
+as any config error does.
+
+### awl
+
+awl needs nothing from agentctl beyond this file. It links the renderer in process when it
+is built with `-Dstatusline=<renderer source>` and then loads the same file once at startup,
+so an `:awl` override is delivered by writing the file, and agentctl plans no op of its
+own for awl. Whether awl uses the file is fixed when awl is built, which agentctl cannot
+provision. awl has no flag that reports the build option, and `--help` reads the same with
+and without it, so agentctl never runs awl to find out. Instead it reads the `awl` binary
+on `PATH` for a string that only the renderer's config loader puts there. The result is a
+finding under `STATUSLINE`, given whenever `:agents` has an `:awl` key:
+
+| awl on `PATH` | Finding |
+| --- | --- |
+| a native binary with the renderer linked in | `ok`: it reads the file at startup |
+| a native binary without it | `warn`: it keeps its own status row; rebuild with `-Dstatusline` |
+| absent, or a wrapper script | `warn`: whether it reads the file is unknown |
+
+`apply` prints these warnings on every run, including a converged one. Once the file is
+written, "no changes" is true of the file, and the warning beside it says that awl may
+still not use it. Restart awl after a change, because it reads the file only at startup.
+`:awl` under `:statusline :agents` is a renderer agent key, not an `:acli` value, so it
+plans nothing for awl's skills.
+
 ## Claude plugins
 
 A Claude Code plugin bundles skills, subagents and hooks, and is installed
@@ -430,7 +613,7 @@ from a marketplace. `:plugins` is keyed by `[:gh "owner/repo" "plugin"]` or
 
 ```clojure
 {:plugins {[:gh "Egonex-AI/Understand-Anything" "understand-anything"]
-           {:in "projects/barge" :at :repo :acli [:claude]}}}
+           {:in "projects/api" :at :repo :acli [:claude]}}}
 ```
 
 `apply!` runs `claude plugin marketplace add` and `claude plugin install
@@ -475,6 +658,11 @@ at the pack cache under `~/.agents/skill-packs`. `:scope :global` on an
 explicit `:skills` declaration keeps a skill user-wide even when a project
 names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 To promote a skill already linked in several projects, set its scope explicitly:
 
 ```clojure
@@ -486,18 +674,55 @@ whole-pack references. `apply` previews a `- projects/<id> skills/wrap-up` unlin
 for each redundant symlink in the configured projects; `apply!` installs the
 global skill first, then removes those links. This also covers legacy symlinks
 that predate agentctl's state file and projects that no longer name the skill.
-Local directories are preserved. Project links are kept if the global skill
+A local directory is removed only when it matches the source and nothing keeps
+it (see the list near the top of this guide). Project links are kept if the global skill
 is unavailable (including a project-only apply before global installation).
 
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
-Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi and the
-DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
-declared skills live there. For Pi and OMP a project's declared skills are
-installed user-wide instead — that is the only place those tools read skills
-from — and are owned there.
+Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi, Pi and
+the DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
+declared skills live there. OMP reads skills only from the user's home, so for
+OMP a project's declared skills are installed user-wide instead and are owned
+there.
+
+### Pi
+
+Pi reads a project's skills from `.pi/skills` and from `.agents/skills` in the
+working directory and each directory above it, up to the repository root,
+once it trusts the project. Trust is the project's `:trust` for pi when the
+config places one, else the nearest decision in pi's `trust.json`, else pi's
+`defaultProjectTrust` setting: `"always"` trusts every project, `"never"`
+none, and `"ask"` (the default) asks at startup and reads nothing until the
+project is trusted. The plan says when a project's skills sit where pi asks
+first or does not read them. Pi's own `~/.pi/agent/skills` and
+`~/.agents/skills` are its user-wide directories. Earlier versions of
+agentctl installed a project's skills for pi user-wide; `apply!` now moves
+each one into the project, removing the user-wide link it made. In a project
+pi does not trust, that takes the skill away from pi until the project is
+trusted.
+
+Pi keys a skill on the `name:` in its SKILL.md, keeps the first one it finds —
+a trusted project's before the user's, `~/.pi/agent/skills` before
+`~/.agents/skills` — and warns at startup about every later one. Two paths to
+the same SKILL.md are one skill to it, but an identical copy is a second one.
+So for pi agentctl:
+
+- removes a project copy, in `.agents/skills` or `.pi/skills`, that is
+  identical to a skill installed user-wide for pi, as it does for the other
+  agents, and only in a project pi trusts (and keeps it in the cases listed
+  above — a copy codex also reads stays until codex has the skill user-wide);
+- reports a project skill that differs from a user-wide one of the same name:
+  pi loads the project's one there and warns of the collision. Rename one, or
+  leave `:pi` out of the user-wide skill to keep the project's quietly;
+- reports a skill in `~/.agents/skills` that has the name of a user-wide one;
+- says when a project's skills are placed where pi asks before reading them,
+  or does not read them at all. Removals and collisions are left alone there.
+
+These reports are warnings: `apply` shows them while it has changes to make,
+and `validate` repeats them under SKILLS once the plan has converged.
 
 ## Remote hosts
 
@@ -564,6 +789,27 @@ one project. Ops writing one file for one project collapse into a single block,
 their ids in braces (`mcps/{docs search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
+
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere, such as an unsupported setting. That plan
+is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and under
+`--json` as ops with `"warn": true` — and still exits 0, since nothing would
+change.
+
+Under `--json`, `apply` (and `validate`) print one JSON document on stdout:
+the plan's `ops`, the selector `warnings`, the config's own warnings and this
+machine's (the status line's) in `findings` (`level`, `where`, `message`, as
+`validate --json` prints them) and the `summary`. An error is `{"error": …}`
+with exit 1 instead — a config with errors carries its `findings` too, an
+unknown option or a missing file only the message. `apply! --json` prints the
+plan document the same way, then the confirmation prompt and the result of
+the run as text.
+
+A skill whose source is not on disk, such as a `:per-tool :path` into a
+project copy that has since gone, is not linked: the plan says `source
+missing: <path> — link not changed` and leaves whatever link is there, so it
+does not plan the same change on every run. `validate` repeats it under SKILLS.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a
