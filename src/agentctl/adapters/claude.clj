@@ -265,6 +265,16 @@
     :env (key-names (:env entry))
     :headers (key-names (:headers entry))}))
 
+(defn- resolve-mcp
+  "A server's env and headers with every ref resolved, and the refs that did
+   not resolve: a server holding one is not written, and not approved."
+  [m]
+  (let [env (common/resolve-env (:env m))
+        headers (common/resolve-env (:headers m))]
+    {:env env
+     :headers headers
+     :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))}))
+
 (defn mcp-ops [cfg st]
   (let [desired (common/for-tool-resources (common/global-mcps (:mcps cfg) tool) tool)
         current (current-mcps)
@@ -275,9 +285,7 @@
                  cur (get current (keyword nm))
                  want (desired-shape m)
                  have (some-> cur current-shape)
-                 env (common/resolve-env (:env m))
-                 headers (common/resolve-env (:headers m))
-                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))]
+                 {:keys [env headers issues]} (resolve-mcp m)]
            ;; an unresolved secret is reported even when the shapes agree: the
            ;; value cannot be checked, so the run cannot call itself converged
            :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
@@ -598,9 +606,7 @@
         :let [{:keys [file path shared?]} (project-mcp-target proj m mid)
               oid (keyword (str (name id) "/" (name mid)))
               current (get-in (u/read-json file) path)
-              env (common/resolve-env (:env m))
-              headers (common/resolve-env (:headers m))
-              issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
+              {:keys [env headers issues]} (resolve-mcp m)
               secret? (common/holds-secret? (merge (:env m) (:headers m)))
               op (if (seq issues)
                    (common/unresolved-op {:tool tool :kind :mcps :project id :id oid :target file} issues)
@@ -689,9 +695,14 @@
    prompt, so declared servers are added to it and nothing is removed. It is
    an MCP op, not a settings one: it belongs with the servers it approves,
    and stays out of the settings ownership pass, which records keys a
-   declared setting owns."
+   declared setting owns.
+
+   A server held back on an unresolved secret is not approved: nothing was
+   written to `.mcp.json` for it, and an approval would start whatever entry
+   is there under that name."
   [cfg id proj]
-  (when-let [shared (not-empty (keys (filter (fn [[_ m]] (= :project (:scope m)))
+  (when-let [shared (not-empty (keys (filter (fn [[_ m]] (and (= :project (:scope m))
+                                                              (empty? (:issues (resolve-mcp m)))))
                                              (common/project-mcps cfg proj tool))))]
     (plan/json-union-op {:tool tool :kind :mcps :project id
                          :id (keyword (name id) "enabledMcpjsonServers")

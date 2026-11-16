@@ -446,7 +446,9 @@ skip as a warning rather than silently installing the server user-wide.
 A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
 the project's `.claude/settings.local.json`, the list Claude Code reads, so it
 starts without the approval prompt. Names already there, added by hand or by
-that prompt, are kept, and nothing is removed from the list. Older releases
+that prompt, are kept, and nothing is removed from the list. A server held
+back because a secret did not resolve is not approved either: nothing was
+written for it in `.mcp.json`. Older releases
 wrote the list under the project in `~/.claude.json`; Claude Code moves that
 copy into `settings.local.json` and deletes it on its next run, and agentctl no
 longer plans it.

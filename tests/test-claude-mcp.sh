@@ -151,6 +151,7 @@ grep -q "4 resource(s) not written" "$SB/apply.txt" || { cat "$SB/apply.txt"; fa
 [ "$(json "$SB/.claude.json" "'search' in d['mcpServers']")" = False ] || fail "a stdio server was added without its env"
 [ "$(local_entry "$SB/proj" pdocs)" = null ] || fail "a local-scope server was written without its header"
 [ ! -e "$SB/proj/.mcp.json" ] || fail ".mcp.json was written without its header"
+grep -qs rdocs "$SB/proj/.claude/settings.local.json" && fail "a .mcp.json server held back on its secret was approved"
 grep -q "mcp add.*docs" "$SB/claude-calls.log" && fail "claude mcp add ran for a server whose secret did not resolve"
 grep -q '\[:claude :mcps "plain"\]' "$SB/.config/agentctl/state.edn" || fail "the written server is not owned"
 grep -qE '\[:claude :mcps "([^"]*/)?(docs|search|pdocs|rdocs)"\]' "$SB/.config/agentctl/state.edn" \
