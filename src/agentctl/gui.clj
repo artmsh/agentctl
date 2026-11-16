@@ -141,7 +141,7 @@
             (let [{:keys [done failed]} (core/converge! cfg st opts ops)]
               ;; ownership is never claimed for a resource whose creation
               ;; failed — a later prune would delete something we never made;
-              ;; on a scoped run (-t/-k/-p) a data-carrying id (hooks) only
+              ;; on a scoped run (-t/-k/-p/--only/--user) a data-carrying id (hooks) only
               ;; gets its value overwritten if this run actually wrote it —
               ;; see `core/sync-state!`
               (state/save! (core/sync-state! st cfg

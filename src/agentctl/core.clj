@@ -63,8 +63,21 @@
    (for [k (:kinds opts) :when (not (some #{k} kinds))]
      ["-k" k (kind-problem k)])))
 
-(defn- keep-kinds [ops {:keys [kinds]}]
-  (if (seq kinds) (filter #(contains? (set kinds) (:kind %)) ops) ops))
+(defn kind-selected?
+  "Does `-k` let ops of `kind` through? Selecting skills lets the
+   `:skill-packs` ops through too: a pack op exists only because some skill
+   placement needs its clone, and without it a skill from a pack not on disk
+   yet is never linked while the run reports nothing to change."
+  [{:keys [kinds]} kind]
+  (or (empty? kinds)
+      (contains? (set kinds) kind)
+      (and (= :skill-packs kind) (contains? (set kinds) :skills))))
+
+(defn- keep-kinds
+  "`-k` keeps ops of the kinds named, and skills keep their packs. Later
+   filters (`-p`, `--only`, `--user`) narrow the packs with everything else."
+  [ops opts]
+  (filter #(kind-selected? opts (:kind %)) ops))
 
 (defn- id-names
   "The spellings `--only` accepts for an id: whole, and its last segment.
@@ -78,22 +91,31 @@
        (some? (:id o))
        (contains? (id-names (:id o)) id)))
 
-(declare unmatched-only)
+(defn- only-skill-packs
+  "The packs `--only skills/<sid>` has to fetch. A declared skill (by the
+   config's `:skills`, a pack of that name, or a project's `:skills`) brings
+   the packs `sources/packs-for-skill` names for it. Any other id brings at
+   most the pack it already sits in on disk: the lookup for an undeclared id
+   falls back to every pack not fetched yet, so a typo — or a skill dropped
+   from the config, whose removal needs no clone — would fetch them all."
+  [cfg sid]
+  (if (or (get-in cfg [:skills sid]) (get-in cfg [:skill-packs sid])
+          (some #(some #{sid} (:skills %)) (vals (:projects cfg))))
+    (sources/packs-for-skill cfg sid)
+    (for [[pid p] (:skill-packs cfg) d (sources/skill-dirs p)
+          :when (= (name sid) (str (fs/file-name d)))]
+      pid)))
 
 (defn- keep-only
   "`--only kind/id` keeps the ops of one entity wherever it is placed, user
    scope and projects alike. A selected skill keeps the op that fetches its
    pack, for the reason `keep-projects` gives: without the clone there is
-   nothing to link, and `converge!` never gets its second pass. An id nothing
-   declares or owns brings no pack: its lookup would fall back to every pack
-   not on disk yet, and a typo would clone them all."
-  [ops cfg st {:keys [only] :as opts}]
+   nothing to link, and `converge!` never gets its second pass."
+  [ops cfg {:keys [only]}]
   (if (empty? only)
     ops
-    (let [unknown (set (unmatched-only cfg st opts))
-          packs (set (for [[kind id] only
-                           :when (and (= :skills kind) (not (unknown (str (name kind) "/" id))))
-                           p (sources/packs-for-skill cfg (keyword id)) :when p] p))]
+    (let [packs (set (for [[kind id] only :when (= :skills kind)
+                           p (only-skill-packs cfg (keyword id)) :when p] p))]
       (filter #(or (some (fn [sel] (only-match? sel %)) only)
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
               ops))))
@@ -463,7 +485,7 @@
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
         (keep-kinds opts)
         (keep-projects cfg opts)
-        (keep-only cfg st opts)
+        (keep-only cfg opts)
         (keep-user opts)
         defer-unmet-removals
         (->> (annotate-skill-ops cfg))
@@ -569,8 +591,8 @@
    `failed` (tool kind id) triples are left unrecorded — claiming ownership of
    something we never managed to create would make a later prune delete it.
 
-   `done` (tool kind id) triples are the ops a *scoped* run (`-t`/`-k`/`-p`)
-   actually executed — pass nil, not `#{}`, for an unfiltered run. Most
+   `done` (tool kind id) triples are the ops a *scoped* run (`-t`/`-k`/`-p`/
+   `--only`/`--user`, or the working directory) actually executed — pass nil, not `#{}`, for an unfiltered run. Most
    inventory tuples carry no `data` (an id is enough to say ownership), but a
    few — hooks' `:path`/`:value` — carry the exact value written to disk. On
    an unfiltered run a hook with no op is positive evidence the declared

@@ -1007,6 +1007,48 @@ python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["ops"] =
 (cd "$SEL" && sel apply! -f "$SEL/git2.edn" --only skills/nope -y) > "$SEL/git2-nope.txt"
 [ ! -e "$SEL/.agents/skill-packs/gp2" ] || { cat "$SEL/git2-nope.txt"; fail "--only with an unknown id cloned a pack"; }
 
+# an id still owned but dropped from the config is only removed: its removal
+# needs no clone, and must not fall back to fetching every pack not on disk
+cat > "$SEL/git3.edn" <<EDN
+{:skill-packs {[:uri "file://$SEL/packs/p"] {:alias p :dir "skills"}
+               [:uri "file://$SEL/gp2"] {:alias gp2 :dir "skills" :type :git}}
+ :skills {[gp2 "h"] {:in :all :acli [:claude]}}}
+EDN
+owned 'skills +a$' || { sel state; fail "setup: a is not owned"; }
+sel_plan -f "$SEL/git3.edn" --only skills/a --json > "$SEL/drop-a.json"
+python3 - "$SEL/drop-a.json" <<'PY' || { cat "$SEL/drop-a.json"; fail "--only on a dropped skill planned more than its removal"; }
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert ops, "nothing planned"
+assert all(o["kind"] == "skills" and o["id"] == "a" and o["action"] == "delete" for o in ops), ops
+PY
+(cd "$SEL" && sel apply! -f "$SEL/git3.edn" --only skills/a -y) > "$SEL/drop-a.txt"
+[ ! -e "$SEL/.claude/skills/a" ] || { cat "$SEL/drop-a.txt"; fail "--only did not remove a dropped skill"; }
+[ ! -e "$SEL/.agents/skill-packs/gp2" ] || { cat "$SEL/drop-a.txt"; fail "removing a dropped skill cloned a pack"; }
+[ -L "$SEL/.claude/skills/c" ] || fail "removing a dropped skill touched another"
+
+# -k skills keeps the fetch a skill needs, alone and with --only / --user
+sel_plan -f "$SEL/git3.edn" --user -k skills --json > "$SEL/k-user.json"
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(0 if any(o["kind"]=="skill-packs" and o["id"]=="gp2" for o in ops) else 1)' "$SEL/k-user.json" \
+  || { cat "$SEL/k-user.json"; fail "--user -k skills dropped the clone a user-wide skill needs"; }
+(cd "$SEL" && sel apply! -f "$SEL/git3.edn" --only skills/h -k skills -y) > "$SEL/k-only.txt"
+[ -L "$SEL/.claude/skills/h" ] || { cat "$SEL/k-only.txt"; fail "--only skills/h -k skills did not clone and link"; }
+
+# --json carries the warnings the text prints
+sel_plan -f "$SEL/git3.edn" --only skills/nope --json > "$SEL/warn.json"
+python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["warnings"]; sys.exit(0 if any("--only skills/nope" in x for x in w) else 1)' "$SEL/warn.json" \
+  || { cat "$SEL/warn.json"; fail "--json omitted the warning for an --only naming nothing"; }
+
+# selectors that cannot both hold, and options nobody knows, are errors
+for args in "-k skills --only mcps/keep" "--onyl skills/c"; do
+  set +e
+  sel apply -f "$SEL/git3.edn" $args > "$SEL/bad.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || { cat "$SEL/bad.txt"; fail "apply $args was not rejected"; }
+done
+grep -q 'unknown option --onyl' "$SEL/bad.txt" || { cat "$SEL/bad.txt"; fail "an unknown option was not named"; }
+[ -L "$SEL/.claude/skills/c" ] || fail "a rejected run touched the environment"
+
 # a mistyped command is reported as one, whatever options came with it
 for opt in "--only skills/x" "--host h"; do
   set +e

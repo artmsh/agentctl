@@ -334,7 +334,19 @@ and are never rewritten.
 
 ### `:hooks`
 
-Claude Code only, global scope, declared under `:executors :claude :hooks`:
+Claude Code only. In the entity DSL a hook is a `:hooks` row placed like any other entity:
+`:in :all` writes `~/.claude/settings.json`, and a project selector writes that
+repository's `.claude/settings.json`:
+
+```clojure
+:hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
+         :command "$HOME/.claude/hooks/memory-file-lock.sh acquire" :timeout 25 :in :all}
+        {:id :session-start :event :SessionStart :command "./scripts/session-start.sh"
+         :in "projects/sample"}]
+```
+
+The old format declares user-scope hooks under `:executors :claude :hooks`; a
+hook under a project's `:executors :claude` there is reported, not written:
 
 ```clojure
 :executors

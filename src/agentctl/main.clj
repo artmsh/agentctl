@@ -97,9 +97,13 @@
         "--port" (recur (drop 2 args) (assoc opts :port (str (second args))))
         "--no-open" (recur (rest args) (assoc opts :no-open true))
         ("-h" "--help") (recur (rest args) (assoc opts :help true))
-        (if (:command opts)
-          (recur (rest args) (update opts :rest (fnil conj []) a))
-          (recur (rest args) (assoc opts :command a))))
+        (cond
+          ;; a mistyped flag must not fall through as an argument: `--onyl x`
+          ;; would otherwise plan the whole config, prunes included
+          (and (str/starts-with? a "-") (not= a "-"))
+          (recur (rest args) (update opts :unknown (fnil conj []) a))
+          (:command opts) (recur (rest args) (update opts :rest (fnil conj []) a))
+          :else (recur (rest args) (assoc opts :command a))))
       opts)))
 
 (defn- op->data [o]
@@ -219,10 +223,18 @@
           opts (cond-> opts scope (assoc :projects (:projects scope)))
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
-          changes (filter plan/mutating? ops)]
+          changes (filter plan/mutating? ops)
+          ;; a selector that names nothing narrows the run to nothing, which
+          ;; reads as converged — in either output, so --json carries them too
+          warnings (concat
+                    (for [p (core/unmatched-projects cfg opts)]
+                      (str "-p " p " — no declared project there"))
+                    (for [o (core/unmatched-only cfg st opts)]
+                      (str "--only " o " — nothing declared or owned by that id")))]
       (if (:json opts)
         (println (json/generate-string
                   (cond-> {:ops (map op->data ops)
+                           :warnings (vec warnings)
                            :summary (plan/summary-line ops)}
                     scope (assoc :scope {:where (u/kw->str (:where scope))
                                          :path (:path scope)
@@ -230,10 +242,7 @@
                   {:pretty true}))
         (do
           (when scope (println (scope-note cfg scope)))
-          (doseq [p (core/unmatched-projects cfg opts)]
-            (println (str "  ⚠ -p " p " — no declared project there")))
-          (doseq [o (core/unmatched-only cfg st opts)]
-            (println (str "  ⚠ --only " o " — nothing declared or owned by that id")))
+          (doseq [w warnings] (println (str "  ⚠ " w)))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
           (if (or (seq changes) (:show-noop opts))
@@ -254,7 +263,7 @@
           (confirm! opts changes)
           (let [{:keys [done failed]} (core/converge! cfg st opts ops)]
             ;; never claim ownership of a resource whose creation failed; on a
-            ;; scoped run (-t/-k/-p) a data-carrying id (hooks) only gets its
+            ;; scoped run (-t/-k/-p/--only/--user) a data-carrying id (hooks) only gets its
             ;; value overwritten if this run actually wrote it — see
             ;; `core/sync-state!`
             (state/save! (core/sync-state! st cfg
@@ -329,12 +338,17 @@
   (cond-> opts
     (seq only)
     (assoc :only (vec (for [s only
-                            :let [[_ k id] (re-matches #"([^/]+)/(.+)" s)]]
+                            :let [[_ k id] (re-matches #"([^/]+)/(.+)" s)
+                                  kind (some-> k keyword)]]
                         (cond
                           (nil? k) (throw (ex-info (str "--only " s ": want KIND/ID, e.g. --only skills/review") {}))
-                          (not (some #{(keyword k)} core/kinds))
-                          (throw (ex-info (str "--only " s ": " (core/kind-problem (keyword k))) {}))
-                          :else [(keyword k) id]))))))
+                          (not (some #{kind} core/kinds))
+                          (throw (ex-info (str "--only " s ": " (core/kind-problem kind)) {}))
+                          ;; both filters apply, so this one could select nothing
+                          (not (core/kind-selected? opts kind))
+                          (throw (ex-info (str "--only " s ": -k " (str/join " -k " (map name (sort (:kinds opts))))
+                                               " leaves no " (name kind) " to select") {}))
+                          :else [kind id]))))))
 
 (def ^:private commands
   #{"apply" "plan" "apply!" "validate" "import" "import!" "state" "gui"})
@@ -351,6 +365,8 @@
           (System/exit 1))
       :else
       (try
+        (when-let [[flag] (:unknown opts)]
+          (throw (ex-info (str "unknown option " flag " — agentctl --help lists the options") {})))
         (when (and (:host opts) (not (#{"apply" "plan" "apply!" "validate" "state"} command)))
           (throw (ex-info (str command " does not take --host") {})))
         (when (and (or (seq (:only opts)) (:user opts)) (not (#{"apply" "plan" "apply!"} command)))
