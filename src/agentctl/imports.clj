@@ -8,6 +8,7 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.dsh :as dsh]
+            [agentctl.codex-schema :as codex-schema]
             [agentctl.config :as config]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
@@ -15,6 +16,7 @@
             [agentctl.adapters.pi :as pi]
             [agentctl.refs :as refs]
             [agentctl.scope :as scope]
+            [agentctl.state :as state]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
             [babashka.fs :as fs]
@@ -54,6 +56,40 @@
                     (if (map? v) (import-profile v (or data-keys? (contains? keyed-by-data k))) v)]))
          m)))
 
+(def ^:private codex-hook-fields
+  (into {} (map (fn [[k v]] [v k])) (merge codex-schema/hook-entry-keys {:type :type})))
+
+(defn- codex-hook-decl
+  "A `hooks[event]` element as the declaration that would write it."
+  [event group]
+  (let [h (first (:hooks group))]
+    (u/prune-nils
+     (merge {:event (keyword (name event)) :matcher (:matcher group)}
+            (into {} (keep (fn [[k v]] (when-let [dk (get codex-hook-fields k)]
+                                         (when (not= :type dk) [dk v]))))
+                  h)))))
+
+(defn scan-codex-hooks
+  "Codex hooks agentctl owns (recorded in its state, still in hooks.json),
+   rebuilt as declarations. Everything else in hooks.json was installed by a
+   vendor or by hand; import leaves it out and says how much, since
+   declaring it would make agentctl prune it later."
+  []
+  (let [file (u/read-json codex/hooks-file)
+        st (state/load-state)
+        groups (for [[event gs] (:hooks file) g gs] [event g])
+        owned (into {} (for [id (state/managed-ids st :codex :hooks)
+                             :let [{:keys [path value]} (state/entry st :codex :hooks id)]
+                             :when (some (fn [[event g]] (and (= (name (last path)) (name event))
+                                                              (= (u/norm g) (u/norm value))))
+                                         groups)]
+                         [(keyword id) (codex-hook-decl (last path) value)]))
+        vendor (- (count groups) (count owned))]
+    (when (pos? vendor)
+      (note! (str vendor " codex hook group(s) in " (u/tilde codex/hooks-file)
+                  " are not agentctl's — left out; declare one under :hooks to own it")))
+    owned))
+
 (defn scan-settings []
   (u/prune-nils
    {:claude (let [s (u/read-json claude/settings-file)
@@ -62,13 +98,15 @@
                                                       (when-not (map? v) [dk v]))))
                                s)))
     :codex (let [t (try (toml/read-toml codex/config-file) (catch Exception _ nil))
-                 inv (invert codex/setting-keys)]
+                 inv (invert codex/setting-keys)
+                 hooks (scan-codex-hooks)]
              (not-empty
               (cond-> (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
                                                   (when (string? v) [dk v]))))
                             t)
                 (seq (get-in t ["tui" "keymap"]))
                 (assoc :keymap (get-in t ["tui" "keymap"]))
+                (seq hooks) (assoc :hooks hooks)
                 (map? (get t "permissions"))
                 (assoc :permission-profiles (into (sorted-map-by #(compare (str %1) (str %2)))
                                                   (for [[nm p] (get t "permissions") :when (map? p)]

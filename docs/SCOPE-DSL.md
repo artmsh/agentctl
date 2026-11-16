@@ -182,7 +182,7 @@ every tool that supports the kind.
 | `:settings` | unified or per-CLI settings | `{:settings {:model "opus"} :tools [:claude] :in "projects"}` |
 | `:memory` | a memory/AGENTS.md file | `{:memory "~/notes/AGENTS.md" :mode :symlink :in :all}` |
 | `:trust` | mark a path trusted | `{:trust true :in ["Brain" "projects"]}` |
-| `:hooks` | Claude Code hooks | `{:hooks {…} :tools [:claude] :in :all}` |
+| `:hooks` | Claude Code or Codex hooks (Claude's unless `:tools` names `:codex`, so `:tools :all` means Claude only; Codex's user-wide only) | `{:hooks {…} :tools [:codex] :in :all}` |
 
 `:settings` covers the unified-vs-per-CLI split the current `:executors` map
 handles by nesting. Unified keys (`:model`, `:thinking`, `:on`/`:off`) are

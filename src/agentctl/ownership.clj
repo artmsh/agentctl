@@ -17,9 +17,10 @@
   (into {}
         (for [{:keys [kind id in targets decl]} (:entities cfg)
               t (let [ts (:tools decl)]
-                  (if (or (nil? ts) (= :all ts))
-                    (config/tools-for (case kind :trust :projects :skill-packs :skills kind))
-                    (if (keyword? ts) [ts] ts)))
+                  (cond
+                    (and (or (nil? ts) (= :all ts)) (= :hooks kind)) scope/default-hook-tools
+                    (or (nil? ts) (= :all ts)) (config/tools-for (case kind :trust :projects :skill-packs :skills kind))
+                    :else (if (keyword? ts) [ts] ts)))
               p (if (= :all in) [u/home] targets)]
           [[kind id t p] {:entity-id id :tool t :kind kind :resolved-path p}])))
 

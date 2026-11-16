@@ -20,6 +20,7 @@
 (def config-file (str home "/config.toml"))
 (def skills-dir (str home "/skills"))
 (def memory-file (str home "/AGENTS.md"))
+(def hooks-file (str home "/hooks.json"))
 
 (defn codex-sh
   "Run the codex CLI against the home directory agentctl is managing. From `/`:
@@ -177,7 +178,7 @@
 
 (def nested-settings
   "Declared settings with an op of their own rather than a root key."
-  [:keymap :presets :status-line :permission-profiles])
+  [:keymap :presets :status-line :permission-profiles :hooks])
 
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
@@ -208,6 +209,61 @@
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")
                  :warn true})))))
+
+;; ---------------------------------------------------------------- hooks
+
+(defn hook-command
+  "One `hooks[event][].hooks[]` entry: a command handler, the only kind the
+   DSL spells for codex."
+  [decl]
+  (u/prune-nils
+   (merge {:type "command"}
+          (into {} (keep (fn [[k v]] (when-let [nk (get schema/hook-entry-keys k)] [nk v]))) decl))))
+
+(defn hook-group
+  "One element of `hooks[event]`: an optional matcher and the one command."
+  [decl]
+  (u/prune-nils {:matcher (:matcher decl) :hooks [(hook-command decl)]}))
+
+(defn hook-path [decl] [:hooks (keyword (u/kw->str (:event decl)))])
+
+(defn hook-ops
+  "User-wide hooks declared under `:executors :codex :hooks`, in
+   `~/.codex/hooks.json`. Each id owns one `hooks[event]` element, found by
+   value (`json-array-merge-op`), so a vendor's hooks in the same array are
+   neither touched nor reported.
+
+   Codex keys hook trust by position (`[hooks.state.\"<file>:<event>:<group>:<idx>\"]`
+   in config.toml, never written here). A changed hook is replaced at its
+   own index so only it needs review again; a new one is appended after
+   everything already trusted. Removing one shifts the groups after it in
+   that event, and Codex asks for their review again."
+  [cfg st]
+  (let [declared (:hooks (common/settings-for cfg tool))
+        managed (into #{} (map keyword) (state/managed-ids st tool :hooks))]
+    (concat
+     (for [[id decl] declared
+           :let [path (hook-path decl)
+                 op (plan/json-array-merge-op
+                     {:tool tool :kind :hooks :id id
+                      :file hooks-file :path path
+                      :old (:value (state/entry st tool :hooks id)) :value (hook-group decl)
+                      :report-converged? true :in-place? true
+                      :note "codex asks to review a new or changed hook before it runs"
+                      :summary (str "hooks.json hooks." (name (last path))
+                                    (when-let [m (:matcher decl)] (str " [" m "]")))})]
+           :when op]
+       op)
+     (for [id managed
+           :when (not (contains? declared id))
+           :let [entry (state/entry st tool :hooks id)
+                 op (when (and entry (:path entry))
+                      (plan/json-array-unset-op
+                       {:tool tool :kind :hooks :id id
+                        :file hooks-file :path (:path entry) :old (:value entry)
+                        :summary "removed from agents.edn"}))]
+           :when op]
+       op))))
 
 ;; ---------------------------------------------------------------- mcps
 
@@ -468,6 +524,7 @@
 
 (defn plan [cfg state]
   (concat (settings-ops cfg)
+          (hook-ops cfg state)
           (mcp-ops cfg state)
           (provider-ops cfg)
           (project-ops cfg state)

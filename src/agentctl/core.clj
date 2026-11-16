@@ -187,14 +187,17 @@
   (when (:entity-dsl? cfg)
     (mapcat
      (fn [{:keys [kind id in targets decl]}]
-       (let [ts (or (:tools decl) (config/tools-for (if (= kind :trust) :projects kind)))
+       (let [ts (cond
+                  (and (= kind :hooks) (not (scope/names-codex? decl))) scope/default-hook-tools
+                  :else (or (:tools decl) (config/tools-for (if (= kind :trust) :projects kind))))
              ts (if (= :all ts) config/all-tools (if (keyword? ts) [ts] ts))]
          (for [p targets t ts
                :when (or (not= kind :memory) (= id (memory-winner cfg p t)))
                :when (or (= kind :memory)
                          (= kind :providers)
                          (and (#{:skills :skill-packs} kind) (not (common/project-skill-tools t)))
-                         (and (= kind :settings) (not= t :claude)))
+                         (and (= kind :settings) (not= t :claude))
+                         (and (= kind :hooks) (= t :codex)))
                :let [pid (scope/target-id p)
                      oid (keyword (name pid) (name id))
                      filename (get {:claude "CLAUDE.md" :codex "AGENTS.md" :pi "AGENTS.md"
@@ -429,6 +432,8 @@
    (for [[id decl] (:hooks (get-in cfg [:tools :claude]))
          :let [path [:hooks (keyword (u/kw->str (:event decl)))]]]
      [:claude :hooks id {:path path :value (claude/hook-group decl)}])
+   (for [[id decl] (:hooks (get-in cfg [:tools :codex]))]
+     [:codex :hooks id {:path (codex/hook-path decl) :value (codex/hook-group decl)}])
    (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))] [t :mcps id])
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)

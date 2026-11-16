@@ -1194,6 +1194,108 @@
         (u/write-text! f "default_permissions = \"p\"\n")
         (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough")))))
 
+(def vendor-codex-hooks
+  "A hooks.json a vendor installer wrote: one SessionStart and one Stop hook."
+  {:hooks {:SessionStart [{:hooks [{:type "command" :command "vendor-session" :timeout 10}]}]
+           :Stop [{:hooks [{:type "command" :command "vendor-stop"}]}]}})
+
+(deftest codex-hooks-own-only-their-elements-and-keep-trust-positions
+  (let [dir (temp-dir) hooks (str dir "/hooks.json") conf (str dir "/config.toml")
+        trust (str "[hooks.state.\"" hooks ":session_start:0:0\"]\n"
+                   "trusted_hash = \"sha256:0000\"\nenabled = true\n")
+        decl (fn [cmd] {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+                        :hooks [{:id :note :event :SessionStart :command cmd :timeout 5
+                                 :status-message "noting" :acli [:codex] :in :all}
+                                {:id :lint :event :PostToolUse :matcher "apply_patch"
+                                 :command "lint-hook" :acli [:codex] :in :all}]})]
+    (u/write-json! hooks vendor-codex-hooks)
+    (u/write-text! conf (str "model = \"m-a\"\n\n" trust))
+    (with-redefs [codex/hooks-file hooks codex/config-file conf]
+      (let [{ops1 :ops st1 :st} (converge-codex (decl "note-v1") state/empty-state)
+            j (u/read-json hooks)]
+        (is (= #{[:create :note] [:create :lint]}
+               (set (map (juxt :action :id) (filter #(= :hooks (:kind %)) ops1)))))
+        (testing "a new hook goes after the vendor's, which keeps index 0 and its trust key"
+          (is (= ["vendor-session" "note-v1"] (map #(get-in % [:hooks 0 :command]) (get-in j [:hooks :SessionStart]))))
+          (is (= {:type "command" :command "note-v1" :timeout 5 :statusMessage "noting"}
+                 (get-in j [:hooks :SessionStart 1 :hooks 0])))
+          (is (= [{:matcher "apply_patch" :hooks [{:type "command" :command "lint-hook"}]}]
+                 (get-in j [:hooks :PostToolUse])))
+          (is (= (:Stop (:hooks vendor-codex-hooks)) (get-in j [:hooks :Stop]))))
+        (testing "[hooks.state] in config.toml is never touched"
+          (is (str/includes? (slurp conf) trust)))
+        (testing "a second plan reports both hooks converged"
+          (let [again (codex/hook-ops (config/normalize (decl "note-v1") "test") st1)]
+            (is (= #{[:noop :note] [:noop :lint]} (set (map (juxt :action :id) again))))
+            (is (empty? (codex-drift (decl "note-v1") st1)))))
+        (testing "a changed command is replaced at its own index"
+          (u/write-json! hooks (update-in (u/read-json hooks) [:hooks :SessionStart] conj
+                                          {:hooks [{:type "command" :command "vendor-late"}]}))
+          (let [{st2 :st} (converge-codex (decl "note-v2") st1)
+                cmds (map #(get-in % [:hooks 0 :command]) (get-in (u/read-json hooks) [:hooks :SessionStart]))]
+            (is (= ["vendor-session" "note-v2" "vendor-late"] cmds) "vendor-late keeps index 2")
+            (testing "dropping a hook prunes only that element"
+              (let [less (update (decl "note-v2") :hooks #(vec (remove (comp #{:note} :id) %)))
+                    {st3 :st} (converge-codex less st2)
+                    j (u/read-json hooks)]
+                (is (= ["vendor-session" "vendor-late"]
+                       (map #(get-in % [:hooks 0 :command]) (get-in j [:hooks :SessionStart]))))
+                (is (= (:Stop (:hooks vendor-codex-hooks)) (get-in j [:hooks :Stop])))
+                (is (str/includes? (slurp conf) trust))
+                (is (empty? (codex-drift less st3)))
+                (testing "import rebuilds the owned hook and leaves vendor hooks out"
+                  (with-redefs [state/load-state (constantly st3)]
+                    (reset! imports/notes [])
+                    (let [imported (:codex (imports/scan-settings))]
+                      (is (= {:lint {:event :PostToolUse :matcher "apply_patch" :command "lint-hook"}}
+                             (:hooks imported)))
+                      (is (some #(str/includes? % "3 codex hook group(s)") @imports/notes))
+                      (is (every? #(= :noop (:action %))
+                                  (codex/hook-ops (config/normalize {:executors {:codex imported}} nil) st3))
+                          "the imported hook plans as converged"))))))))))))
+
+(deftest codex-hooks-validate-events-and-stay-opt-in
+  (testing "validate accepts codex hooks and rejects an event codex never fires"
+    (is (empty? (config/structural-findings
+                 (config/normalize {:executors {:codex {:hooks {:a {:event :SessionStart :command "x"}
+                                                                :b {:event "PreToolUse" :command "y" :matcher "shell"
+                                                                    :async false :additional-context-limit 0}}}}} nil))))
+    (doseq [[h msg] [[{:event :Notification :command "x"} #"unknown event :Notification"]
+                     [{:event :SessionStart} #"needs :command"]
+                     [{:command "x"} #"needs :event"]
+                     [{:event :Stop :command "x" :timeout "5"} #"whole seconds"]
+                     [{:event :Stop :command "x" :type "prompt"} #"command hooks"]
+                     [{:event :Stop :command "x" :shell "bash"} #"unknown hook field :shell"]]]
+      (let [cfg (config/normalize {:executors {:codex {:hooks {:h h}}}} nil)]
+        (is (some #(re-find msg (:message %)) (filter #(= :error (:level %)) (config/structural-findings cfg)))
+            (pr-str h)))))
+  (testing "a :hooks row without :acli stays Claude's; naming :codex places it in codex"
+    (let [row {:id :h :event :SessionStart :command "x" :in :all}
+          plain (config/normalize {:hooks [row]} "test")
+          both (config/normalize {:hooks [(assoc row :acli [:claude :codex])]} "test")]
+      (is (contains? (get-in plain [:tools :claude :hooks]) :h))
+      (is (nil? (get-in plain [:tools :codex :hooks])))
+      (is (not (contains? (config/active-tools plain) :codex)))
+      (is (contains? (get-in both [:tools :codex :hooks]) :h))
+      (is (contains? (get-in both [:tools :claude :hooks]) :h))))
+  (testing "a Claude-only hook reaching codex through :acli :all or a unified row is no codex error"
+    (doseq [raw [{:hooks [{:id :n :event :Notification :command "x" :shell "bash" :acli :all :in :all}]}
+                 {:settings [{:hooks {:n {:event :Notification :command "x"}} :in :all}]}]
+            :let [cfg (config/normalize raw "test")]]
+      (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)) (pr-str raw))
+      (is (nil? (get-in cfg [:tools :codex :hooks])) (pr-str raw))
+      (is (contains? (get-in cfg [:tools :claude :hooks]) :n) (pr-str raw))))
+  (testing "a settings row that names codex does carry its hooks there"
+    (let [cfg (config/normalize {:settings [{:hooks {:n {:event :Stop :command "x"}} :acli [:codex] :in :all}]} "test")]
+      (is (contains? (get-in cfg [:tools :codex :hooks]) :n))))
+  (testing "a project-placed codex hook is reported, not written"
+    (let [repo (temp-dir)
+          _ (fs/create-dirs (str repo "/.git"))
+          cfg (config/normalize {:hooks [{:id :h :event :SessionStart :command "x" :acli [:codex] :in repo}]} "test")
+          ops (core/build-plan cfg state/empty-state {:tools #{:codex}})]
+      (is (some #(and (:warn %) (str/includes? (str (:summary %)) "project-scoped hooks")) ops))
+      (is (not-any? #(and (= :hooks (:kind %)) (plan/mutating? %)) ops)))))
+
 (deftest codex-keymap-is-editable-as-edn
   (let [keymap {:global {:open_transcript "alt-t"}}
         m (form/model (pr-str {:executors {:codex {:keymap keymap}}}))

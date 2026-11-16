@@ -417,7 +417,8 @@ and are never rewritten.
 
 ### `:hooks`
 
-Claude Code only, global scope, declared under `:executors :claude :hooks`:
+Claude Code and Codex, global scope, declared under `:executors :claude :hooks`
+or `:executors :codex :hooks` (Codex: see below):
 
 ```clojure
 :executors
@@ -460,6 +461,45 @@ it is what the ownership manifest keys on, not `:event`. An entry missing one
 gets a positional placeholder (`:SessionStart-0`) so two id-less hooks can't
 collide onto the same key, and `structural-findings` reports the missing
 `:id` as an error rather than planning against a name nobody chose.
+
+#### Codex hooks
+
+The same shape under `:executors :codex :hooks`, written to
+`~/.codex/hooks.json`, whose layout matches Claude's (`hooks[event][]` of
+`{:matcher … :hooks [{:type "command" …}]}`). In the entity DSL a `:hooks` row
+reaches Codex only when its `:acli` names `:codex`; a row without `:acli`, with
+`:acli :all`, or a `:hooks` key in a `:settings` row that does not name `:codex`
+stays Claude's, because events and tool-name matchers differ between the two. Codex
+hooks are user-wide only: a row placed in a project is reported, not written.
+
+```clojure
+{:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"
+          :timeout 10 :status-message "noting" :acli [:codex] :in :all}]}
+```
+
+codex-cli 0.169.0 dispatches `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
+`PreModelRequest`, `PostModelRequest`, `PreToolUse`, `PermissionRequest`,
+`PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`,
+`Stop` and `Interrupt`, and loads any other event key without a word, so
+`validate` rejects an unknown event. A command hook takes `:command`
+(required), `:timeout` (seconds), `:async`, `:status-message`,
+`:command-windows` and `:additional-context-limit`; any other field is an
+error. Ownership is Claude's: each id owns one element, found by value, and
+vendor hooks in the file (installers write there) are never touched or pruned.
+The plan reports a converged hook as unchanged (`--show-noop`).
+
+Codex will not run a hook until it is reviewed: it keeps a trust hash per hook
+in `config.toml`, under `[hooks.state."<hooks.json path>:<event>:<group>:<index>"]`.
+agentctl never writes those entries and never pre-trusts. Every new or changed
+command needs review in Codex (it asks at startup, or `/hooks`). The keys are
+positional, so agentctl keeps positions where it can: a new hook is appended
+after everything already there, and a changed one is rewritten at its own
+index, so only that hook needs review. Removing a hook moves every later group
+of the same event up one index, and Codex then asks to review those again.
+
+Import rebuilds a Codex hook only when agentctl's state records it and it is
+still in `hooks.json`; the rest are a vendor's or hand-made, and import says
+how many it left out. Declaring one would make it agentctl's to prune.
 
 ### Project location (legacy)
 

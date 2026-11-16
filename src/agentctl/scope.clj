@@ -201,6 +201,18 @@
                                                        (.getBytes (pr-str x) "UTF-8")))) 0 16))
 (defn target-id [p] (keyword (str "target-" (digest p))))
 (def metadata-keys [:id :in :tools :for :at :scope :acli])
+(def default-hook-tools
+  "Who a `:hooks` row without `:acli`, or with `:acli :all`, is for: Claude
+   Code, as before codex took hooks at all. Events and tool-name matchers
+   differ between the two, so codex takes a hook only when a row names it."
+  [:claude])
+
+(defn names-codex?
+  "Does a row's own tool selection name codex, rather than reach it through
+   nil or :all?"
+  [decl]
+  (let [ts (or (:tools decl) (:for decl))]
+    (boolean (and ts (not= :all ts) (some #{:codex} (if (keyword? ts) [ts] ts))))))
 (defn entities [raw]
   (let [raw (lower-keyed raw)
         resolve-targets (memoize targets)
@@ -251,9 +263,13 @@
     (throw (ex-info "do not mix legacy project/executor sections with entity vectors; migrate them to :in stanzas" {})))
   (let [es (entities raw)
         selected (fn [e] (let [ts (or (get-in e [:decl :tools]) (get-in e [:decl :for]))]
-                           (set (if (or (nil? ts) (= :all ts))
+                           (set (cond
+                                  ;; a hook is written for one agent's events and
+                                  ;; tool names: codex takes one only when named
+                                  (and (or (nil? ts) (= :all ts)) (= :hooks (:kind e))) default-hook-tools
+                                  (or (nil? ts) (= :all ts))
                                   (tools-for (case (:kind e) :trust :projects :skill-packs :skills (:kind e)))
-                                  (if (keyword? ts) [ts] ts)))))
+                                  :else (if (keyword? ts) [ts] ts)))))
         ;; an :mcps id placed by several rows: one definition, a scope per tool
         shared (into {} (for [[id rows] (group-by :id (filter #(= :mcps (:kind %)) es))
                               :when (next rows)]
@@ -273,12 +289,18 @@
                       scope (if (= in :all) :global (if (= at :repo) :project :local))
                       cfg (if pid (update-in cfg [:projects pid :tools] #(vec (set (concat % ts)))) cfg)]
                   (case kind
-                    :settings (reduce #(update-in %1 (if pid [:projects pid :executors %2] [:executors %2]) merge body) cfg ts)
+                    :settings (reduce #(update-in %1 (if pid [:projects pid :executors %2] [:executors %2]) merge
+                                                 ;; hooks in a unified row stay Claude's, as for a :hooks row
+                                                 (if (and (= :codex %2) (not (names-codex? decl))) (dissoc body :hooks) body))
+                                      cfg ts)
                     :permissions (if pid (if (ts :claude) (update-in cfg [:projects pid :permissions] merge body) cfg)
                                      (if (ts :claude) (update-in cfg [:executors :claude :permissions] merge body) cfg))
-                    :hooks (if (ts :claude)
-                             (update-in cfg (if pid [:projects pid :executors :claude :hooks] [:executors :claude :hooks]) merge
-                                        (or (:hooks body) {id body})) cfg)
+                    ;; codex hooks are user-wide only; a project row is
+                    ;; reported by `core/entity-extra-ops`
+                    :hooks (reduce (fn [cfg t]
+                                     (update-in cfg (if pid [:projects pid :executors t :hooks] [:executors t :hooks]) merge
+                                                (or (:hooks body) {id body})))
+                                   cfg (filter (if pid #{:claude} #{:claude :codex}) ts))
                     :trust (if pid (-> cfg (assoc-in [:projects pid :trusted] (get body :trusted true))
                                        (update-in [:projects pid :trust-by-tool] merge (zipmap ts (repeat (get body :trusted true))))) cfg)
                     :mcps (cond-> (if (contains? shared id)

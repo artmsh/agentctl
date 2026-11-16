@@ -18,7 +18,7 @@
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
   {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks :plugins}
-   :codex       #{:settings :mcps :skills :memory :projects :providers}
+   :codex       #{:settings :mcps :skills :memory :projects :providers :hooks}
    :pi          #{:settings :mcps :skills :memory :providers :projects :extensions}
    :omp         #{:settings :mcps :skills :memory :providers}
    :llm         #{:providers :settings}

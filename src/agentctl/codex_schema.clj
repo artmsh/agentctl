@@ -155,6 +155,54 @@
                        (map rest (network-findings v (conj w k))))))]
       [:error w msg])))
 
+;; ---------------------------------------------------------------- hooks
+
+(def hook-events
+  "`hooks.json` events codex-cli 0.169.0 dispatches (`HookEventsToml`). It
+   loads any other key without a word, and that hook never fires."
+  ["SessionStart" "SessionEnd" "UserPromptSubmit" "PreModelRequest" "PostModelRequest"
+   "PreToolUse" "PermissionRequest" "PostToolUse" "PreCompact" "PostCompact"
+   "SubagentStart" "SubagentStop" "Stop" "Interrupt"])
+
+(def hook-entry-keys
+  "Declared field -> the command handler's field in 0.169.0. `:event`,
+   `:matcher` and `:id` place the hook; they are not part of it."
+  {:command :command :command-windows :commandWindows :timeout :timeout :async :async
+   :status-message :statusMessage :additional-context-limit :additionalContextLimit})
+
+(def ^:private hook-placement #{:event :matcher :type :hook-id-missing})
+
+(defn- hook-findings [hooks where]
+  (if-not (map? hooks)
+    [[:error where ":hooks maps an id to {:event … :command …}, or an event to a vector of them"]]
+    (for [[id h] hooks
+          :let [w (conj where (if (:hook-id-missing h) (:event h) id))]
+          msg (if-not (map? h)
+                ["a hook is a map: {:event :SessionStart :command \"…\"}"]
+                (concat
+                 (when (:hook-id-missing h) ["hook grouped under :hooks needs :id"])
+                 (cond
+                   (nil? (:event h)) ["hook needs :event"]
+                   (not (some #{(s-of (:event h))} hook-events))
+                   [(str "unknown event " (pr-str (:event h)) " — codex 0.169.0 dispatches "
+                         (str/join ", " hook-events))])
+                 (when-not (and (string? (:command h)) (not (str/blank? (:command h))))
+                   ["hook needs :command, a string"])
+                 (when-not (contains? #{nil "command" :command} (:type h))
+                   ["codex hooks are command hooks — :type, when given, is \"command\""])
+                 (when-not (or (nil? (:matcher h)) (string? (:matcher h))) [":matcher must be a string"])
+                 (when-not (or (nil? (:timeout h)) (pos-int? (:timeout h))) [":timeout is whole seconds"])
+                 (when-not (or (nil? (:async h)) (boolean? (:async h))) [":async must be true or false"])
+                 (for [k [:status-message :command-windows]
+                       :when (and (contains? h k) (not (string? (get h k))))]
+                   (str k " must be a string"))
+                 (when-not (or (nil? (:additional-context-limit h)) (nat-int? (:additional-context-limit h)))
+                   [":additional-context-limit must be a whole number"])
+                 (for [k (keys h) :when (not (or (hook-placement k) (contains? hook-entry-keys k)))]
+                   (str "unknown hook field " (pr-str k) " — codex reads "
+                        (str/join ", " (map pr-str (concat [:event :matcher] (keys hook-entry-keys))))))))]
+      [:error w msg])))
+
 ;; ---------------------------------------------------------------- findings
 
 (defn findings
@@ -166,6 +214,8 @@
        (preset-findings (:presets settings) (conj where :presets)))
      (when (status-line? (:status-line settings))
        (status-line-findings (:status-line settings) (conj where :status-line)))
+     (when (contains? settings :hooks)
+       (hook-findings (:hooks settings) (conj where :hooks)))
      (when (contains? settings :permission-profiles)
        (concat
         (profile-findings (:permission-profiles settings) (conj where :permission-profiles))

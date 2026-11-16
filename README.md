@@ -43,7 +43,8 @@ segment.
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Codex's nested tables are declarable too: keymap, presets and the native footer
   ([Codex TUI](docs/GUIDE.md#codex-tui)), and `[permissions.<name>]` profiles
-  ([permission profiles](docs/GUIDE.md#codex-permission-profiles)).
+  ([permission profiles](docs/GUIDE.md#codex-permission-profiles)). Hooks are declarable for
+  Claude Code and Codex; vendor hooks in the same file are left alone ([hooks](docs/GUIDE.md#hooks)).
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
   values; review its output before sharing a config.
@@ -169,8 +170,9 @@ regenerates the screenshot.
 
 ## Documentation
 
-- [docs/GUIDE.md](docs/GUIDE.md): working-directory scope, GUI, MCP scope, Kimi, DeepSeek
-  Harness, hooks, extensions, Claude plugins, project skills, remote hosts, reading a plan.
+- [docs/GUIDE.md](docs/GUIDE.md): working-directory scope, Codex TUI and permission profiles,
+  GUI, MCP scope, Kimi, DeepSeek Harness, hooks, extensions, Claude plugins, project skills,
+  remote hosts, reading a plan.
 - [docs/AGENTCTL.md](docs/AGENTCTL.md): design rules and every DSL key, including the legacy map
   form that [examples/agents.edn](examples/agents.edn) uses.
 - [docs/SCOPE-DSL.md](docs/SCOPE-DSL.md): the entity-first DSL and its `:in` selector.

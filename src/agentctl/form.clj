@@ -46,7 +46,7 @@
    :non-workspace-access {:type :bool} :enable-workflows {:type :bool}
    :env {:type :edn} :status-line {:type :edn} :model-roles {:type :edn}
    :aliases {:type :edn} :model-settings {:type :edn} :keymap {:type :edn}
-   :presets {:type :edn} :permission-profiles {:type :edn}
+   :presets {:type :edn} :permission-profiles {:type :edn} :hooks {:type :edn}
    :thinking {:suggest ["low" "medium" "high"]}
    :effort {:suggest ["low" "medium" "high"]}
    :reasoning-effort {:suggest ["low" "medium" "high"]}})

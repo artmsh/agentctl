@@ -571,9 +571,11 @@
    state manifest; nil if never written before, or already gone by hand).
    `value` is what it should be now. If `value` already sits in the array,
    nothing to do; otherwise `old` is removed (if still present) and `value`
-   appended."
+   appended — or, with `:in-place?`, written at `old`'s index, for a reader
+   that keys state by position (Codex's hook trust) and would otherwise see
+   every later element move."
   [{:keys [tool kind id file path old value summary note risk project
-           report-converged?]}]
+           report-converged? in-place?]}]
   (let [current (vec (or (get-in (u/read-json file) path) []))
         present? (fn [v] (some #(= (u/norm %) (u/norm v)) current))]
     (if (present? value)
@@ -594,12 +596,13 @@
                       (u/backup! file)
                       (let [data (or (u/read-json file) {})
                             arr (vec (or (get-in data path) []))
-                            arr' (if (some #(= (u/norm %) (u/norm old)) arr)
-                                   (vec (remove #(= (u/norm %) (u/norm old)) arr))
-                                   arr)
-                            arr'' (if (some #(= (u/norm %) (u/norm value)) arr')
-                                    arr'
-                                    (conj arr' value))]
+                            same? (fn [x] #(= (u/norm %) (u/norm x)))
+                            at (when (and in-place? (some? old) (not-any? (same? value) arr))
+                                 (first (keep-indexed (fn [i x] (when ((same? old) x) i)) arr)))
+                            arr'' (if at
+                                    (assoc arr at value)
+                                    (let [arr' (vec (remove (same? old) arr))]
+                                      (if (some (same? value) arr') arr' (conj arr' value))))]
                         (u/write-json! file (assoc-in data path arr''))))})))))
 
 (defn json-array-unset-op

@@ -325,7 +325,8 @@ instead of being silently dropped.
 
 ## Hooks
 
-Claude Code hooks, global scope, declared under `:executors :claude :hooks`:
+Claude Code and Codex hooks, global scope. Claude's are declared under
+`:executors :claude :hooks` (Codex's are covered after them):
 
 ```clojure
 :executors
@@ -359,6 +360,25 @@ several share one:
 — it is still what the ownership manifest tracks, so it stays mandatory
 there; a missing one is a structural error, not a guess. Both forms normalize
 to the same thing and can be mixed in one `:hooks` map.
+
+Codex hooks go to `~/.codex/hooks.json`, with the same ownership: vendor hooks
+in that file are left alone. A `:hooks` row reaches Codex only when its `:acli`
+names it; without `:acli`, or with `:acli :all`, a row stays Claude's, and so do
+`:hooks` inside a `:settings` row that does not name `:codex`:
+
+```clojure
+{:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"
+          :timeout 10 :acli [:codex] :in :all}]}
+```
+
+`validate` rejects an event codex-cli 0.169.0 does not fire and any field
+other than `:command`, `:timeout`, `:async`, `:status-message`,
+`:command-windows` and `:additional-context-limit`. Codex runs a new or changed
+hook only after you review it (at startup, or `/hooks`); agentctl never
+pre-trusts one. Trust is recorded by position in `config.toml`'s
+`[hooks.state]`, which agentctl never edits. A changed hook keeps its place, so
+only it needs review again, but removing one moves the later hooks of that
+event up, and Codex asks to review those again too.
 
 ## Extensions
 
