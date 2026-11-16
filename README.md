@@ -145,7 +145,7 @@ behind a per-run token in the URL it prints, and Apply is its only control that 
 For one person running several coding-agent CLIs who wants their settings, MCP servers, skills,
 memory and providers in one reviewed file. Not for agent CLIs other than the eight above (an
 unknown tool is a config error; see [Comparison](#comparison)), or for remote hosts beyond
-codex's and awl's user-wide skills, where other kinds are reported, not written. One author, no tagged
+codex's and awl's user-wide skills and codex's settings, where other kinds are reported, not written. One author, no tagged
 releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describes.
 
 ## Limitations

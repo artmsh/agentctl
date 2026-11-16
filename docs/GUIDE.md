@@ -849,10 +849,27 @@ Declare one host for each side you want provisioned; neither sees the other's sk
 
 Host sections take the keyed `:skills` and `:skill-packs` forms, and a pack there
 defaults to `:in :all`. A source already placed at the top level can be placed
-again on a host, for different tools. User-wide skills for codex and awl are
-provisioned so far: other tools and kinds are reported in the plan and by
+again on a host, for different tools. User-wide skills for codex and awl, and
+codex's settings, are provisioned so far: other tools and kinds are reported in the plan and by
 `validate`, never dropped silently. `:home` overrides the remote home, for a
 scratch tree.
+
+`:settings` on a host takes the top level's rows, user-wide only:
+
+```clojure
+{:hosts {:box {:ssh "box.example.com" :os :linux
+               :settings [{:acli [:codex] :sandbox "net"
+                           :permission-profiles {:net {:extends ":workspace"
+                                                       :network {:enabled true}}}}]}}}
+```
+
+The host's `config.toml` (`$CODEX_HOME/config.toml`) is read with the
+inventory, edited in a local copy by the same ops a local run plans, and written
+back whole. The plan names the host's path. Keys and tables the declaration does
+not name stay as they are. The write is refused if the file changed on the host
+since it was read, and the file it replaces goes into the host's backups. A
+setting dropped from a host's declaration is not removed from the host yet. Other
+tools' settings are reported, not written.
 
 Locally awl reads its skills out of `agents.edn`, but a host has none, so there
 `:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is

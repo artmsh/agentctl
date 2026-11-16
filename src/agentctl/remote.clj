@@ -93,6 +93,12 @@
   [root]
   (case root :codex "_.codex_skills_" :awl "_.agents_skills_"))
 
+;; A whole file a host keeps for a tool, read with the inventory and written
+;; back in one piece: what agentctl edits in it is edited in a local copy.
+(defn- sh-file [k] (case k :codex-config "$C/config.toml"))
+(defn- ps-file [k] (case k :codex-config "$C\\config.toml"))
+(defn- file-parked-as [k] (case k :codex-config "_.codex_config.toml"))
+
 ;; ---------------------------------------------------------------- powershell
 
 (defn- ps-str [s] (str "(D '" (b64-str s) "')"))
@@ -119,9 +125,14 @@
   (str (ps-prelude host)
        "try{\n" body "\nSay 'OK'\nexit 0\n}catch{[Console]::Error.WriteLine($_.Exception.Message);exit 1}\n"))
 
-(defn- ps-inventory [host tools ids]
+(defn- ps-inventory [host tools ids files]
   (ps-wrap host
            (str "Say (\"H`t\"+(E $H))\n"
+                (str/join (for [k files]
+                            (str "$f=\"" (ps-file k) "\"\n"
+                                 "if(Test-Path -LiteralPath $f -PathType Leaf){Say (\"F`t" (name k) "`t\"+(E $f)"
+                                 "+\"`t\"+[Convert]::ToBase64String([IO.File]::ReadAllBytes($f)))}"
+                                 "else{Say (\"F`t" (name k) "`t\"+(E $f)+\"`t-\")}\n")))
                 (str/join (for [r roots]
                             (str "Say (\"R`t" (name r) "`t\"+(E \"" (ps-root r) "\"))\n")))
                 (str/join (for [t tools]
@@ -189,9 +200,13 @@
        "sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\"; else shasum -a 256 \"$1\"; fi | cut -d' ' -f1; }\n"
        "e() { printf %s \"$1\" | base64 | tr -d '\\n'; }\n"))
 
-(defn- sh-inventory [host tools ids]
+(defn- sh-inventory [host tools ids files]
   (str (sh-prelude host)
        "printf 'H\\t%s\\n' \"$(e \"$H\")\"\n"
+       (str/join (for [k files]
+                   (str "f=\"" (sh-file k) "\"\n"
+                        "if [ -f \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t%s\\n' \"$(e \"$f\")\" \"$(base64 < \"$f\" | tr -d '\\n')\"\n"
+                        "else printf 'F\\t" (name k) "\\t%s\\t-\\n' \"$(e \"$f\")\"; fi\n")))
        (str/join (for [r roots]
                    (str "printf 'R\\t" (name r) "\\t%s\\n' \"$(e \"" (sh-root r) "\")\"\n")))
        (str/join (for [t tools]
@@ -253,6 +268,60 @@
        "if [ -e \"$d\" ] || [ -L \"$d\" ]; then park \"$d\" \"$H/.config/agentctl/backups/" stamp "/" (parked-as root) "$id\"; fi\n"
        "echo OK\n"))
 
+;; ---------------------------------------------------------------- whole files
+
+(declare run-stamp)
+
+(defn sha256 [^bytes bs]
+  (->> (.digest (java.security.MessageDigest/getInstance "SHA-256") bs)
+       (map #(format "%02x" %))
+       (apply str)))
+
+(defn- sh-write-file [host stamp k ^bytes bs expected]
+  (str (sh-prelude host)
+       "f=\"" (sh-file k) "\"\n"
+       "b=\"$H/.config/agentctl/backups/" stamp "/" (file-parked-as k) "\"\n"
+       "s=\"$H/.config/agentctl/staging/" stamp "-" (name k) "\"\n"
+       "trap 'rm -f \"$s\"' EXIT\n"
+       (if expected
+         (str "[ -f \"$f\" ] && [ \"$(sha \"$f\")\" = " (sh-quote expected) " ] || "
+              "{ echo \"changed on the host since it was read: $f\" >&2; exit 1; }\n")
+         "[ ! -e \"$f\" ] && [ ! -L \"$f\" ] || { echo \"appeared on the host since it was read: $f\" >&2; exit 1; }\n")
+       "mkdir -p \"$(dirname \"$s\")\" \"$(dirname \"$f\")\"\n"
+       "base64 -d > \"$s\" <<'AGENTCTL_EOF'\n" (mime bs) "\nAGENTCTL_EOF\n"
+       "[ \"$(sha \"$s\")\" = " (sh-quote (sha256 bs)) " ] || { echo 'checksum mismatch' >&2; exit 1; }\n"
+       ;; the first copy a run backs up is the one it found
+       "if [ -f \"$f\" ] && [ ! -e \"$b\" ]; then mkdir -p \"$(dirname \"$b\")\"; cp -p \"$f\" \"$b\"; fi\n"
+       ;; a link is written through, so the file it points at stays the one
+       "if [ -L \"$f\" ]; then cat \"$s\" > \"$f\"; else mv \"$s\" \"$f\"; fi\n"
+       "echo OK\n"))
+
+(defn- ps-write-file [host stamp k ^bytes bs expected]
+  (ps-wrap host
+           (str "$f=\"" (ps-file k) "\"\n"
+                "$b=\"$H\\.config\\agentctl\\backups\\" stamp "\\" (file-parked-as k) "\"\n"
+                "$s=\"$H\\.config\\agentctl\\staging\\" stamp "-" (name k) "\"\n"
+                (if expected
+                  (str "if(-not (Test-Path -LiteralPath $f -PathType Leaf) -or (Sha $f) -ne '" expected "'){"
+                       "throw \"changed on the host since it was read: $f\"}\n")
+                  "if((Attr $f) -ne $null){throw \"appeared on the host since it was read: $f\"}\n")
+                "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($s))\n"
+                "try{\n"
+                "[IO.File]::WriteAllBytes($s,[Convert]::FromBase64String('" (b64 bs) "'))\n"
+                "if((Sha $s) -ne '" (sha256 bs) "'){throw 'checksum mismatch'}\n"
+                "if(((Attr $f) -ne $null) -and ((Attr $b) -eq $null)){"
+                "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($b));[IO.File]::Copy($f,$b)}\n"
+                "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($f))\n"
+                "[IO.File]::Copy($s,$f,$true)\n"
+                "}finally{Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue}\n")))
+
+(defn write-file!
+  "Replace the host's file `k` (`:codex-config`) with `bs`, provided it still
+   holds what was read: `expected` is that SHA-256, or nil for no file. Staged
+   and checksummed first; what it replaces is copied into the host's backups."
+  [host k bs expected]
+  (exec host ((if (windows? host) ps-write-file sh-write-file) host @run-stamp k bs expected)))
+
 ;; ---------------------------------------------------------------- primitives
 
 (defn windows-safe-rel?
@@ -287,8 +356,12 @@
          "V" (assoc-in acc [:versions (keyword a)] (str/trim (unb64-str (str b))))
          "S" (assoc-in acc [:entries (keyword a) b :state] (get state-of c :absent))
          "M" (assoc-in acc [:entries (keyword a) b :files (unb64-str c)] d)
+         ;; `-` is no file; an empty one loses its field to the line trim
+         "F" (assoc-in acc [:host-files (keyword a)]
+                       {:path (unb64-str b)
+                        :bytes (when-not (= "-" c) (.decode (Base64/getDecoder) (str c)))})
          acc)))
-   {:tools #{} :roots {} :versions {} :entries {}}
+   {:tools #{} :roots {} :versions {} :entries {} :host-files {}}
    lines))
 
 (defn inventory
@@ -296,11 +369,13 @@
    line} :entries {root {id {:state :files}}}}`, every id looked up in every
    root. `:files` maps each file below a skill, `/`-separated, to the SHA-256 of
    its bytes; `:versions` holds the first line of each present tool's
-   `--version`. One round trip however many skills: PowerShell takes a second
-   to start."
-  [host tools ids]
-  (parse-inventory
-   (exec host ((if (windows? host) ps-inventory sh-inventory) host (map name tools) ids))))
+   `--version`. `files` names whole files to read as well (`:host-files {k
+   {:path :bytes}}`, `:bytes` nil when there is none). One round trip however
+   many skills: PowerShell takes a second to start."
+  ([host tools ids] (inventory host tools ids nil))
+  ([host tools ids files]
+   (parse-inventory
+    (exec host ((if (windows? host) ps-inventory sh-inventory) host (map name tools) ids files)))))
 
 (defn write-tree!
   "Make `<root>/<id>` hold exactly `files` (`{:rel :bytes :sha :exec?}`).

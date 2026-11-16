@@ -3823,7 +3823,19 @@
   (testing "a host has no projects to place anything in"
     (is ((host-errors {:ssh "h" :os :linux
                        :skill-packs {[:uri "file:///p"] {:in ["projects/x"]}}}) [:hosts :win]))
-    (is ((host-errors {:ssh "h" :os :linux :skills {:legacy {:path "/p"}}}) [:hosts :win]))))
+    (is ((host-errors {:ssh "h" :os :linux :skills {:legacy {:path "/p"}}}) [:hosts :win]))
+    (is ((host-errors {:ssh "h" :os :linux :settings [{:acli [:codex] :model "m" :in "projects/x"}]}) [:hosts :win]))
+    (is ((host-errors {:ssh "h" :os :linux :settings {:codex {:model "m"}}}) [:hosts :win])))
+  (testing "settings rows, user-wide"
+    (is (empty? (host-errors {:ssh "h" :os :linux :settings [{:acli [:codex] :model "m"}]})))))
+
+(deftest a-host-carries-codex-settings-of-its-own
+  (let [cfg (config/normalize {:settings [{:acli [:codex] :model "local"}]
+                               :hosts {:box {:ssh "h" :os :linux
+                                             :settings [{:acli [:codex] :sandbox "net"}]}}} "/x")]
+    (is (= {:sandbox "net"} (get-in cfg [:hosts :box :cfg :tools :codex])))
+    (is (= "local" (get-in cfg [:tools :codex :model])))
+    (is (nil? (get-in cfg [:tools :codex :sandbox])))))
 
 (deftest a-kind-a-host-cannot-take-is-named-not-dropped
   (let [fs (config/structural-findings
@@ -3877,6 +3889,34 @@
           (is (ascii? @script))))
       (remote/inventory host [:codex] ["skïll"])
       (is (ascii? @script)))))
+
+(deftest a-host-file-is-read-whole-and-written-back-checked
+  (let [e #(remote/b64-str %)
+        inv (remote/parse-inventory
+             [(str "F\tcodex-config\t" (e "/h/.codex/config.toml") "\t" (e "model = \"x\"\n"))
+              (str "F\tempty\t" (e "/h/e"))
+              (str "F\tnone\t" (e "/h/n") "\t-") "OK"])]
+    (is (= "model = \"x\"\n" (String. ^bytes (get-in inv [:host-files :codex-config :bytes]) "UTF-8")))
+    (is (= "/h/.codex/config.toml" (get-in inv [:host-files :codex-config :path])))
+    (testing "an empty file is not an absent one"
+      (is (= 0 (count (get-in inv [:host-files :empty :bytes])))))
+    (is (nil? (get-in inv [:host-files :none :bytes]))))
+  (let [script (atom nil)
+        ascii? #(every? (fn [c] (< (int c) 128)) %)]
+    (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
+      (doseq [os [:linux :windows]
+              :let [host {:id :w :ssh "h" :os os}]]
+        (testing (name os)
+          (remote/write-file! host :codex-config (.getBytes "model = \"ünï\"" "UTF-8") "abc")
+          (is (ascii? @script))
+          (is (str/includes? @script "abc"))
+          (is (str/includes? @script "_.codex_config.toml"))
+          (is (str/includes? @script "changed on the host since it was read"))
+          (remote/write-file! host :codex-config (.getBytes "") nil)
+          (is (str/includes? @script "appeared on the host since it was read"))
+          (remote/inventory host [:codex] [] [:codex-config])
+          (is (ascii? @script))
+          (is (str/includes? @script "config.toml")))))))
 
 (deftest each-root-has-its-own-place-and-backup-name
   ;; a run that moves a skill between roots parks the same id from both

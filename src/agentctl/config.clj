@@ -640,7 +640,7 @@
 (def ^:private host-settings #{:ssh :os :home})
 (def host-sections
   "What a host can declare so far; `validate` names anything else."
-  #{:skills :skill-packs})
+  #{:skills :skill-packs :settings})
 
 (defn- keyed-section? [v] (or (nil? v) (and (map? v) (every? vector? (keys v)))))
 
@@ -674,13 +674,19 @@
    placed user-wide on a host for another. Nothing here reaches a local plan.
 
    A pack on a host defaults to `:in :all` — the top-level default of `:none`
-   exists for packs that projects then name, and a host has no projects."
+   exists for packs that projects then name, and a host has no projects.
+   `:settings` takes the top level's rows (`{:acli [:codex] :sandbox …}`),
+   user-wide only."
   [id decl source]
   (let [places-only-all? (fn [section allowed]
                            (every? #(contains? allowed (get (val %) :in :all)) (get decl section)))
+        rows (:settings decl)
         sections? (and (keyed-section? (:skills decl)) (keyed-section? (:skill-packs decl))
                        (places-only-all? :skills #{:all})
-                       (places-only-all? :skill-packs #{:all :none}))
+                       (places-only-all? :skill-packs #{:all :none})
+                       (or (nil? rows)
+                           (and (vector? rows) (every? map? rows)
+                                (every? #(= :all (get % :in :all)) rows))))
         body (when sections?
                (-> (select-keys decl host-sections)
                    (update :skill-packs #(into {} (map (fn [[k v]] [k (merge {:in :all} v)])) %))))]
@@ -827,8 +833,8 @@
           [(finding :error (conj where :home) ":home must be a path on the host")])
         (when-not sections-ok?
           [(finding :error where
-                    (str ":skills and :skill-packs on a host are keyed by source and placed :in :all"
-                         " — a host has no projects"))])
+                    (str ":skills and :skill-packs on a host are keyed by source, :settings is a vector"
+                         " of rows, and all are placed :in :all — a host has no projects"))])
         (for [k unsupported]
           (finding :warn (conj where k) (str (name k) " is not provisioned on hosts yet — ignored"))))))
    (:hosts cfg)))

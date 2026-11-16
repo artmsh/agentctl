@@ -10,7 +10,9 @@
    per-file byte hashes. Ownership lives in one state file per host, apart from
    `state.edn`: nothing a host does can make a local run think something was
    dropped from the config and prune it."
-  (:require [agentctl.config :as config]
+  (:require [agentctl.adapters.codex :as codex]
+            [agentctl.adapters.common :as common]
+            [agentctl.config :as config]
             [agentctl.core :as core]
             [agentctl.plan :as plan]
             [agentctl.remote :as remote]
@@ -63,7 +65,7 @@
   [root shared?]
   (case root :codex #{:codex} :awl (if shared? #{:awl :codex} #{:awl})))
 
-(def supported-kinds #{:skills :skill-packs})
+(def supported-kinds #{:skills :skill-packs :settings})
 
 (defn lookup
   "The host `--host` names, or an error that lists what is declared."
@@ -122,6 +124,36 @@
        (not (str/ends-with? id "."))))
 
 ;; ---------------------------------------------------------------- plan
+
+(defn- local-copy
+  "A host's file as a local file the adapters' ops can edit: they read and
+   write through the local filesystem. No file there, none here."
+  [{:keys [bytes]}]
+  (let [dir (fs/create-temp-dir {:prefix "agentctl-host-"})
+        f (str (fs/path dir "config.toml"))]
+    (fs/delete-on-exit dir)
+    (when bytes (fs/write-bytes f bytes))
+    (fs/delete-on-exit f)
+    f))
+
+(defn- settings-ops
+  "Codex's settings ops, planned against a local copy of the host's
+   config.toml and shown at the host's path. They edit the copy; `push!`
+   sends it back once they have run."
+  [host hcfg st remote-file local]
+  (for [o (codex/settings-ops hcfg st local)]
+    (cond-> (assoc o :host (name (:id host)))
+      (= local (:target o)) (assoc :target (:path remote-file))
+      (plan/mutating? o) (assoc :host-file :codex-config))))
+
+(defn- explicit-settings-tools
+  "Tools a host's settings row names. A row naming none is read as codex's:
+   the others are not provisioned on hosts, and would each warn."
+  [hcfg]
+  (set (for [e (:entities hcfg) :when (= :settings (:kind e))
+             t (let [ts (get-in e [:decl :tools])] (if (keyword? ts) [ts] ts))
+             :when (and t (not= :all t))]
+         t)))
 
 (defn- tools-of [s] (into (set (:tools s)) (:consumers s)))
 
@@ -200,7 +232,10 @@
         selected? #(or (empty? tools) (contains? (set tools) %))
         ;; with its last skill dropped from agents.edn, a tool is declared
         ;; nowhere, and still has that skill on the host to prune
-        declared (into (declared-tools hcfg) (filter #(seq (state/managed-ids st % :skills)) remote/roots))
+        codex-settings (common/settings-for hcfg :codex)
+        declared (cond-> (into (declared-tools hcfg) (filter #(seq (state/managed-ids st % :skills)) remote/roots))
+                   (seq codex-settings) (conj :codex))
+        settings? (and (kind? :settings) (selected? :codex) (boolean (seq codex-settings)))
         wanted (filter selected? declared)
         probe (filter probed declared)
         managing? (and (kind? :skills) (boolean (some supported-tools wanted)))
@@ -215,7 +250,8 @@
         {valid true invalid false} (group-by (comp boolean safe-id? name key) skills)
         owned (when managing?
                 (set (for [r remote/roots id (state/managed-ids st r :skills)] [r (keyword id)])))
-        inv (remote/inventory host probe (sort (distinct (map name (concat (keys valid) (map second owned))))))
+        inv (remote/inventory host probe (sort (distinct (map name (concat (keys valid) (map second owned)))))
+                              (when settings? [:codex-config]))
         there (into (set (remove probed supported-tools)) (:tools inv))
         shared? (when (there :codex) (codex-reads-agents? (get-in inv [:versions :codex])))
         root-on? (fn [r] (and (there r) (boolean (some selected? (serves r shared?)))))
@@ -247,17 +283,27 @@
                     (cond-> o
                       (plan/mutating? o)
                       (update :exec! (fn [f] (fn [] (f) (swap! written conj [root id]))))))
-        pending (set (for [o place-ops :when (plan/mutating? o)] [(:tool o) (:id o)]))]
+        pending (set (for [o place-ops :when (plan/mutating? o)] [(:tool o) (:id o)]))
+        remote-config (get-in inv [:host-files :codex-config])
+        local-config (when (and settings? ((:tools inv) :codex)) (local-copy remote-config))]
     {:inventory inv
      :skipped (vec (filter selected? (remove (:tools inv) probe)))
      :desired (into {} (for [{:keys [root id source] :as p} placed
                              :when (and (ready? p) (placeable? host source))]
                          [[root id] {:source source :target (target-in host inv root id)}]))
      :gone (set (remove present-at prunable))
+     :push (when local-config
+             {:file :codex-config :local local-config
+              :expected (some-> (:bytes remote-config) remote/sha256)})
      :ops
      (vec
       (concat
        (when (kind? :skill-packs) (sources/pack-ops hcfg))
+       (for [t (sort-by name (remove #{:codex} (explicit-settings-tools hcfg)))
+             :when (and (kind? :settings) (selected? t))]
+         (warn-op t :settings (keyword "host" (name t))
+                  (str (name t) " settings are not provisioned on hosts yet — only codex's are")))
+       (when local-config (settings-ops host hcfg st remote-config local-config))
        (for [k (remove supported-kinds kinds)]
          (warn-op :agentctl k (keyword "host" (name k))
                   (str (name k) " are not provisioned on hosts yet — only skills are")))
@@ -329,12 +375,27 @@
 
 ;; ---------------------------------------------------------------- converge
 
+(defn- push!
+  "Send the edited copy of a host file back, if any op edited it. The write
+   checks the host still holds what the plan read; when it fails, so does
+   every edit it carried."
+  [host {:keys [push]} {:keys [done failed] :as ran}]
+  (let [edited (filter :host-file done)]
+    (if (or (nil? push) (empty? edited))
+      ran
+      (try
+        (remote/write-file! host (:file push) (fs/read-all-bytes (:local push)) (:expected push))
+        ran
+        (catch clojure.lang.ExceptionInfo e
+          {:done (vec (remove :host-file done))
+           :failed (into (vec failed) (map #(assoc % :error (ex-message e))) edited)})))))
+
 (defn converge!
   "Run the plan; if it fetched a pack, re-plan and run again, because a pack's
    skills cannot be enumerated before the pack exists. Returns the last plan
    along with everything done and failed."
   [cfg host st opts {:keys [ops] :as planned}]
-  (let [{:keys [done failed]} (core/execute! ops)]
+  (let [{:keys [done failed]} (push! host planned (core/execute! ops))]
     (if-not (some #(= :skill-packs (:kind %)) done)
       {:plan planned :done done :failed failed}
       ;; `:entity-raw`, not `:raw`: an entity config's `:raw` is its lowered form,
@@ -342,7 +403,7 @@
       (let [host (get-in (config/normalize (or (:entity-raw cfg) (:raw cfg)) (:source cfg))
                          [:hosts (:id host)])
             again (plan-host host st opts)
-            {d2 :done f2 :failed} (core/execute! (:ops again))]
+            {d2 :done f2 :failed} (push! host again (core/execute! (:ops again)))]
         {:plan again :done (concat done d2) :failed (concat failed f2)}))))
 
 ;; ---------------------------------------------------------------- validate
