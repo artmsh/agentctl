@@ -1949,5 +1949,112 @@ set -e
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$DB/json.out" \
   || { cat "$DB/json.out"; fail "--debug broke the --json document"; }
 grep -q 'FileNotFoundException' "$DB/json.err" || { cat "$DB/json.err"; fail "--json --debug printed no trace"; }
+echo "42. skills add never writes over a project's own copy, a whole pack's or a named skill's"
+(
+  # git_pack NAME SHAPE OWN: the git pack kit (review, audit) for codex and
+  # claude in proj, whole (SHAPE=whole) or by name (SHAPE=named), beside the
+  # project's own review: committed (OWN=committed) or hand-made (OWN=handmade)
+  git_pack() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    G="$H/remote/kit"; P="$H/projects/proj"
+    mkskill "$G/review" review theirs; mkskill "$G/audit" audit theirs
+    git -C "$G" init -q; commit_all "$G"
+    mkdir -p "$P"; touch "$P/README"; git -C "$P" init -q
+    [ "$3" = committed ] && mkskill "$P/.agents/skills/review" review ours
+    commit_all "$P"
+    [ "$3" = handmade ] && mkskill "$P/.agents/skills/review" review ours
+    if [ "$2" = whole ]; then
+      cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git :in "projects/proj" :acli [:codex :claude]}}}
+EDN
+    else
+      cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex :claude]}
+          [kit "audit"] {:in "projects/proj" :acli [:codex :claude]}}}
+EDN
+    fi
+    (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+    ! grep -q -- '-s "\*"' "$H/plan.txt" && ! grep -q -- "-s review" "$H/plan.txt" \
+      || { cat "$H/plan.txt"; fail "$1: skills add is planned over the project's review"; }
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+    ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "$1: an op failed"; }
+    grep -q "body ours" "$P/.agents/skills/review/SKILL.md" || fail "$1: the project's review was written over"
+    [ -d "$P/.agents/skills/audit" ] && [ ! -L "$P/.agents/skills/audit" ] \
+      && grep -q '"audit"' "$P/skills-lock.json" \
+      || fail "$1: audit was not installed by the skills CLI"
+    [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "$1: tracked files changed"; }
+    run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "$1: not converged"; }
+    (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan3.txt" 2>&1
+    grep -q "project copy ~/projects/proj/.agents/skills/review kept" "$H/plan3.txt" \
+      || { cat "$H/plan3.txt"; fail "$1: the kept review is not reported"; }
+  }
+  git_pack whole-committed whole committed
+  # before the clone the names are unknown: the plan says what is at stake
+  grep -q 'not installed until the pack is cloned and its names are known: the `skills` CLI could write over ~/projects/proj/.agents/skills/review' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the whole pack's dry plan does not say why it waits"; }
+  git_pack whole-handmade whole handmade
+  git_pack named-committed named committed
+  git_pack named-handmade named handmade
+  grep -q 'project copy ~/projects/proj/.agents/skills/review kept — the `skills` CLI did not install it' "$H/plan3.txt" \
+    || { cat "$H/plan3.txt"; fail "the hand-made review is not reported as kept"; }
+
+  # a copy the CLI installed from elsewhere is the CLI's to replace, after a backup
+  H=$(fresh_home cli-copy-replaced); export AGENTCTL_HOME="$H"
+  G="$H/remote/kit"; P="$H/projects/proj"
+  mkskill "$G/review" review theirs
+  git -C "$G" init -q; commit_all "$G"
+  mkskill "$P/.agents/skills/review" review older
+  printf '{"version":2,"skills":{"review":{"source":"elsewhere/kit","sourceType":"git"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "cli-copy-replaced: apply! failed"; }
+  grep -q "body theirs" "$P/.agents/skills/review/SKILL.md" || fail "the CLI's own copy was not replaced"
+  grep -rqs "body older" "$H/.config/agentctl/backups" || fail "the replaced copy was not backed up"
+)
+
+echo "43. codex links a user-wide skill before it removes the project copy that repeats it"
+(
+  H=$(fresh_home codex-order); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills"; cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  git -C "$P" init -q
+  # pi asks before reading the project, so codex is the one that removes it
+  mkdir -p "$H/.pi/agent"; printf '{"defaultProjectTrust": "ask"}\n' > "$H/.pi/agent/settings.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi :codex]}
+          [shared "other"] {:in "projects/proj" :acli [:codex :pi]}}}
+EDN
+  run apply! -f "$H/agents.edn" --all -t pi -t codex -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "codex-order: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "the first apply! removed the copy before linking the skill"; }
+  [ ! -e "$P/.agents/skills/wrap-up" ] && [ -f "$H/.codex/skills/wrap-up/SKILL.md" ] \
+    || fail "codex-order: the copy is not replaced by the user-wide skill in one run"
+  run apply -f "$H/agents.edn" --all -t pi -t codex > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-order: not converged"; }
+)
+
+echo "44. pi's collision is not reported for a copy the same plan removes"
+(
+  H=$(fresh_home moot-collision); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex :pi]}}
+ :trust [{:in "projects/game" :acli [:pi]}]}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q "remove wrap-up -y" "$H/plan.txt" && ! grep -q 'pi loads' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a collision is reported for the copy the plan removes"; }
+)
 
 echo "all agentctl e2e checks passed"

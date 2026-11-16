@@ -4263,6 +4263,30 @@
       (u/write-json! trust-file {(u/real-path repo) false})
       (is (= :untrusted (pi/trust {:path repo})) "a decision for the project beats the default"))))
 
+(deftest a-removal-runs-after-the-install-it-requires
+  ;; every agent that reads the copy has the skill user-wide, and pi asks
+  ;; before reading the project, so codex is the one that removes it
+  (let [root (temp-dir) repo (str root "/repo") src (str root "/wrap-up") copy (str repo "/.agents/skills/wrap-up")
+        cfg #(config/normalize {:skills {[:uri src] {:in :all :acli [:pi :codex]}
+                                        [:uri (str root "/other")] {:in repo :acli [:codex :pi]}}} "test")]
+    (skill-dir! src "wrap-up")
+    (skill-dir! (str root "/other") "other")
+    (fs/create-dirs (str repo "/.git"))
+    (fs/copy-tree src copy)
+    (with-redefs [codex/skills-dir (str root "/codex-skills") pi/skills-dir (str root "/pi-skills")
+                  pi/settings-file (str root "/pi-settings.json") pi/trust-file (str root "/trust.json")
+                  u/home (str root "/home")]
+      (let [ops (vec (core/build-plan (cfg) state/empty-state {:tools #{:codex :pi}}))
+            at (fn [pred] (first (keep-indexed #(when (pred %2) %1) ops)))
+            removal (at #(and (plan/mutating? %) (= copy (:target %))))]
+        (is removal "the copy is planned for removal")
+        (doseq [[i o] (map-indexed vector ops)
+                :when (plan/mutating? o)
+                r (:requires o)
+                :let [installer (at #(and (#{:create :update} (:action %)) (= r (:target %))))]
+                :when installer]
+          (is (< installer i) (str (:summary o) " runs before " r " is installed")))))))
+
 (deftest pi-collisions-between-user-and-project-skills
   (let [root (temp-dir) repo (str root "/repo") sub (str repo "/app") pack (str root "/pack")
         raw (fn [trust?] (cond-> {:skill-packs {[:uri (str "file://" pack)] {:alias 'kit}}
