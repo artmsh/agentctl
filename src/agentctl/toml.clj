@@ -118,26 +118,6 @@
 
 ;; ---------------------------------------------------------------- segments
 
-(defn- header-line? [line]
-  (re-matches #"^\s*\[\[?[^\]]+\]\]?\s*$" line))
-
-(defn- header-name [line]
-  (some-> (re-find #"^\s*\[\[?([^\]]+)\]\]?\s*$" line) second str/trim))
-
-(defn segments
-  "Split TOML text into [{:header nil|\"a.b\" :lines [...]}], preserving everything."
-  [text]
-  (let [lines (str/split (or text "") #"\n" -1)]
-    (reduce (fn [acc line]
-              (if (header-line? line)
-                (conj acc {:header (header-name line) :lines [line]})
-                (update-in acc [(dec (count acc)) :lines] conj line)))
-            [{:header nil :lines []}]
-            lines)))
-
-(defn render [segs]
-  (str/join "\n" (mapcat :lines segs)))
-
 (defn- skip-string
   "Index just past the string that opens at `i` of `s` (a quote char), or
    nil when it does not close on this line."
@@ -156,14 +136,16 @@
 (defn- bare-key-char? [c]
   (or (Character/isLetterOrDigit (char c)) (= \_ c) (= \- c)))
 
-(defn- parse-key
-  "The dotted key a `key = value` line starts with, as unquoted parts, and
-   the column just past its `=`. nil for anything else: a header, a comment,
-   a blank line, or a line that continues the previous value."
-  [^String line]
-  (let [n (count line)
-        ws (fn [i] (loop [i i] (if (and (< i n) (Character/isWhitespace (.charAt line i))) (recur (inc i)) i)))]
-    (loop [i (ws 0) parts []]
+(defn- ws-end [^String s i]
+  (loop [i i] (if (and (< i (count s)) (Character/isWhitespace (.charAt s i))) (recur (inc i)) i)))
+
+(defn- dotted-key
+  "[parts end] for the dotted key that starts at column `i` of `line`: its
+   parts unquoted, `end` the first column past it and the space after it.
+   nil when no key starts there."
+  [^String line i]
+  (let [n (count line)]
+    (loop [i (ws-end line i) parts []]
       (when (< i n)
         (let [c (.charAt line i)
               [part j] (if (#{\" \'} c)
@@ -174,12 +156,34 @@
                          (let [e (loop [j i] (if (and (< j n) (bare-key-char? (.charAt line j))) (recur (inc j)) j))]
                            (when (> e i) [(subs line i e) e])))]
           (when part
-            (let [j (ws j)]
-              (when (< j n)
-                (case (.charAt line j)
-                  \. (recur (ws (inc j)) (conj parts part))
-                  \= {:parts (conj parts part) :value-at (inc j)}
-                  nil)))))))))
+            (let [j (ws-end line j)]
+              (if (and (< j n) (= \. (.charAt line j)))
+                (recur (ws-end line (inc j)) (conj parts part))
+                [(conj parts part) j]))))))))
+
+(defn- parse-key
+  "The dotted key a `key = value` line starts with, as unquoted parts, and
+   the column just past its `=`. nil for anything else: a header, a comment,
+   a blank line, or a line that continues the previous value."
+  [^String line]
+  (when-let [[parts j] (dotted-key line 0)]
+    (when (and (< j (count line)) (= \= (.charAt line j)))
+      {:parts parts :value-at (inc j)})))
+
+(defn- parse-header
+  "`{:parts [...] :array? bool}` for a `[table]` or `[[array]]` header line,
+   quoted parts unquoted and a trailing comment allowed, or nil."
+  [^String line]
+  (let [n (count line)
+        i (ws-end line 0)]
+    (when (and (< i n) (= \[ (.charAt line i)))
+      (let [array? (and (< (inc i) n) (= \[ (.charAt line (inc i))))
+            close (if array? "]]" "]")]
+        (when-let [[parts j] (dotted-key line (+ i (if array? 2 1)))]
+          (when (str/starts-with? (subs line j) close)
+            (let [k (ws-end line (+ j (count close)))]
+              (when (or (= k n) (= \# (.charAt line k)))
+                {:parts parts :array? array?}))))))))
 
 (defn- scan-line
   "Bracket depth and open multi-line string (its closing delimiter, or nil)
@@ -217,6 +221,29 @@
           (recur (inc li) 0 depth ml)
           li)))))
 
+(defn segments
+  "Split TOML text into [{:header nil|\"a.b\" :lines [...]}], preserving
+   everything. `:header` is the table path as `header-for` spells it, so a
+   quoted and a bare spelling of one name compare equal; an `[[array]]`
+   segment is marked `:array?` and never matches a table. A key's whole value
+   is read past before the next header is looked for: a `[rules]` line inside
+   a multi-line string or array belongs to that value, not to a new table."
+  [text]
+  (let [lines (str/split (or text "") #"\n" -1)
+        n (count lines)]
+    (loop [i 0 acc [{:header nil :lines []}]]
+      (if (>= i n)
+        acc
+        (let [line (nth lines i)]
+          (if-let [{:keys [parts array?]} (parse-header line)]
+            (recur (inc i) (conj acc (cond-> {:header (header-for parts) :lines [line]}
+                                       array? (assoc :array? true))))
+            (let [e (if-let [{:keys [value-at]} (parse-key line)] (value-end lines i value-at) i)]
+              (recur (inc e) (update-in acc [(dec (count acc)) :lines] into (subvec lines i (inc e)))))))))))
+
+(defn render [segs]
+  (str/join "\n" (mapcat :lines segs)))
+
 (defn- key-spans
   "[start end parts] for every `key = value` in a segment's lines; a
    multi-line value's continuation lines fall inside its span."
@@ -231,6 +258,12 @@
 
 (defn- key-span [k lines]
   (first (filter (fn [[_ _ parts]] (= [(u/kw->str k)] parts)) (key-spans lines))))
+
+(defn- table-seg?
+  "Is `s` the segment of the table `header` names? An `[[array]]` element
+   never is."
+  [s header]
+  (and (not (:array? s)) (= (:header s) header)))
 
 (defn- set-in-segment [seg k v]
   (let [new-line (str (quote-key k) " = " (encode-value v))
@@ -248,7 +281,7 @@
   [text table-path k v]
   (let [segs (segments text)
         header (when (seq table-path) (header-for table-path))
-        idx (first (keep-indexed (fn [i s] (when (= (:header s) header) i)) segs))]
+        idx (first (keep-indexed (fn [i s] (when (table-seg? s header) i)) segs))]
     (if idx
       (render (update segs idx set-in-segment k v))
       (render (conj (vec segs)
@@ -262,7 +295,7 @@
 
 (defn- segment-index [segs table-path]
   (let [header (when (seq table-path) (header-for table-path))]
-    (first (keep-indexed (fn [i s] (when (= (:header s) header) i)) segs))))
+    (first (keep-indexed (fn [i s] (when (table-seg? s header) i)) segs))))
 
 (defn has-key?
   "Does table `table-path` hold `k` as a key of its own (not a sub-table)?"
@@ -296,7 +329,7 @@
   (let [segs (segments text)
         header (when (seq table-path) (header-for table-path))]
     (render (mapv (fn [s]
-                    (if (= (:header s) header)
+                    (if (table-seg? s header)
                       (update s :lines
                               (fn [lines]
                                 (let [gone (set (mapcat (fn [[a b parts]]
@@ -315,7 +348,7 @@
   (if (empty? table-path)
     text
     (let [header (header-for table-path)
-          out (render (vec (remove (fn [s] (and (= (:header s) header)
+          out (render (vec (remove (fn [s] (and (table-seg? s header)
                                                 (every? str/blank? (rest (:lines s)))))
                                    (segments text))))]
       (if (and (str/ends-with? text "\n") (seq out) (not (str/ends-with? out "\n")))

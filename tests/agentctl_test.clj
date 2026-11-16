@@ -102,6 +102,26 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid TOML"
                             (toml/update-file! f (fn [t] (str t "b = [\n")))))
       (is (= "a = 1\n" (slurp f)))))
+  (testing "a header with a trailing comment or a quoted part is the table it names"
+    (let [out (toml/set-key "[tui] # footer\ntheme = \"x\"\n" ["tui"] "status_line" ["model"])]
+      (is (= 1 (count (re-seq #"(?m)^\[tui\]" out))) out)
+      (is (= {"theme" "x" "status_line" ["model"]} (get (toml/parse-text out) "tui"))))
+    (let [out (toml/set-key "[permissions.\"local-dev\".x]\na = 1\n" ["permissions" "local-dev" "x"] "b" 2)]
+      (is (= "[permissions.\"local-dev\".x]\na = 1\nb = 2\n" out))))
+  (testing "an [[array]] element is never taken for the table of the same name"
+    (let [out (toml/set-key "[[t]]\na = 1\n" ["t"] "b" 2)]
+      (is (= {"t" [{"a" 1}]} (toml/parse-text "[[t]]\na = 1\n")))
+      (is (str/includes? out "[[t]]\na = 1\n"))))
+  (testing "a header-looking line inside a multi-line string or array is part of that value"
+    (let [text (str "developer_instructions = \"\"\"\nBe brief.\n[rules]\nNo emoji.\n\"\"\"\n"
+                    "paths = [\n  \"a\",\n[\"x\"]\n]\n\n[tui]\ntheme = \"x\"\n")]
+      (is (= [nil "tui"] (map :header (toml/segments text))))
+      (let [out (-> text (toml/set-key [] "model" "m-b") (toml/set-key ["rules"] "k" 1))
+            t (toml/parse-text out)]
+        (is (= "m-b" (get t "model")) "a new root key lands at the root")
+        (is (= "Be brief.\n[rules]\nNo emoji.\n" (get t "developer_instructions")))
+        (is (= {"k" 1} (get t "rules")) "and a real [rules] table is a table of its own")
+        (is (= {"theme" "x"} (get t "tui"))))))
   (testing "a file that did not parse before is written unchecked, not refused, and the reason is said"
     (let [f (str (temp-dir) "/c.toml") err (java.io.StringWriter.)]
       (u/write-text! f "a = 1\na = 2\n")

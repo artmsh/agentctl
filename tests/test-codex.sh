@@ -61,4 +61,37 @@ c=$(code_of run apply! -f "$SB/a.edn" --all -t codex -y)
 grep -q 'not TOML 1.0' "$SB/out.txt" || { cat "$SB/out.txt"; fail "no warning that the edit went unchecked"; }
 grep -q '^model = "m-b"' "$CONF" || fail "the declared model was not written"
 
+echo "3. headers are found by name, and a [table] line inside a string stays in it"
+cat > "$CONF" <<'TOML'
+developer_instructions = """
+Be brief.
+[rules]
+No emoji.
+"""
+
+[tui] # footer and theme
+theme = "x"
+
+[permissions."local-dev"]
+extends = ":workspace"
+TOML
+cat > "$SB/b.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b" :sandbox "local-dev"
+             :status-line [:model :git-branch]
+             :permission-profiles {:local-dev {:extends ":workspace" :description "dev"}}}]}
+EDN
+c=$(code_of run apply! -f "$SB/b.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! exited $c"; }
+toml '
+assert t["model"] == "m-b", t
+assert t["developer_instructions"] == "Be brief.\n[rules]\nNo emoji.\n", t
+assert "rules" not in t, t
+assert t["tui"] == {"theme": "x", "status_line": ["model", "git-branch"]}, t
+assert t["permissions"]["local-dev"] == {"extends": ":workspace", "description": "dev"}, t
+' || fail "config.toml is not what was declared around what was there"
+[ "$(grep -c '^\[tui\]' "$CONF")" = 1 ] || fail "[tui] defined twice"
+grep -q '^\[permissions.local-dev\]' "$CONF" && fail "[permissions.\"local-dev\"] redefined unquoted"
+c=$(code_of run apply -f "$SB/b.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "not converged after apply! ($c)"; }
+
 echo "all codex e2e checks passed"
