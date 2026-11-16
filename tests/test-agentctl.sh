@@ -1414,4 +1414,39 @@ for pair in "dsl projects entity-DSL" "old trust old-format"; do
     || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
 done
 
+echo "30. what a config no longer declares is pruned, whatever is left of it"
+PR="$SB/prune-any"
+# pr <home> <args…>: each case gets a home of its own
+pr() { local h="$PR/$1"; shift; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }
+trusted() { grep -q 'trust_level = "trusted"' "$PR/$1/.codex/config.toml" 2>/dev/null; }
+for h in vec empty old switch; do
+  mkdir -p "$PR/$h/proj"
+  printf '{:trust [{:in "%s/proj" :acli [:codex]}]}\n' "$PR/$h" > "$PR/$h/dsl.edn"
+  printf '{:projects {:p {:path "%s/proj" :trusted true :executors #{:codex}}}}\n' "$PR/$h" > "$PR/$h/old.edn"
+  printf '{:mcps []}\n' > "$PR/$h/vec.edn"
+  printf '{}\n' > "$PR/$h/empty.edn"
+done
+# an emptied DSL config, as a section vector or as nothing at all
+for h in vec empty; do
+  pr "$h" apply! -f "$PR/$h/dsl.edn" --all -t codex -y > /dev/null
+  trusted "$h" || fail "setup: DSL trust not written ($h)"
+  pr "$h" apply! -f "$PR/$h/$h.edn" --all -t codex -y > "$PR/$h/prune.txt"
+  trusted "$h" && { cat "$PR/$h/prune.txt"; fail "emptying the DSL config to $h.edn left its trust behind"; }
+  set +e
+  pr "$h" apply -f "$PR/$h/$h.edn" --all -t codex > "$PR/$h/after.txt"; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$PR/$h/after.txt"; fail "$h.edn: the pruned trust is still owned"; }
+done
+# an old-format config prunes none of what it declares
+pr old apply! -f "$PR/old/old.edn" --all -t codex -y > /dev/null
+trusted old || fail "setup: old-format trust not written"
+set +e
+pr old apply -f "$PR/old/old.edn" --all -t codex > "$PR/old/again.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$PR/old/again.txt"; fail "a converged old-format config planned a change"; }
+# nor what a DSL config wrote that it declares the old way
+pr switch apply! -f "$PR/switch/dsl.edn" --all -t codex -y > /dev/null
+pr switch apply! -f "$PR/switch/old.edn" --all -t codex -y > "$PR/switch/old.txt"
+trusted switch || { cat "$PR/switch/old.txt"; fail "rewriting the DSL trust the old way pruned it"; }
+
 echo "all agentctl e2e checks passed"

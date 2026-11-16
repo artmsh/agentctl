@@ -111,7 +111,9 @@ format has, `--help` marks `projects` as legacy, `--host` runs are held to the
 same rule, and the GUI refuses the same kinds for the buffer it plans. A
 config with nothing that decides the format yet — `{}`, or only `:statusline`,
 `:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
-and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+and is reported with `⚠`, naming no format. Such a config declares nothing,
+so a DSL config emptied to `{}` prunes what it wrote — trust, settings,
+permissions — as `{:mcps []}` does. An `--only` or `-p` that nothing
 declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
 because a run narrowed to a typo plans nothing and would otherwise read as
 converged.
