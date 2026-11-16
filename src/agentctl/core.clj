@@ -374,10 +374,10 @@
 (def project-skill-dirs
   {:claude claude/project-skills-dir :codex codex/project-skills-dir
    :antigravity antigravity/project-skills-dir :kimi kimi/project-skills-dir
-   :dsh dsh/project-skills-dir})
+   :dsh dsh/project-skills-dir :pi pi/project-skills-dir})
 
 (defn- share-project-skill-links
-  "Codex, antigravity, kimi and the DeepSeek Harness read one
+  "Codex, antigravity, kimi, pi and the DeepSeek Harness read one
    `<repo>/.agents/skills`. A link any of them wants is planned once, and
    never removed on behalf of another."
   [cfg ops]
@@ -434,6 +434,9 @@
                    :in-projects (when-not global? (not-empty ps))))))
       :skills
       (let [s (get-in cfg [:skills sid])
+            ;; what this tool's link actually points at: the line must name
+            ;; the source the op links, or a repointed link reads as converged
+            override (get-in s [:per-tool (:tool o) :path])
             from (or (:from s)
                      (when-let [proj (get-in cfg [:projects (:project o)])]
                        (some #(when (and (get-in cfg [:skill-packs %])
@@ -443,6 +446,7 @@
                              (:skills proj))))
             pack (get-in cfg [:skill-packs from])]
         (cond
+          override {:kind "skill" :entity sid :source (u/tilde (u/abs-path override))}
           (and (nil? s) (get-in cfg [:skill-packs sid])) (pack-line sid [])
           (and pack (or (nil? s) (:via-pack s))) (pack-line from [(name sid)])
           (and pack (:implicit pack)) {:kind "skill" :entity sid :source (sources/source-label pack)}
@@ -487,6 +491,16 @@
              o))
          ops)))
 
+(defn- skill-readers
+  "The agents that read project `p`'s shared `.agents/skills`: those placed
+   there, pi unless it never reads the project's skills. A copy there is
+   theirs as much as the agent's whose user-wide skill it repeats."
+  [p]
+  (let [as-pi (cond-> p (:trust-by-tool p) (assoc :trusted (get (:trust-by-tool p) :pi)))]
+    (set (filter #(and (contains? sources/shared-readers %)
+                       (or (not= :pi %) (not= :untrusted (pi/trust as-pi))))
+                 (:for-tools p)))))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -504,6 +518,7 @@
                                        #(merge {:id pid :path p :tools {}} %
                                                {:for-tools (conj (set (:for-tools %)) t)})) c)) c))
                     cfg (:managed st))
+        cfg (update cfg :projects #(into {} (map (fn [[id p]] [id (assoc p :skill-readers (skill-readers p))])) %))
         tool-ops (mapcat (fn [t]
                            (let [tcfg (tool-cfg cfg t)]
                              (concat
@@ -514,7 +529,8 @@
         dups (skills-cli/global-duplicate-ops cfg tool-cfg selected
                                               {:claude claude/skills-dir :codex codex/skills-dir
                                                :antigravity antigravity/skills-dir
-                                               :kimi kimi/skills-dir :dsh dsh/skills-dir})
+                                               :kimi kimi/skills-dir :dsh dsh/skills-dir
+                                               :pi pi/skills-dir})
         tool-ops (if (:entity-dsl? cfg)
                    (map (fn [o]
                           (cond-> o
@@ -524,7 +540,10 @@
     (-> (concat (sources/pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
-                (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) ((:drop dups) (:target %)))
+                ;; a collision report names the copy as well, but says what pi
+                ;; loads there, which holds whether the copy is kept or removed
+                (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) (not (:collision %))
+                                                             ((:drop dups) (:target %)))
                                                        tool-ops))
                 ;; after the user-wide installs they check for
                 (:ops dups)

@@ -2,9 +2,11 @@
 ;; Offline stand-in for `npx -y skills`: what agentctl relies on, for local
 ;; sources only. `add` copies each selected skill into .agents/skills/<name>,
 ;; links .claude/skills/<name> for claude-code — or, for claude-code alone,
-;; copies straight into .claude/skills/<name> — and records the lock;
-;; `remove` drops a name (or, with -a claude-code only, claude's link).
-(require '[babashka.fs :as fs] '[cheshire.core :as json] '[clojure.string :as str])
+;; copies straight into .claude/skills/<name> — and records the lock. A
+;; source that is not a directory is a git URL, cloned first. `remove` drops a
+;; name from every agent's directory — any `.<dir>/skills/<name>`, as the real
+;; CLI does — or, with -a claude-code only, claude's link.
+(require '[babashka.fs :as fs] '[babashka.process :as p] '[cheshire.core :as json] '[clojure.string :as str])
 
 (defn opts [args]
   (loop [[a & more] args acc {:pos [] :s [] :a []}]
@@ -32,7 +34,13 @@
       {:keys [pos s a]} (opts args)]
   (case cmd
     "add"
-    (let [src (str (fs/canonicalize (first pos)))
+    (let [local? (fs/directory? (first pos))
+          src (if local?
+                (str (fs/canonicalize (first pos)))
+                (let [tmp (str (fs/create-temp-dir))
+                      {:keys [exit]} @(p/process ["git" "clone" "-q" "--depth" "1" (first pos) tmp])]
+                  (when-not (zero? exit) (binding [*out* *err*] (println "clone failed")) (System/exit 1))
+                  tmp))
           picked (filter #(or (empty? s) (some #{"*"} s) (some #{(skill-name %)} s)) (skills-in src))]
       (when (empty? picked) (binding [*out* *err*] (println "no skills matched")) (System/exit 1))
       (save! (reduce (fn [l dir]
@@ -46,14 +54,18 @@
                                (when (some #{"claude-code"} a)
                                  (fs/create-dirs ".claude/skills")
                                  (fs/create-sym-link link (str "../../.agents/skills/" n)))))
-                         (assoc-in l ["skills" n] {"source" (str (fs/relativize (fs/canonicalize ".") src))
-                                                   "sourceType" "local"})))
+                         (assoc-in l ["skills" n]
+                                   (if local?
+                                     {"source" (str (fs/relativize (fs/canonicalize ".") src)) "sourceType" "local"}
+                                     {"source" (first pos) "sourceType" "git"}))))
                      (lock) picked)))
     "remove"
     (save! (reduce (fn [l n]
                      (fs/delete-tree (str ".claude/skills/" n) {:nofollow-links true})
                      (if (= a ["claude-code"])
                        l
-                       (do (fs/delete-tree (str ".agents/skills/" n))
+                       (do (doseq [d (fs/list-dir ".")
+                                   :when (str/starts-with? (str (fs/file-name d)) ".")]
+                             (fs/delete-tree (str d "/skills/" n) {:nofollow-links true}))
                            (update l "skills" dissoc n))))
                    (lock) pos))))

@@ -53,7 +53,7 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` | `$DSH_HOME/skills` |
 | `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` | `$DSH_HOME/AGENTS.md` |
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json`; project `.agents/skills` from `:skills` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
@@ -503,13 +503,21 @@ relative one) is repointed at the pack cache under `~/.agents/skill-packs`.
 `:scope :global` on an explicit `:skills` declaration keeps a skill user-wide
 even when a project names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
 For current entity-first declarations, a repository placement uses the skills
-CLI. Claude reads `<project>/.claude/skills`, while Codex and Antigravity
-share `<project>/.agents/skills`. The legacy project registry is kept for
+CLI. Claude reads `<project>/.claude/skills`, while Codex, Antigravity, Kimi,
+Pi and the DeepSeek Harness share `<project>/.agents/skills`. Pi reads it only
+in a project it trusts; see [Pi](GUIDE.md#pi) for how that is decided and how
+it settles a skill name found both there and user-wide. A copy there is kept
+while an agent placed in the project reads it and has no user-wide copy. The legacy project registry is kept for
 existing files; see [`SCOPE-DSL.md`](SCOPE-DSL.md) for current placement rules.
 
 ### MCP shorthand
@@ -565,6 +573,11 @@ different value, override just that field:
 
 `import` writes these automatically wherever it finds a resource configured
 differently per tool, preserving those differences in the emitted declaration.
+
+The plan names the source each tool actually links: a skill whose `:per-tool
+:path` differs from its base source is its own line for that tool, and
+`--verbose` adds the `ln` command and `link <dest> -> <source> (was <old>)`
+under every skill line, user-wide ones included.
 
 ### Fields agentctl does not model
 
@@ -733,7 +746,8 @@ end up writing a resolved secret into a tool's config file are tagged
                    document, apply with config warnings in `findings`; an
                    error, a refused config included, is {"error": …} with
                    exit 1 (apply! adds its prompt and result as text)
--v, --verbose      per-field diffs and target paths
+-v, --verbose      per-field diffs and target paths; for skills, the link
+                   commands and what each link points at, before and after
     --show-noop    include unchanged and informational entries
     --deep         validate: probe the network (provider /models, git remotes)
     --replace      import!: overwrite instead of merging into the existing file
@@ -899,6 +913,12 @@ All of this describes this machine, so `validate --host` leaves it out.
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers
 only in part, is `unknown`, and its drift is not reported as clean.
+
+`SKILLS` also repeats the plan's reports that hold once it has converged: a
+skill whose source is missing, a project copy kept beside a user-wide skill
+and why, one pi loads in place of a
+user-wide skill of the same name, and skills placed in a project pi asks
+about first or does not read. They are warnings and never fail the exit code.
 
 ## Import is lossy w.r.t. sugar
 
