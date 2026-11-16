@@ -330,6 +330,13 @@
                                                    cmds))))))]
       s)))
 
+(defn show-plan?
+  "Is there a plan to print, or only \"no changes\"? A warning is: it says a
+   declared setting went nowhere, and that holds on every run, converged or
+   not — behind \"no changes\" it would make the config read as applied."
+  [ops {:keys [show-noop]}]
+  (boolean (or (some mutating? ops) show-noop (some :warn ops))))
+
 (defn render-plan
   [ops {:keys [show-noop] :as opts}]
   ;; a warning noop is the report that a declared setting went nowhere — hiding

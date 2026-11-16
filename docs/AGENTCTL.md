@@ -718,14 +718,21 @@ end up writing a resolved secret into a tool's config file are tagged
 ```
 -f, --file PATH    config file (default ~/.config/agents.edn)
 -t, --tool TOOL    restrict to a tool (repeatable)
--k, --kind KIND    restrict to a kind (repeatable; --help lists them, an unknown
-                   one exits 1)
+-k, --kind KIND    restrict to a kind (repeatable; --help lists them). An
+                   unknown one exits 1, and so does one the config's format
+                   plans nothing as: projects in the entity DSL (which plans
+                   trust, permissions and settings instead), trust in the
+                   legacy map form (which plans all three as projects)
 -p, --project ID   restrict to one declared project — selects everything that
                    project owns, whatever its kind (its servers and skills are
-                   :mcps / :skills ops, so --kind projects would miss them)
+                   :mcps / :skills ops, so --kind trust, or projects in the
+                   legacy form, would miss them)
     --only KIND/ID apply/apply!: one entity wherever it is placed (repeatable)
     --user         apply/apply!: user scope only, no project
-    --json         machine-readable output
+    --json         machine-readable output: apply and validate print one JSON
+                   document, apply with config warnings in `findings`; an
+                   error, a refused config included, is {"error": …} with
+                   exit 1 (apply! adds its prompt and result as text)
 -v, --verbose      per-field diffs and target paths
     --show-noop    include unchanged and informational entries
     --deep         validate: probe the network (provider /models, git remotes)
@@ -762,6 +769,13 @@ one project. Ops writing one file for one project collapse into a single block,
 their ids in braces (`mcps/{repl search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
+
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere (an unsupported setting, a placement a tool
+cannot take). That plan is printed in full, here, under `--host`, in the GUI's
+text view, and under `--json` (as ops with `"warn": true`), and the exit code
+still says only whether anything would change: 0.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the e2e test provisions a throwaway

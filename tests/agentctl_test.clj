@@ -1561,22 +1561,99 @@
   (is (true? (core/scoped? {:only [[:skills "review"]]})))
   (is (true? (core/scoped? {:user true}))))
 
+(deftest a-converged-plan-still-shows-its-warnings
+  ;; "no changes" says the environment matches the config; a warning says part
+  ;; of the config went nowhere. A converged plan carrying one is not the
+  ;; first report, in the cli text or in the gui's
+  (let [f (str (temp-dir) "/settings.json")
+        text "{:executors {:claude {:bogus-setting true}}}"
+        cfg (config/parse-config text "test")]
+    (u/write-json! f {:$schema claude/settings-schema-url})
+    (with-redefs [claude/settings-file f]
+      (let [ops (core/build-plan cfg state/empty-state {:tools #{:claude}})]
+        (is (not-any? plan/mutating? ops) "setup: converged")
+        (is (some :warn ops) "setup: carries a warning")
+        (is (plan/show-plan? ops {}))
+        (is (str/includes? (plan/render-plan ops {}) "unsupported setting :bogus-setting")))
+      (let [res (gui/plan-for-text text "test" {:tools #{:claude}})]
+        (is (:ok res))
+        (is (zero? (:changes res)))
+        (is (str/includes? (:plan res) "unsupported setting :bogus-setting"))))
+    (let [quiet [(plan/op {:action :noop :tool :claude :kind :settings :id :model})]]
+      (is (not (plan/show-plan? quiet {})) "a converged plan without a warning reads as converged")
+      (is (plan/show-plan? quiet {:show-noop true}) "--show-noop shows it anyway"))))
+
 (deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
   ;; `-k` is checked against `core/kinds`; a kind missing from it would be
   ;; refused, and one missing from --help is a kind nobody knows to ask for
   (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
            :providers :memory :trust :extensions :projects :statusline}
          (set core/kinds)))
-  (is (= (set (map name core/kinds))
-         (->> (str/split-lines main/usage)
-              (drop-while #(not (str/includes? % "--kind KIND")))
-              rest
-              (take-while #(str/starts-with? % (apply str (repeat 23 " "))))
-              (mapcat #(str/split (str/trim %) #"\s+"))
-              set)))
+  (let [lines (->> (str/split-lines main/usage)
+                   (drop-while #(not (str/includes? % "--kind KIND")))
+                   rest
+                   (take-while #(str/starts-with? % (apply str (repeat 23 " ")))))
+        {legacy true current false} (group-by #(str/includes? % "legacy") lines)
+        words #(set (mapcat (fn [l] (str/split (str/trim l) #"\s+")) %))]
+    (testing "--help names every kind: the DSL's, then the old format's own, marked"
+      (is (= (set (map name (core/kinds-for {:entity-dsl? true}))) (words current)))
+      (is (= 1 (count legacy)))
+      (is (= #{"projects"} (set (map name (remove (set (core/kinds-for {:entity-dsl? true})) core/kinds)))))
+      (is (str/ends-with? (first legacy) "in place of trust): projects"))))
   (is (= {:only ["skills/review" "mcps/search"] :user true}
          (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
                       [:only :user]))))
+
+(deftest each-config-format-has-its-own-kinds
+  ;; the DSL refiles every :projects op under :trust/:permissions/:settings, and
+  ;; the old format plans no :trust — so -k projects on the one and -k trust on
+  ;; the other select nothing, and would read as converged
+  (testing "the rule"
+    (let [dsl (set (core/kinds-for {:entity-dsl? true})) old (set (core/kinds-for {}))]
+      (is (= (disj (set core/kinds) :projects) dsl))
+      (is (= (disj (set core/kinds) :trust) old))
+      (is (every? #(and (dsl %) (old %)) [:skill-packs :extensions :permissions :settings]))))
+  (testing "the plans agree with the rule"
+    (let [root (temp-dir) proj (str root "/plain")
+          kinds (fn [raw]
+                  (let [cfg (config/normalize raw "test")]
+                    [cfg (set (map :kind (core/build-plan cfg state/empty-state {:tools #{:codex}})))]))]
+      (fs/create-dirs proj)
+      (with-redefs [codex/config-file (str root "/config.toml") codex/mcp-list (constantly {})]
+        (let [[cfg planned] (kinds {:trust [{:in proj :acli [:codex]}]})]
+          (is (:entity-dsl? cfg))
+          (is (contains? planned :trust) "setup: the DSL plans trust")
+          (is (every? (set (core/kinds-for cfg)) planned)))
+        (let [[cfg planned] (kinds {:projects {:p {:path proj :trusted true :executors #{:codex}}}})]
+          (is (not (:entity-dsl? cfg)))
+          (is (contains? planned :projects) "setup: the old format plans projects")
+          (is (every? (set (core/kinds-for cfg)) planned))))))
+  (testing "a dead kind is named, with what the format files it under and its kinds"
+    (let [dsl (config/normalize {:trust [{:in "/tmp/x" :acli [:codex]}]} "test")
+          old (config/normalize {:projects {:p {:path "/tmp/x" :trusted true}}} "test")
+          [[flag v msg] :as dead] (core/dead-selectors dsl {:kinds #{:projects :skills}})]
+      (is (= 1 (count dead)))
+      (is (= ["-k" "projects"] [flag v]))
+      (is (str/includes? msg "entity-DSL"))
+      (is (str/includes? msg "under permissions, settings or trust"))
+      (is (str/includes? msg "kinds for this config: extensions"))
+      (is (not (str/includes? msg " projects,")))
+      (let [[[flag v msg]] (core/dead-selectors old {:kinds #{:trust}})]
+        (is (= ["-k" "trust"] [flag v]))
+        (is (str/includes? msg "old-format"))
+        (is (str/includes? msg "under projects")))
+      (is (= [["--only" "projects/p"]]
+             (map #(subvec % 0 2) (core/dead-selectors dsl {:only [[:projects "p"]]}))))
+      (is (empty? (core/dead-selectors old {:kinds #{:projects :skills} :only [[:projects "p"]]})))
+      (is (empty? (core/dead-selectors dsl {:kinds #{:trust :permissions}})))))
+  (testing "the gui refuses a kind the buffer's format never plans"
+    (let [dsl-text "{:trust [{:in \"/tmp/x\" :acli [:codex]}]}"
+          old-text "{:projects {:p {:path \"/tmp/x\" :trusted true}}}"]
+      (let [res (gui/plan-for-text dsl-text "test" {:tools #{:codex} :kinds #{:projects}})]
+        (is (false? (:ok res)))
+        (is (str/starts-with? (:error res) "kind projects: an entity-DSL config")))
+      (is (false? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:trust}}))))
+      (is (true? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:projects}})))))))
 
 (deftest only-and-user-select-across-scopes-without-the-rest
   (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")]

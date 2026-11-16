@@ -1074,4 +1074,147 @@ grep -q 'git clone exited' "$FAILSB/apply.txt" || { cat "$FAILSB/apply.txt"; fai
 [ ! -e "$SB/.pi/agent/skills/gone-skill" ] || fail "a skill was linked against a pack that failed to clone"
 if grep -q ":gone" "$SB/.config/agentctl/state.edn" 2>/dev/null; then fail "a failed clone was recorded as owned"; fi
 
+echo "23. a converged plan still prints its warnings, and exits 0"
+CW="$SB/converged-warn"
+mkdir -p "$CW"
+cw() { (cd "$CW" && AGENTCTL_HOME="$CW" run "$@"); }
+# claude has no :bogus-setting: every plan reports it, converged or not
+cat > "$CW/agents.edn" <<'EDN'
+{:executors {:claude {:model "opus" :bogus-setting true}}}
+EDN
+cw apply! -f "$CW/agents.edn" -t claude -y > "$CW/first.txt"
+grep -q '"model" *: *"opus"' "$CW/.claude/settings.json" || { cat "$CW/first.txt"; fail "setup: claude settings not written"; }
+for cmd in apply apply!; do
+  set +e
+  cw "$cmd" -f "$CW/agents.edn" -t claude -y > "$CW/$cmd.txt"; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning exited $code"; }
+  grep -q 'unsupported setting :bogus-setting' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd hid its warning behind no changes"; }
+  grep -q '^0 to add, 0 to change, 0 to remove' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning planned a change"; }
+done
+set +e
+cw apply -f "$CW/agents.edn" -t claude --json > "$CW/plan.json"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$CW/plan.json"; fail "a converged apply --json with a warning exited $code"; }
+python3 - "$CW/plan.json" <<'PY' || { cat "$CW/plan.json"; fail "--json dropped the warning of a converged plan"; }
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert not [o for o in ops if o["action"] in ("create", "update", "delete")], ops
+assert any(o.get("warn") and "bogus-setting" in o["summary"] for o in ops), ops
+PY
+
+echo "24. --json prints one JSON document: config findings and refusals included"
+JO="$SB/json-out"
+mkdir -p "$JO"
+jo() { (cd "$JO" && AGENTCTL_HOME="$JO" run "$@"); }
+# jo_json <want-exit> <out-file> <args…>: the run exits as wanted and its
+# stdout parses as JSON on its own
+jo_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  jo "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$JO/warn.edn" <<'EDN'
+{:cli-code {:pi {:model "m"}}}
+EDN
+cat > "$JO/error.edn" <<'EDN'
+{:mcps {:x {:cmd "a"}} :projects {:p {:mcp [:nope]}}}
+EDN
+# a structural warning travels in `findings`, beside the plan
+jo_json 2 "$JO/warn.json" apply -f "$JO/warn.edn" -t pi
+python3 - "$JO/warn.json" <<'PY' || { cat "$JO/warn.json"; fail "--json lost the config warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ops"], d
+assert any(f["level"] == "warn" and f["where"] == ["cli-code"] and ":cli-code" in f["message"]
+           for f in d["findings"]), d["findings"]
+PY
+jo_json 0 "$JO/validate.json" validate -f "$JO/warn.edn" -t pi
+# so does this machine's word on the status line, checked once the scope is known
+cat > "$JO/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+AGENT_STATUSLINE_CONFIG="$JO/elsewhere.json" jo_json 2 "$JO/statusline.json" apply -f "$JO/statusline.edn" --all
+python3 - "$JO/statusline.json" <<'PY' || { cat "$JO/statusline.json"; fail "--json lost the status-line warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and f["where"] == ["statusline", "env"] for f in d["findings"]), d["findings"]
+PY
+# a config with errors is refused as JSON, and plans nothing
+for cmd in apply apply!; do
+  jo_json 1 "$JO/error-$cmd.json" "$cmd" -f "$JO/error.edn" -y
+  python3 - "$JO/error-$cmd.json" <<'PY' || { cat "$JO/error-$cmd.json"; fail "$cmd --json refused a config without saying why"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "refusing to plan" in d["error"], d
+assert "ops" not in d, d
+assert any(f["level"] == "error" and f["where"] == ["projects", "p", "mcp"] for f in d["findings"]), d
+PY
+done
+# so is every other error: a selector, a missing file
+jo_json 1 "$JO/kind.json" apply -f "$JO/warn.edn" -k bogus-kind
+python3 -c 'import json,sys; sys.exit(0 if "unknown kind" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/kind.json" \
+  || { cat "$JO/kind.json"; fail "-k bogus-kind --json lost the error"; }
+jo_json 1 "$JO/missing.json" apply -f "$JO/nowhere.edn"
+python3 -c 'import json,sys; sys.exit(0 if "not found" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/missing.json" \
+  || { cat "$JO/missing.json"; fail "a missing config under --json lost the error"; }
+# text output is unchanged
+set +e
+jo apply -f "$JO/warn.edn" -t pi > "$JO/warn.txt"; code=$?
+set -e
+[ "$code" = 2 ] && grep -q '⚠ cli-code — :cli-code is the old name' "$JO/warn.txt" \
+  || { cat "$JO/warn.txt"; fail "the text plan stopped printing config warnings"; }
+
+echo "25. -k refuses a kind the config's format never plans"
+FK="$SB/format-kinds"
+mkdir -p "$FK/proj"
+fk() { (cd "$FK" && AGENTCTL_HOME="$FK" run "$@"); }
+# the same trusted project, once per format: the DSL plans its trust as
+# `trust`, the old format as `projects`
+cat > "$FK/dsl.edn" <<EDN
+{:trust [{:in "$FK/proj" :acli [:codex]}]}
+EDN
+cat > "$FK/old.edn" <<EDN
+{:projects {:p {:path "$FK/proj" :trusted true :executors #{:codex}}}}
+EDN
+# fk_code <want-exit> <out-file> <args…>
+fk_code() {
+  local want=$1 out=$2; shift 2
+  set +e
+  fk "$@" > "$out" 2>&1; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* exited $code, wanted $want"; }
+}
+for cmd in apply apply!; do
+  fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: extensions, ' "$FK/dsl-$cmd.txt" \
+    || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
+  grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
+  fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y
+  grep -q '^error: -k trust: an old-format config plans nothing as trust; it files those ops under projects (kinds for this config: .*projects' "$FK/old-$cmd.txt" \
+    || { cat "$FK/old-$cmd.txt"; fail "$cmd -k trust on an old-format config did not name its kinds"; }
+done
+[ -e "$FK/.codex/config.toml" ] && fail "a refused kind wrote the codex config"
+# the counterpart in each format plans the trust
+fk_code 2 "$FK/dsl-trust.txt" apply -f "$FK/dsl.edn" --all -t codex -k trust
+grep -q 'trust' "$FK/dsl-trust.txt" || { cat "$FK/dsl-trust.txt"; fail "-k trust planned nothing on a DSL config"; }
+fk_code 2 "$FK/old-projects.txt" apply -f "$FK/old.edn" --all -t codex -k projects
+grep -q 'projects' "$FK/old-projects.txt" || { cat "$FK/old-projects.txt"; fail "-k projects planned nothing on an old-format config"; }
+# --only's kind is held to the same rule, and --json carries the refusal
+fk_code 1 "$FK/only.txt" apply -f "$FK/dsl.edn" --only projects/p
+grep -q '^error: --only projects/p: an entity-DSL config plans nothing as projects' "$FK/only.txt" \
+  || { cat "$FK/only.txt"; fail "--only projects/p on a DSL config was not refused"; }
+fk_code 1 "$FK/dead.json" apply -f "$FK/old.edn" -k trust --json
+python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.argv[1]))["error"] else 1)' "$FK/dead.json" \
+  || { cat "$FK/dead.json"; fail "-k trust --json lost the refusal"; }
+# --help marks the old format's own kind
+run --help | grep -q 'legacy (old-format configs only, in place of trust): projects$' \
+  || { run --help; fail "--help does not mark projects as legacy"; }
+
 echo "all agentctl e2e checks passed"

@@ -63,11 +63,22 @@
     (let [cfg (config/parse-config (buffer-text text) path)
           ;; the GUI plans this machine, so this machine's findings too
           findings (concat (config/structural-findings cfg) (statusline/findings cfg opts))
-          errors (filter #(= :error (:level %)) findings)]
-      (if (seq errors)
+          errors (filter #(= :error (:level %)) findings)
+          ;; the buffer decides the format, and it can change with any edit:
+          ;; a kind it never plans is refused here, not in `opts-from-json`
+          [_ dead msg] (first (core/dead-selectors cfg opts))]
+      (cond
+        (seq errors)
         {:ok false
          :error "config errors — refusing to plan"
          :findings (mapv finding->data findings)}
+
+        dead
+        {:ok false
+         :error (str "kind " dead ": " msg)
+         :findings (mapv finding->data findings)}
+
+        :else
         (let [st (state/load-state)
               ops (core/build-plan cfg st opts)
               changes (filter plan/mutating? ops)]
@@ -77,8 +88,11 @@
            ;; the rendered plan, not the ops: `render-val` is where a
            ;; credential read out of an existing config file gets masked, and
            ;; serializing `:diffs` would route around it
+           ;; printed when the CLI prints it: `index.html` shows its
+           ;; up-to-date state for exactly the "no changes" line, so a
+           ;; converged plan carrying a warning has to arrive as a plan
            :plan (binding [plan/*color* false]
-                   (if (seq changes)
+                   (if (plan/show-plan? ops opts)
                      (str/triml (plan/render-plan ops opts))
                      "no changes — environment matches agents.edn"))
            ;; the same plan as a table: grouped and masked in Clojure, because

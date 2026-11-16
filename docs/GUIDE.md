@@ -102,9 +102,15 @@ resources dropped from the config; only `--only` is a single-entity change.
 
 `-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`
 lists them — or the run exits 1, as do an `--only` whose kind `-k` leaves out
-and any option agentctl does not know. An `--only` or `-p` that nothing
-declares or owns is reported with `⚠` (under `--json`, in `warnings`), because
-a run narrowed to a typo plans nothing and would otherwise read as converged.
+and any option agentctl does not know. The kind must also be one the loaded
+config's format plans: an entity-DSL config files a project's trust,
+permissions and settings under `trust`, `permissions` and `settings`, so
+`-k projects` there exits 1; an old-format config plans all three as
+`projects`, so `-k trust` there exits 1. The message lists the kinds the
+format has, `--help` marks `projects` as legacy, and the GUI refuses the same
+kinds for the buffer it plans. An `--only` or `-p` that nothing declares or
+owns is reported with `⚠` (under `--json`, in `warnings`), because a run
+narrowed to a typo plans nothing and would otherwise read as converged.
 
 ## Claude session retention
 
@@ -623,6 +629,22 @@ one project. Ops writing one file for one project collapse into a single block,
 their ids in braces (`mcps/{docs search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
+
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere, such as an unsupported setting. That plan
+is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and under
+`--json` as ops with `"warn": true` — and still exits 0, since nothing would
+change.
+
+Under `--json`, `apply` (and `validate`) print one JSON document on stdout:
+the plan's `ops`, the selector `warnings`, the config's own warnings and this
+machine's (the status line's) in `findings` (`level`, `where`, `message`, as
+`validate --json` prints them) and the `summary`. An error is `{"error": …}`
+with exit 1 instead — a config with errors carries its `findings` too, an
+unknown option or a missing file only the message. `apply! --json` prints the
+plan document the same way, then the confirmation prompt and the result of
+the run as text.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a

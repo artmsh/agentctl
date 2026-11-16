@@ -48,7 +48,15 @@
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi dsh"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"]
-   (wrap-words "                       " 92 (map name core/kinds))
+   ;; the DSL's kinds, then the old format's own, each named against the DSL
+   ;; kind it stands in for — never a list of its own beside `core/kinds-for`
+   (let [dsl (core/kinds-for {:entity-dsl? true})
+         old (core/kinds-for {})]
+     (concat
+      (wrap-words "                       " 92 (map name dsl))
+      [(str "                       legacy (old-format configs only, in place of "
+            (str/join ", " (map name (remove (set old) dsl))) "): "
+            (str/join " " (map name (remove (set dsl) old))))]))
    ["  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
     "      --only KIND/ID   apply/apply!: plan one entity wherever it is placed (repeatable),"
@@ -130,19 +138,34 @@
                     " — the projects under " (u/tilde path)))
        " (--all for the whole config)")))
 
+(defn- finding->data
+  "A finding as `validate --json` prints one."
+  [f]
+  {:level (name (:level f)) :where (mapv u/kw->str (:where f)) :message (:message f)})
+
 (defn- check-config!
-  "Refuse a config with errors; say what is merely odd about one without.
-   `findings` are the config's structural ones unless given: a local run
-   also checks what this machine says, once it knows its scope."
-  [cfg & [findings]]
+  "Refuse a config with errors; say what is merely odd about one without, and
+   return those findings. `findings` are the config's structural ones unless
+   given: a local run also checks what this machine says, once it knows its
+   scope. Under --json nothing is printed beside the document: the refusal is
+   a document of its own, and the warnings are the caller's to put in
+   `findings` — a line of text above the JSON is output no parser reads."
+  [cfg opts & [findings]]
   (let [findings (or findings (config/structural-findings cfg))
-        errors (filter #(= :error (:level %)) findings)]
+        errors (filter #(= :error (:level %)) findings)
+        warnings (filter #(= :warn (:level %)) findings)]
     (when (seq errors)
-      (println "config errors — refusing to plan:")
-      (doseq [f errors] (println "  ✗" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))
+      (if (:json opts)
+        (println (json/generate-string {:error "config errors — refusing to plan"
+                                        :findings (mapv finding->data (concat errors warnings))}
+                                       {:pretty true}))
+        (do (println "config errors — refusing to plan:")
+            (doseq [f errors] (println "  ✗" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))))
       (System/exit 1))
-    (doseq [f findings :when (= :warn (:level f))]
-      (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f)))))
+    (when-not (:json opts)
+      (doseq [f warnings]
+        (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f))))
+    warnings))
 
 (defn- confirm!
   "Ask before a mutating run, unless told not to. Declining exits."
@@ -170,7 +193,7 @@
   (when (seq (:only opts))
     (throw (ex-info "--only does not apply with --host: a host is planned as a whole" {})))
   (let [cfg (load! opts)
-        _ (check-config! cfg)
+        findings (check-config! cfg opts)
         host (hosts/lookup cfg (:host opts))
         st (state/load-host-state (:id host))
         planned (hosts/plan-host host st opts)
@@ -180,13 +203,14 @@
       (println (json/generate-string {:host (name (:id host))
                                       :ops (map op->data ops)
                                       :skipped (map name (:skipped planned))
+                                      :findings (mapv finding->data findings)
                                       :summary (plan/summary-line ops)}
                                      {:pretty true}))
       (do
         (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
         (when-let [missing (seq (:skipped planned))]
           (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
-        (if (or (seq changes) (:show-noop opts) (some :warn ops))
+        (if (plan/show-plan? ops opts)
           (println (plan/render-plan ops opts))
           (println "\nno changes — host matches agents.edn"))
         (println)
@@ -214,8 +238,12 @@
 
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
-        st (state/load-state)]
-    (check-config! cfg)
+        st (state/load-state)
+        findings (check-config! cfg opts)]
+    ;; a kind is only checked against every kind before the config is read;
+    ;; one this config's format never plans would narrow the run to nothing
+    (when-let [[flag v msg] (first (core/dead-selectors cfg opts))]
+      (throw (ex-info (str flag " " v ": " msg) {})))
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
@@ -226,7 +254,7 @@
           opts (cond-> opts scope (assoc :projects (:projects scope)))
           ;; this machine's verdict on the status-line file; a run that
           ;; cannot write the file gets it as a warning
-          _ (check-config! cfg (vec (statusline/findings cfg opts)))
+          findings (concat findings (check-config! cfg opts (vec (statusline/findings cfg opts))))
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)
@@ -241,6 +269,7 @@
         (println (json/generate-string
                   (cond-> {:ops (map op->data ops)
                            :warnings (vec warnings)
+                           :findings (mapv finding->data findings)
                            :summary (plan/summary-line ops)}
                     scope (assoc :scope {:where (u/kw->str (:where scope))
                                          :path (:path scope)
@@ -251,7 +280,7 @@
           (doseq [w warnings] (println (str "  ⚠ " w)))
           (when-let [missing (seq (core/missing-tools cfg opts))]
             (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
-          (if (or (seq changes) (:show-noop opts))
+          (if (plan/show-plan? ops opts)
             (println (plan/render-plan ops opts))
             (println "\nno changes — environment matches agents.edn"))
           (println)
@@ -388,5 +417,8 @@
             "state" (cmd-state opts)
             "gui" (cmd-gui opts)))
         (catch clojure.lang.ExceptionInfo e
-          (println (str "error: " (ex-message e)))
+          ;; a script reading --json gets its error as JSON too
+          (println (if (:json opts)
+                     (json/generate-string {:error (ex-message e)} {:pretty true})
+                     (str "error: " (ex-message e))))
           (System/exit 1))))))
