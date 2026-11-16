@@ -587,19 +587,24 @@
 
    A transport change replaces every transport key instead. Merged, a stdio
    server's command, args and env would stay beside the new url, and the
-   entry would describe two servers at once."
-  [m cur env headers]
+   entry would describe two servers at once.
+
+   An env var or header agentctl declared and the declaration has since
+   dropped (`old`, the server's manifest entry) is removed: merged, a
+   dropped secret would stay in the file with no drift to show it."
+  [m cur env headers old]
   (let [same? (and cur (= (name (:transport m)) (entry-type cur)))
-        kept (if same? cur (apply dissoc cur transport-keys))]
-    (merge (dissoc kept :type :command :args :url)
+        kept (if same? cur (apply dissoc cur transport-keys))
+        keep-map (fn [cur-map k] (apply dissoc (str-keys cur-map) (dropped-names old m k)))]
+    (merge (dissoc kept :type :command :args :url :env :headers)
            (:extra m)
            (u/prune-nils
             {:type (name (:transport m))
              :command (:command m)
              :args (not-empty (vec (:args m)))
              :url (:url m)
-             :env (not-empty (merge (str-keys (:env kept)) (:values env)))
-             :headers (not-empty (merge (str-keys (:headers kept)) (:values headers)))}))))
+             :env (not-empty (merge (keep-map (:env kept) :env-names) (:values env)))
+             :headers (not-empty (merge (keep-map (:headers kept) :header-names) (:values headers)))}))))
 
 (defn- project-mcp-target
   "Where a project's server is written. Local scope — the default — is the
@@ -640,7 +645,7 @@
       (seq (:diffs op))
       (update :diffs (partial mapv #(-> % (mask :env env-ks) (mask :headers header-ks)))))))
 
-(defn- project-mcp-writes [cfg id proj]
+(defn- project-mcp-writes [cfg st id proj]
   (for [[mid m] (common/project-mcps cfg proj tool)
         :let [{:keys [file path shared?]} (project-mcp-target proj m mid)
               oid (keyword (str (name id) "/" (name mid)))
@@ -654,7 +659,7 @@
                              :id oid
                              :file file
                              :path path
-                             :value (mcp-json-entry m current env headers)
+                             :value (mcp-json-entry m current env headers (state/entry st tool :mcps oid))
                              :risk (if secret? :secret :low)
                              :summary (common/mcp-summary m)
                              :note (when (and secret? shared?)
@@ -664,7 +669,7 @@
         :when op]
     op))
 
-(defn- project-mcp-ops [cfg id proj]
+(defn- project-mcp-ops [cfg st id proj]
   (let [tracked (or (:mcpServers (u/read-json (project-mcp-file proj))) {})]
     (concat
      ;; a copy left behind in .mcp.json still ships the server — and its token —
@@ -680,7 +685,7 @@
                                (when (common/holds-secret?
                                       (:env (get tracked (keyword (u/kw->str mid)))))
                                  ", the copy carries a credential"))}))
-     (project-mcp-writes cfg id proj))))
+     (project-mcp-writes cfg st id proj))))
 
 (defn- project-mcp-prune-ops
   "A project's server dropped from agents.edn. The user-wide prune loop skips a
@@ -816,7 +821,7 @@
    (mapcat (fn [[id proj]]
              (when (contains? (:for-tools proj) tool)
                (concat (project-ops-for cfg id proj)
-                       (project-mcp-ops cfg id proj)
+                       (project-mcp-ops cfg st id proj)
                        (project-skill-ops cfg id proj st))))
            (:projects cfg))
    (project-mcp-prune-ops cfg st)))

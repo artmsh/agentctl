@@ -204,7 +204,10 @@ whichever scope it landed. A server agentctl never installed is left alone.
 
 Both project placements are merged onto the entry already there, so an env
 var, header or unmodelled key added by hand survives an update; the declared
-type, command, args and url replace their old values. A transport change
+type, command, args and url replace their old values. An env var or header
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares, so a dropped secret does not
+stay in the file. A transport change
 (stdio to http, or back) replaces every transport key instead: merged, the
 stdio server's `command`, `args` and `env` would stay beside the new `url`. The
 plan lists the keys that go:

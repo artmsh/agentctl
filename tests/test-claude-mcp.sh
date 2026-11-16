@@ -752,4 +752,41 @@ set +e; run apply -f "$SB/imported.edn" --all -t claude -k settings > "$SB/plan.
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "the imported settings env is not converged: exit $code"; }
 grep -qE "$SECRET|$PLAIN" "$SB/apply.txt" && fail "apply! printed an imported secret"
 
+for scope in local project; do
+  echo "35. $scope: a header or env var the declaration drops is removed, one added by hand is kept"
+  cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :fh :type :http :url "https://mcp.example.com/f" :headers {"x-docs" "!bw://f3/KEY" "x-mode" "fast"} :in "proj" :scope :$scope :acli [:claude]}
+        {:id :fs :command "/bin/echo" :env {"DOCS_KEY" "!bw://f3/KEY" "MODE" "fast"} :in "proj" :scope :$scope :acli [:claude]}]}
+EDN
+  vault '{"f3": {"KEY": "'$PLAIN'"}}'
+  apply -k mcps
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "$scope: apply! exited $code"; }
+  python3 - "$(target $scope)" "$SB/proj" <<'PY'
+import json, sys
+f, proj = sys.argv[1:]
+d = json.load(open(f))
+ms = (d["projects"][proj] if f.endswith(".claude.json") else d)["mcpServers"]
+ms["fh"]["headers"]["Authorization"] = "Bearer handmade-token-1234"
+ms["fs"]["env"]["USER_VAR"] = "kept"
+json.dump(d, open(f, "w"), indent=2)
+PY
+  sed -i.bak 's/"x-docs" "!bw:\/\/f3\/KEY" //; s/"DOCS_KEY" "!bw:\/\/f3\/KEY" //' "$SB/agents.edn"
+  plan -k mcps
+  [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "$scope: a dropped secret is not drift: exit $code"; }
+  grep -qF -- '- x-docs: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "$scope: the dropped header is not listed masked"; }
+  grep -qF -- '- DOCS_KEY: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "$scope: the dropped env var is not listed masked"; }
+  apply -k mcps
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "$scope: apply! dropping a secret exited $code"; }
+  python3 - "$(target $scope)" "$SB/proj" <<'PY' || fail "$scope: the dropped secret stayed, or the hand-added value went"
+import json, sys
+f, proj = sys.argv[1:]
+d = json.load(open(f))
+ms = (d["projects"][proj] if f.endswith(".claude.json") else d)["mcpServers"]
+assert ms["fh"]["headers"] == {"x-mode": "fast", "Authorization": "Bearer handmade-token-1234"}, ms["fh"]
+assert ms["fs"]["env"] == {"MODE": "fast", "USER_VAR": "kept"}, ms["fs"]
+PY
+  plan -k mcps
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "$scope: not converged after dropping a secret: exit $code"; }
+done
+
 echo "all claude mcp e2e checks passed"
