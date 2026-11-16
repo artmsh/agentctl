@@ -438,8 +438,16 @@
                 global? (some #(and (= :skill-packs (:kind %)) (= (:id o) (:id %)) (= :all (:in %)))
                               (:entities cfg))]
             (assoc (pack-line (:id o) (map #(fs/file-name %) (sources/skill-dirs p)))
-                   :agents (sort (if (or global? (empty? ps))
-                                   (:tools p)
+                   :agents (sort (cond
+                                   global? (:tools p)
+                                   ;; placed nowhere itself: the tools whose
+                                   ;; skills or subagents come out of it
+                                   (empty? ps)
+                                   (distinct (concat (for [[_ sk] (:skills cfg) :when (= (:id o) (:from sk))
+                                                           t (:tools sk)] t)
+                                                     (for [[_ a] (:agents cfg) :when (= (:id o) (:pack a))
+                                                           t (:tools a)] t)))
+                                   :else
                                    (filter #(and (common/project-skill-tools %)
                                                  (or (nil? (:tools p)) (contains? (:tools p) %)))
                                            (distinct (mapcat (comp :for-tools val) users)))))

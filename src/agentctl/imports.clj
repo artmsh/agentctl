@@ -436,10 +436,11 @@
                      at (assoc :at at))]))))
           enabled)))
 
-(defn scan-plugins []
+(defn scan-plugins
   "Read Claude's marketplace and enabledPlugins settings into keyed DSL rows.
    Project rows are discovered from the same trusted-project inventory import
    uses for the rest of Claude's project configuration."
+  []
   (let [global (plugin-declarations (u/read-json claude/settings-file) :all nil)
         trusted (scan-projects)
         discovered (for [p (scope/repositories (str u/home "/projects"))]

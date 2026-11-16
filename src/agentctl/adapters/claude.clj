@@ -6,6 +6,7 @@
    ever mutated through `claude mcp` or narrowly-scoped project keys."
   (:require [agentctl.adapters.common :as common]
             [agentctl.adapters.claude-plugins :as cp]
+            [agentctl.adapters.claude-sources :as cs]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
@@ -449,17 +450,16 @@
   (str (:plugin p) "@" (:marketplace p)))
 
 (defn- plugin-marketplace
-  "The `extraKnownMarketplaces` entry the CLI itself writes for this source:
-   github for owner/repo, directory for a local path, url for a hosted
-   marketplace.json, and git for any other remote. The two git kinds carry
-   the ref."
+  "The `extraKnownMarketplaces` source the CLI itself writes for this row:
+   github for owner/repo, directory for a local path, and for a remote URL
+   what `cs/remote` says the CLI reads it as. Git sources carry the ref."
   [p]
   (let [uri (:uri p)]
     {:source (u/prune-nils
               (cond (:repo p) {:source "github" :repo (:repo p) :ref (:ref p)}
                     (local-uri? uri) {:source "directory" :path (uri-path uri)}
-                    (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
-                    :else {:source "git" :url uri :ref (:ref p)}))}))
+                    :else (let [r (cs/remote uri)]
+                            (cond-> r (= "git" (:source r)) (assoc :ref (:ref p))))))}))
 
 ;; Whether the CLI's own install record holds a plugin at a scope is
 ;; `cp/install-record`: settings alone do not install a plugin, and an enabled
@@ -480,15 +480,17 @@
         marketplaces (or (:extraKnownMarketplaces current) {})
         enabled (or (:enabledPlugins current) {})
         mname (:marketplace plugin)
-        want-marketplace (plugin-marketplace plugin)
         before-m (get marketplaces (keyword mname))
+        ;; keys the row does not declare (`autoUpdate`, …) are the user's and stay
+        want-marketplace (merge before-m (plugin-marketplace plugin))
         before-e (get enabled (keyword key))
-        desired-m (not= (u/norm before-m) (u/norm want-marketplace))
+        desired-m (not= (u/norm (:source before-m)) (u/norm (:source want-marketplace)))
         desired-e (not= true before-e)
         rec (cp/install-record key cli-scope (:path project))
         missing (nil? rec)
         ;; settings already name this marketplace, from another source or ref
-        switched (and before-m (not= (u/norm (:source before-m)) (u/norm (:source want-marketplace))))
+        ;; (a URL spelled with or without `.git` is the same remote)
+        switched (and before-m (not (cs/same-source? (:source before-m) (:source want-marketplace))))
         ;; a source switch re-registers the marketplace, which then offers what
         ;; it offers: the version on disk now says nothing about it
         want (:version plugin)
@@ -496,6 +498,11 @@
         ;; only `:latest` asks the network, and only of an installed plugin
         moved (when (and (= :latest want) rec offer) (remote mname))
         vdiff (when-not desired-m (cp/version-diff want rec offer moved))
+        ;; Claude adds a marketplace to a project only from the source the
+        ;; user settings name for it, spelled the same way
+        user-source (when (not= "user" cli-scope)
+                      (get-in (u/read-json settings-file) [:extraKnownMarketplaces (keyword mname) :source]))
+        clash (and user-source (not= (u/norm user-source) (u/norm (:source want-marketplace))))
         source (plugin-source plugin)
         cwd (:path project)
         argv-add ["claude" "plugin" "marketplace" "add" "--scope" cli-scope source]
@@ -514,7 +521,11 @@
         :summary (str "Claude marketplace " mname "; enable " key
                       (when (and missing (not desired-m) (not desired-e))
                         " (enabled in settings but not installed)"))
-        :note (or (when (and switched (not missing))
+        :note (or (when clash
+                    (str "⚠ " (u/tilde settings-file) " declares marketplace " mname " from "
+                         (pr-str user-source) "; Claude adds it to a project only from that source,"
+                         " so apply! fails until the two agree"))
+                  (when (and switched (not missing))
                     (str "marketplace source changed: " key
                          " is reinstalled, Claude would keep its cached copy at an unchanged version"))
                   (cp/pin-note want mname offer))
@@ -533,9 +544,9 @@
                      ;; entry is written first
                      (when desired-m
                        (u/backup! file)
-                       (u/write-json! file (assoc-in (or (u/read-json file) {})
-                                                     [:extraKnownMarketplaces (keyword mname)]
-                                                     want-marketplace)))
+                       (u/write-json! file (update-in (or (u/read-json file) {})
+                                                      [:extraKnownMarketplaces (keyword mname)]
+                                                      merge want-marketplace)))
                      (run argv-add)
                      (cp/converge! {:run run :key key :cli-scope cli-scope :project-path cwd
                                     :mname mname :plugin (:plugin plugin) :want want
@@ -550,7 +561,10 @@
                  (u/backup! file)
                  (u/write-json! file
                                 (-> (or (u/read-json file) {})
-                                    (assoc-in [:extraKnownMarketplaces (keyword mname)] want-marketplace)
+                                    ;; `marketplace add` rewrites the entry whole, dropping
+                                    ;; keys such as autoUpdate: put back what was there
+                                    (update-in [:extraKnownMarketplaces (keyword mname)] merge
+                                               want-marketplace)
                                     (assoc-in [:enabledPlugins (keyword key)] true))))}))))
 
 (defn- plugin-uninstall-op [{:keys [id plugin project scope file cli-scope key]}]

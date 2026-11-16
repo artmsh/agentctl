@@ -707,6 +707,17 @@ path, so a build there does not change what Claude loads.
 Marketplace names are global to Claude: two declarations whose sources share a
 marketplace name re-register it, and every project follows the last one.
 `validate` warns when rows name one marketplace from different sources or refs.
+Claude adds a marketplace to a project only from the source the user settings
+name for it, spelled the same way; when `~/.claude/settings.json` names it from
+elsewhere, the plan says so and `apply!` fails for that project.
+
+A `[:uri …]` source is read the way `claude plugin marketplace add` reads it:
+a URL ending in `.git`, an scp-style address, or a `github.com` or `gitlab.com`
+repository URL (written with `.git` appended) is a git marketplace; any other
+`http(s)` URL serves a `marketplace.json`, has no revisions, and takes no
+`:ref`. Keys of a marketplace entry the row does not declare, such as
+`autoUpdate`, are kept: the CLI drops them when it re-adds the marketplace, and
+`apply!` puts them back.
 
 ## Claude subagents
 

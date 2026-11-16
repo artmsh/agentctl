@@ -438,4 +438,30 @@ EDN
   [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "the imported config is not converged: exit $code"; }
 )
 
+echo "20. a marketplace entry keeps the keys the row does not declare"
+(
+  SB="$SB/keep"; stub_home "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
+  market "$SB" 1.0.0
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme"}}}
+EDN
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "install failed: exit $code"; }
+  python3 - "$SB/.claude/settings.json" <<'PY'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["extraKnownMarketplaces"]["acme"]["autoUpdate"] = True
+json.dump(d, open(f, "w"), indent=2)
+PY
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "an undeclared key is drift: exit $code"; }
+  sed -i.bak 's/:marketplace "acme"}/:marketplace "acme" :ref "main"}/' "$SB/agents.edn"
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "the re-point failed: exit $code"; }
+  [ "$(setting "$SB/.claude/settings.json" 's["extraKnownMarketplaces"]["acme"].get("autoUpdate")')" = True ] \
+    || { cat "$SB/.claude/settings.json"; fail "autoUpdate was dropped"; }
+  [ "$(setting "$SB/.claude/settings.json" 's["extraKnownMarketplaces"]["acme"]["source"].get("ref")')" = main ] \
+    || fail "the source was not re-pointed"
+)
+
 echo "all plugin e2e checks passed"

@@ -5,7 +5,9 @@
   (:require [agentctl.adapters.claude :as claude]
             [agentctl.adapters.claude-agents :as ca]
             [agentctl.adapters.claude-plugins :as cp]
+            [agentctl.adapters.claude-sources :as cs]
             [agentctl.config :as config]
+            [agentctl.core :as core]
             [agentctl.imports :as imports]
             [agentctl.state :as state]
             [agentctl.util :as u]
@@ -213,6 +215,54 @@
     (is (some #(str/includes? % ":version must be :latest") (errors {:version ""})))
     (is (some #(str/includes? % ":build is a shell command") (errors {:build ["make"]})))))
 
+;; ---------------------------------------------------------------- sources as Claude reads them
+
+(deftest a-remote-url-is-the-source-claude-makes-of-it
+  (is (= {:source "git" :url "https://github.com/o/r.git"} (cs/remote "https://github.com/o/r")))
+  (is (= {:source "git" :url "https://github.com/o/r.git"} (cs/remote "https://github.com/o/r/")))
+  (is (= {:source "git" :url "https://github.com/o/r.git"} (cs/remote "https://github.com/o/r.git")))
+  (is (= {:source "git" :url "https://gitlab.com/g/sub/p.git"} (cs/remote "https://gitlab.com/g/sub/p")))
+  (is (= {:source "git" :url "https://git.example.com/m.git"} (cs/remote "https://git.example.com/m.git")))
+  (is (= {:source "git" :url "https://dev.azure.com/o/p/_git/r"} (cs/remote "https://dev.azure.com/o/p/_git/r")))
+  (is (= {:source "git" :url "git@example.com:o/r"} (cs/remote "git@example.com:o/r")))
+  (is (= {:source "url" :url "https://example.com/m"} (cs/remote "https://example.com/m"))
+      "any other host serves a marketplace.json")
+  (is (= {:source "url" :url "https://example.com/m.json"} (cs/remote "https://example.com/m.json")))
+  (testing "the row lowers to it, and a ref only goes on git"
+    (clean!)
+    (let [after #(:after (first (filter (fn [d] (= :extraKnownMarketplaces (:key d))) (:diffs (only-op (cfg %))))))]
+      (is (= {:source {:source "git" :url "https://github.com/o/r.git" :ref "v1"}}
+             (after {:plugins {[:uri "https://github.com/o/r" "lp"] {:in :all :acli [:claude] :ref "v1"}}})))
+      (is (= {:source {:source "url" :url "https://example.com/m"}}
+             (after {:plugins {[:uri "https://example.com/m" "lp"] {:in :all :acli [:claude]}}})))
+      (is (some #(str/includes? % "url source has no revisions")
+                (map second (findings {:plugins {[:uri "https://example.com/m" "lp"]
+                                                 {:in :all :acli [:claude] :ref "v1"}}})))))))
+
+(deftest settings-the-row-does-not-declare-survive
+  (clean!)
+  (u/write-json! claude/settings-file
+                 {:extraKnownMarketplaces {:lp {:source {:source "git" :url "https://github.com/o/r"}
+                                                :autoUpdate true}}
+                  :enabledPlugins {"lp@lp" true}})
+  (installed! "lp@lp" [{:scope "user" :version "1.0.0"}])
+  (let [o (only-op (cfg {:plugins {[:uri "https://github.com/o/r" "lp"] {:in :all :acli [:claude]}}}))]
+    (is (= {:source {:source "git" :url "https://github.com/o/r.git"} :autoUpdate true}
+           (:after (first (:diffs o))))
+        "the entry is respelled the way the CLI writes it, autoUpdate kept")
+    (is (nil? (:note o)) "a URL with or without .git is one remote: no reinstall")
+    (is (not-any? #(= "uninstall" (nth % 2 nil)) (:cmds o)))))
+
+(deftest a-project-marketplace-must-match-the-user-settings-source
+  (clean!)
+  (let [repo (str u/home "/repo")]
+    (fs/create-dirs (str repo "/.git"))
+    (u/write-json! claude/settings-file
+                   {:extraKnownMarketplaces {:lp {:source {:source "github" :repo "o/r"}}}})
+    (let [note #(:note (only-op (cfg {:plugins {[:gh "o/r" "lp"] (merge {:in [repo] :at :repo :acli [:claude]} %)}})))]
+      (is (nil? (note {})) "the same source: Claude adds it to the project")
+      (is (str/includes? (note {:ref "dev"}) "Claude adds it to a project only from that source")))))
+
 ;; ---------------------------------------------------------------- agents
 
 (deftest agents-lower-to-one-link-per-placement
@@ -228,6 +278,12 @@
     (is (= (str u/home "/.claude/agents/a.md") (:path (first (filter #(= :a (:id %)) ps)))))
     (is (some #(= [:warn [:agents :c]] [(:level %) (:where %)])
               (config/structural-findings c))))
+  (testing "a pack placed nowhere itself names the tools that use it"
+    (let [c (cfg {:skill-packs {[:uri (str "file://" u/home "/remote.git")] {:alias 'team :type :git}}
+                  :agents {['team "a"] {:in :all}}})
+          pack-op (first (filter #(= :skill-packs (:kind %))
+                                 (core/build-plan c state/empty-state {:tools #{:claude} :kinds #{:agents}})))]
+      (is (= ["claude-code"] (get-in pack-op [:display :agents])))))
   (is (thrown-with-msg? Exception #"names undefined pack"
                         (cfg {:agents {['nope "a"] {:in :all}}})))
   (is (thrown-with-msg? Exception #"invalid :agents key"

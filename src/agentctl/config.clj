@@ -4,7 +4,8 @@
    The declared file is convenience-shaped (loose, terse). Everything downstream
    consumes the normalized shape produced here, so adapters never re-interpret
    surface syntax."
-  (:require [agentctl.refs :as refs]
+  (:require [agentctl.adapters.claude-sources :as cs]
+            [agentctl.refs :as refs]
             [agentctl.scope :as scope]
             [agentctl.sources :as sources]
             [agentctl.statusline :as statusline]
@@ -839,8 +840,7 @@
   (cond repo :github
         (str/blank? uri) nil
         (scope/local-uri? uri) :directory
-        (re-find #"(?i)\.json$" uri) :url
-        :else :git))
+        :else (keyword (:source (cs/remote uri)))))
 
 (defn- plugin-ref-findings
   "A `:ref` picks a revision of a git repository: a directory or a hosted
