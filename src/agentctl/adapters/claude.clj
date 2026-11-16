@@ -31,6 +31,22 @@
   [dir & args]
   (u/sh-env-in dir {:HOME u/home} args))
 
+(defn- ok!
+  "Turn a non-zero CLI exit into a real failure, so apply! reports the op as
+   failed and claims no ownership of what the CLI never wrote — a server it
+   refused to add, a plugin it never installed."
+  [{:keys [exit err out]} argv]
+  (when-not (zero? exit)
+    (throw (ex-info (str (str/join " " argv) " failed: "
+                         (first (remove str/blank? [err out])))
+                    {:exit exit :argv argv})))
+  true)
+
+(defn- claude-ok!
+  "Run the claude CLI and fail on a non-zero exit."
+  [argv]
+  (ok! (claude-sh argv) argv))
+
 (def setting-keys
   {:model :model
    :output-style :outputStyle
@@ -261,14 +277,15 @@
                    :diffs (plan/field-diffs (or have {}) want)
                    :risk (if (common/holds-secret? (merge (:env m) (:headers m))) :secret :low)
                    :exec! (fn []
-                            (when cur (claude-sh "claude" "mcp" "remove" "--scope" "user" nm))
-                            (if (= :http (:transport m))
-                              (claude-sh (concat ["claude" "mcp" "add" "--scope" "user"
+                            (when cur (claude-ok! ["claude" "mcp" "remove" "--scope" "user" nm]))
+                            (claude-ok!
+                             (vec (if (= :http (:transport m))
+                                    (concat ["claude" "mcp" "add" "--scope" "user"
                                              "--transport" "http" nm (:url m)]
-                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers))))
-                              (claude-sh (concat ["claude" "mcp" "add" "--scope" "user" nm]
+                                            (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers)))
+                                    (concat ["claude" "mcp" "add" "--scope" "user" nm]
                                             (mapcat (fn [[k v]] ["-e" (str k "=" v)]) (:values env))
-                                            ["--"] [(:command m)] (:args m)))))})))
+                                            ["--"] [(:command m)] (:args m))))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
@@ -279,7 +296,7 @@
                  :target runtime-file
                  :summary "removed from agents.edn"
                  :risk :medium
-                 :exec! (fn [] (claude-sh "claude" "mcp" "remove" "--scope" "user" (u/kw->str id)))})))))
+                 :exec! (fn [] (claude-ok! ["claude" "mcp" "remove" "--scope" "user" (u/kw->str id)]))})))))
 
 ;; ---------------------------------------------------------------- skills
 
@@ -364,16 +381,6 @@
                    (local-uri? uri) {:source "directory" :path (uri-path uri)}
                    (re-find #"(?i)\.json$" uri) {:source "url" :url uri}
                    :else {:source "git" :url uri})}))
-
-(defn- ok!
-  "Turn a non-zero CLI exit into a real failure so apply! reports it instead
-   of writing settings for a plugin that was never installed."
-  [{:keys [exit err out]} argv]
-  (when-not (zero? exit)
-    (throw (ex-info (str (str/join " " argv) " failed: "
-                         (first (remove str/blank? [err out])))
-                    {:exit exit :argv argv})))
-  true)
 
 (def installed-plugins-file (str home "/plugins/installed_plugins.json"))
 

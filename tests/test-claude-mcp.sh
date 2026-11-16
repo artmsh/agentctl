@@ -52,6 +52,8 @@ if legacy is not None:
     s["enabledMcpjsonServers"] = cur + [x for x in legacy if x not in cur]
     os.makedirs(os.path.dirname(local), exist_ok=True)
     json.dump(s, open(local, "w"), indent=2)
+if a[:2] == ["mcp", os.environ.get("STUB_REFUSE")]:
+    print("Error: refused by the stub", file=sys.stderr); sys.exit(1)
 if a[:2] == ["mcp", "remove"]:
     d.get("mcpServers", {}).pop(a[-1], None)
 elif a[:2] == ["mcp", "add"]:
@@ -461,5 +463,33 @@ plan
 [ "$(json "$SB/.claude/settings.json" "'model' in d")" = False ] || fail "the dropped setting was not pruned"
 [ "$(json "$SB/.claude/settings.json" "d['\$schema']")" = https://json.schemastore.org/claude-code-settings.json ] \
   || fail "settings.json lost its \$schema"
+
+echo "22. a refused claude mcp add fails the op, and the server is not owned"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :refused :cmd "/bin/echo refused" :in :all :acli [:claude]}
+        {:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}]}
+EDN
+STUB_REFUSE=add apply -k mcps
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused mcp add exited $code"; }
+grep -q "1 failed" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the refused add is not counted as failed"; }
+grep -q "claude mcp add --scope user refused.*failed: Error: refused by the stub" "$SB/apply.txt" \
+  || { cat "$SB/apply.txt"; fail "the CLI's error is not reported"; }
+[ "$(json "$SB/.claude.json" "'refused' in d.get('mcpServers', {})")" = False ] || fail "the stub wrote a refused server"
+grep -q '\[:claude :mcps "refused"\]' "$SB/.config/agentctl/state.edn" && fail "ownership claimed for a server the CLI refused"
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "the retry after a refused add exited $code"; }
+grep -q '\[:claude :mcps "refused"\]' "$SB/.config/agentctl/state.edn" || fail "the server added on retry is not owned"
+
+echo "23. a refused claude mcp remove fails the prune, and ownership is kept"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}]}
+EDN
+STUB_REFUSE=remove apply -k mcps
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused mcp remove exited $code"; }
+[ "$(json "$SB/.claude.json" "'refused' in d['mcpServers']")" = True ] || fail "the server is gone though the CLI refused"
+grep -q '\[:claude :mcps "refused"\]' "$SB/.config/agentctl/state.edn" || fail "ownership dropped for a server still installed"
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "the retried prune exited $code"; }
+[ "$(json "$SB/.claude.json" "'refused' in d['mcpServers']")" = False ] || fail "the retried prune left the server"
 
 echo "all claude mcp e2e checks passed"
