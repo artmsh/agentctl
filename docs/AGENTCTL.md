@@ -676,8 +676,10 @@ The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
 resource. Keys are the renderer's JSON keys in kebab-case, keyword values become
 strings and `nil` becomes `null`. Nothing else is interpreted: the renderer's
 `--check` decides what is valid. Its ops are `agentctl statusline/config`, selected
-by `-k statusline` and never by `-t`. See
-[the guide](GUIDE.md#shared-status-line) for validation, paths and ownership.
+by `-k statusline` and never by `-t`. An `:awl` override plans nothing for awl,
+which reads the same file only when built with `-Dstatusline`. `validate` and
+`apply` report whether the `awl` on `PATH` was built that way. See
+[the guide](GUIDE.md#shared-status-line) for validation, paths, ownership and awl.
 
 ### Secret references
 
@@ -859,7 +861,8 @@ otherwise hand-curated) is a `warn` and never fails the exit code.
 `agent-statusline --check` run on the candidate JSON. A rejection is an `error`
 that also stops `apply`. A missing renderer, or one without `--check`, is
 `unknown`, and a renderer that would read a different file in this environment
-is a `warn`.
+is a `warn`. With an `:awl` override it also says whether the `awl` on `PATH`
+links the renderer (`ok`), does not (`warn`), or cannot be inspected (`warn`).
 
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers

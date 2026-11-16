@@ -111,12 +111,15 @@
     {:problem ":statusline must be a map, e.g. {:defaults {:segments [:model :context]}}"}
     :else
     (let [clashes (volatile! [])
-          data (translate (apply dissoc decl own-keys) [] clashes)]
+          data (translate (apply dissoc decl own-keys) [] clashes)
+          agents (get data "agents")]
       (u/prune-nils
        {:bin (:bin decl)
         :data data
         :text (str (json/generate-string data {:pretty true}) "\n")
-        :clashes (not-empty @clashes)}))))
+        :clashes (not-empty @clashes)
+        ;; awl reads the file but is built to, or not: see `awl-status`
+        :awl? (and (map? agents) (contains? agents "awl"))}))))
 
 ;; ---------------------------------------------------------------- --check
 
@@ -191,6 +194,60 @@
               1 {:status :invalid :message (str "agent-statusline rejects it: " (diagnostic err))}
               (unknown (str (u/tilde path) " --check failed (exit " exit "): " (diagnostic err))))))))))
 
+;; ---------------------------------------------------------------- awl
+
+(def awl-marker
+  "A string the renderer's config loader puts into every binary it is linked
+   into. awl links that loader only when built with `-Dstatusline`, and has no
+   flag that says so — `--help` reads the same either way — so the binary is
+   read, never run."
+  "AGENT_STATUSLINE_CONFIG")
+
+(defn- native? [^bytes bs]
+  (let [b #(bit-and (aget bs %) 0xff)
+        head (when (>= (alength bs) 4) (mapv b (range 4)))]
+    (boolean
+     (or (= head [0x7f 0x45 0x4c 0x46])                    ; ELF
+         (#{[0xcf 0xfa 0xed 0xfe] [0xce 0xfa 0xed 0xfe]     ; Mach-O
+            [0xfe 0xed 0xfa 0xcf] [0xfe 0xed 0xfa 0xce]
+            [0xca 0xfe 0xba 0xbe]} head)                    ; universal
+         (and head (= (subvec head 0 2) [0x4d 0x5a]))))))   ; PE
+
+(def ^:private scanned (atom {}))
+
+(defn awl-build
+  ":statusline, :plain, or :opaque for something that is not a native
+   executable (a wrapper script), which cannot be read this way."
+  [path]
+  (let [k [path (fs/size path) (str (fs/last-modified-time path))]]
+    (or (get @scanned k)
+        (let [bs (fs/read-all-bytes path)
+              r (cond
+                  (not (native? bs)) :opaque
+                  (str/includes? (String. ^bytes bs "ISO-8859-1") awl-marker) :statusline
+                  :else :plain)]
+          (swap! scanned assoc k r)
+          r))))
+
+(defn awl-status
+  "[level message] for an `:awl` override. awl reads the shared file itself,
+   so the file is all agentctl can deliver; whether awl uses it is fixed when
+   awl is built. Only a build that is seen to include the renderer is `:ok`."
+  []
+  (let [target (u/tilde (config-path))
+        path (u/which "awl")]
+    (if-not path
+      [:warn (str "awl is not on PATH, so whether it was built with -Dstatusline is unknown;"
+                  " only such a build reads " target)]
+      (case (try (awl-build path) (catch Exception _ :opaque))
+        :statusline [:ok (str (u/tilde path) " was built with -Dstatusline and reads " target
+                              " at startup")]
+        :plain [:warn (str (u/tilde path) " was built without -Dstatusline: it keeps its own"
+                           " status row and never reads " target " — rebuild it with"
+                           " -Dstatusline=<renderer source>")]
+        [:warn (str (u/tilde path) " is not a native executable, so whether awl was built with"
+                    " -Dstatusline is unknown; only such a build reads " target)]))))
+
 ;; ---------------------------------------------------------------- findings
 
 (defn- finding [level where message]
@@ -214,7 +271,13 @@
          (when (not= (u/abs-path reads) writes)
            [(finding :warn [:env]
                      (str "the renderer, run with this environment, reads " (u/tilde reads)
-                          " — agentctl writes " (u/tilde writes)))]))))))
+                          " — agentctl writes " (u/tilde writes)))]))
+       ;; a `:warn`, not `:unknown`, when awl cannot be read: `apply` prints
+       ;; warnings on every run, and an override awl may never honour must not
+       ;; disappear behind "no changes" once the file is written
+       (when (:awl? sl)
+         (let [[level message] (awl-status)]
+           [(finding level [:awl] message)]))))))
 
 ;; ---------------------------------------------------------------- plan
 

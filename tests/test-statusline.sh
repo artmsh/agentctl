@@ -188,4 +188,33 @@ apply
 [ ! -e "$SB/xdg/agent-statusline/config.json" ] || fail "the file written under XDG was not removed"
 [ -f "$FILE" ] || fail "a file agentctl no longer owns was removed"
 
+# --- awl reads the file only when built with -Dstatusline; nothing else says so
+declare_sl '{:defaults {:segments [:model :context]} :agents {:awl {:context-style :full}}}'
+validate
+[ "$code" = 0 ] || { cat "$SB/out.txt"; fail "an awl override failed validate"; }
+has "! awl" "awl absent from PATH is not a warning"
+has "not on PATH" "awl absent from PATH is not said"
+lacks "✓ awl" "an awl nobody can inspect reads as satisfied"
+apply
+plan
+[ "$code" = 0 ] || { cat "$SB/out.txt"; fail "the awl case did not converge"; }
+has "statusline awl" "a converged apply hides that awl may ignore the file"
+printf '\xcf\xfa\xed\xfe\0\0awl' > "$SB/bin/awl"
+chmod +x "$SB/bin/awl"
+validate
+has "built without -Dstatusline" "an awl built without the renderer is not reported"
+lacks "✓ awl" "an awl built without the renderer reads as satisfied"
+printf '\x7fELF\0\0AGENT_STATUSLINE_CONFIG' > "$SB/bin/awl"
+validate
+has "✓ awl" "an awl built with the renderer is not recognised"
+has "built with -Dstatusline" "an awl built with the renderer is not named"
+printf '#!/bin/sh\nexec /somewhere/awl "$@"\n' > "$SB/bin/awl"
+validate
+has "not a native executable" "a wrapper script was judged"
+lacks "✓ awl" "a wrapper script reads as satisfied"
+rm "$SB/bin/awl"
+declare_sl '{:defaults {:segments [:model :context]} :agents {:pi {:context-style :full}}}'
+validate
+lacks "awl" "a statusline without an awl override asked about awl"
+
 echo "all statusline e2e checks passed"

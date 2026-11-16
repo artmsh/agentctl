@@ -117,6 +117,28 @@
     (testing "the whole-config inventory carries it, whatever the executors"
       (is (some #(= [:agentctl :statusline :config] (vec (take 3 %))) (core/inventory c))))))
 
+(defn- write-bytes [path & parts]
+  (with-open [o (java.io.FileOutputStream. (str path))]
+    (doseq [p parts] (.write o (if (string? p) (.getBytes ^String p "ISO-8859-1") (byte-array p)))))
+  path)
+
+(deftest awl-is-read-for-the-renderer-it-links-never-run
+  (let [dir (str u/home "/awl-builds")]
+    (fs/create-dirs dir)
+    (testing "the renderer's config loader is linked in: a -Dstatusline build"
+      (is (= :statusline (sl/awl-build (write-bytes (str dir "/elf") [0x7f 0x45 0x4c 0x46 0 0]
+                                                    "...AGENT_STATUSLINE_CONFIG...")))))
+    (testing "a native binary without it keeps its own row"
+      (is (= :plain (sl/awl-build (write-bytes (str dir "/macho") [0xcf 0xfa 0xed 0xfe 0 0] "awl")))))
+    (testing "a wrapper script cannot be read this way, whatever it mentions"
+      (is (= :opaque (sl/awl-build (write-bytes (str dir "/script")
+                                                "#!/bin/sh\n# AGENT_STATUSLINE_CONFIG\nexec awl\n")))))))
+
+(deftest only-an-awl-override-asks-about-awl
+  (is (:awl? (sl/normalize {:agents {:awl {:color :never}}})))
+  (is (not (:awl? (sl/normalize {:agents {:pi {:color :never}}}))))
+  (is (not (:awl? (sl/normalize {:defaults {:color :never}})))))
+
 (deftest a-statusline-survives-import
   ;; dropped here, the next apply! would read the declaration as removed and
   ;; delete the file agentctl owns

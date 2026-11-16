@@ -393,6 +393,29 @@ well, as it does every user-wide resource; `--all` includes it. Codex does not r
 file: its status line is a native setting, and the `codex` override only feeds the
 renderer's `--codex-config` preset.
 
+### awl
+
+awl needs nothing from agentctl beyond this file. It links the renderer in process when it
+is built with `-Dstatusline=<renderer source>` and then loads the same file once at startup,
+so an `:awl` override is delivered by writing the file, and agentctl plans no op of its
+own for awl. Whether awl uses the file is fixed when awl is built, which agentctl cannot
+provision. awl has no flag that reports the build option, and `--help` reads the same with
+and without it, so agentctl never runs awl to find out. Instead it reads the `awl` binary
+on `PATH` for a string that only the renderer's config loader puts there. The result is a
+finding under `STATUSLINE`, given whenever `:agents` has an `:awl` key:
+
+| awl on `PATH` | Finding |
+| --- | --- |
+| a native binary with the renderer linked in | `ok`: it reads the file at startup |
+| a native binary without it | `warn`: it keeps its own status row; rebuild with `-Dstatusline` |
+| absent, or a wrapper script | `warn`: whether it reads the file is unknown |
+
+`apply` prints these warnings on every run, including a converged one. Once the file is
+written, "no changes" is true of the file, and the warning beside it says that awl may
+still not use it. Restart awl after a change, because it reads the file only at startup.
+`:awl` under `:statusline :agents` is a renderer agent key, not an `:acli` value, so it
+plans nothing for awl's skills.
+
 ## Claude plugins
 
 A Claude Code plugin bundles skills, subagents and hooks, and is installed
