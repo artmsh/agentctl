@@ -3,7 +3,8 @@
 does and refuses, as observed against the real CLI in a scratch home:
 
   - `marketplace add` takes owner/repo, owner/repo#ref, <git-url>#ref, a
-    marketplace.json URL or a directory path, and rejects file://
+    marketplace.json URL or a directory path, and rejects file://; a
+    github.com owner/repo or gitlab.com group/project URL is a git remote
   - a github or git marketplace is a clone under ~/.claude/plugins/marketplaces;
     github repos are fetched from https://github.com/<repo>.git, which a test
     points at local bare repositories with git's url.<base>.insteadOf
@@ -76,8 +77,21 @@ def parse(src):
     m = re.match(r"^([^#]+)(?:#(.+))?$", src)
     url, ref = m.group(1), m.group(2)
     if url.startswith(("https://", "http://")) or re.match(r"^[\w.-]+@[^:]+:", url):
-        if url.endswith(".git") or url.startswith("git@"):
-            return {"source": "git", "url": url, **({"ref": ref} if ref else {})}
+        refd = {"ref": ref} if ref else {}
+        if not re.match(r"(?i)^https?://", url) or url.endswith(".git") or "/_git/" in url:
+            return {"source": "git", "url": url, **refd}
+        # the CLI's rule: a github.com owner/repo or gitlab.com group/project
+        # page URL is that repository's git remote, `.git` appended
+        host = re.match(r"(?i)^https?://([^/?#]+)", url).group(1).lower()
+        trimmed = re.sub(r"(?:[/?#]|%2[Ff]|%3[Ff]|%23)+$", "", url)
+        i = trimmed.find("/", trimmed.find("://") + 3)
+        path = trimmed[i:] if i >= 0 else ""
+        segs = [s for s in path.split("/") if s]
+        if host == "github.com" and re.match(r"^/[^/]+/[^/]+", path):
+            return {"source": "git", "url": trimmed + ".git", **refd}
+        if (host == "gitlab.com" and len(segs) >= 2 and segs[0] != "api" and "-" not in segs
+                and path == "/" + "/".join(segs)):
+            return {"source": "git", "url": trimmed + ".git", **refd}
         return {"source": "url", "url": url}
     m = re.match(r"^([^#@]+)(?:[#@](.+))?$", src)
     return {"source": "github", "repo": m.group(1), **({"ref": m.group(2)} if m.group(2) else {})}

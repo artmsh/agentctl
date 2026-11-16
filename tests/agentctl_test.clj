@@ -3156,6 +3156,40 @@
                                  :ops [{:op "set" :path [":mcps" ":x" ":env"]
                                         :type "edn" :value "{oops"}]})))))))
 
+(deftest gui-edits-a-dsl-row-and-leaves-every-other-section-as-written
+  (let [text (str ";; hand-written\n{:#def {effort \"high\"}\n\n"
+                  " :settings\n [{:id :base :thinking $effort :acli [:claude] :in :all} ; user-wide\n"
+                  "  {:id :app :model \"opus\" :in \"projects/app\"}]\n\n"
+                  " :mcps [{:id :search :cmd \"s\" :in :all}]\n\n"
+                  " :agents {[team \"reviewer\"] {:in :all}}\n\n"
+                  " :statusline {:segments [:model]}}\n")
+        dir (temp-dir)
+        path (str dir "/agents.edn")
+        _ (u/write-text! path text)
+        ctx {:tok "t" :path path :base-opts {} :lock (Object.)}
+        body (fn [m] (java.io.ByteArrayInputStream. (.getBytes (json/generate-string m))))
+        post (fn [ops] (-> (gui/handler ctx {:request-method :post :uri "/api/edit"
+                                             :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                             :body (body {:text text :ops ops})})
+                           :body (json/parse-string true)))]
+    (is (= (str/replace text "\"opus\"" "\"haiku\"")
+           (:text (post [{:op "set" :path [":settings" "1" ":model"] :type "scalar" :value "haiku"}]))))
+    (is (= (str/replace text "{[team \"reviewer\"] {:in :all}}" "{[team \"reviewer\"] {:in \"projects\"}}")
+           (:text (post [{:op "set" :path [":agents" "[team \"reviewer\"]" ":in"] :type "edn"
+                          :value "\"projects\""}]))))
+    (let [data (post [{:op "append" :path [":mcps"] :edn "{:in :all}"}])]
+      (is (= (str/replace text "{:id :search :cmd \"s\" :in :all}]" "{:id :search :cmd \"s\" :in :all} {:in :all}]")
+             (:text data)))
+      (is (= 2 (count (:entries (first (filter #(= ":mcps" (:key %)) (get-in data [:form :sections]))))))
+          "the form answers the edited buffer"))
+    (testing "a row index gone stale (deleted before the form re-rendered) is a message, not a 500"
+      (is (= 400 (:status (gui/handler ctx {:request-method :post :uri "/api/edit"
+                                            :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                            :body (body {:text text
+                                                         :ops [{:op "set" :path [":settings" "9" ":model"]
+                                                                :type "scalar" :value "x"}]})})))))
+    (is (= text (slurp path)))))
+
 (deftest gui-coerces-json-filters-into-keywords
   (testing "keep-projects compares keywords and does no coercion of its own"
     (let [o (gui/opts-from-json {:tools ["pi"] :kinds ["mcps"] :projects ["example"] :verbose true}
@@ -3608,13 +3642,65 @@
     (is (false? (get-in cfg [:tools :claude :auto-compact])))
     (is (= "c" (get-in cfg [:tools :codex :model])))))
 
+(defn- dsl-section [m k] (first (filter #(= (str k) (:key %)) (:sections m))))
+(defn- dsl-field [entry k] (first (filter #(= (name k) (:key %)) (:fields entry))))
+
 (deftest entity-gui-preserves-the-vector-file-shape
   (let [text "{:#def {effort \"high\"} :settings [{:thinking $effort :in :all}]}"
+        m (form/model text)
+        row (first (:entries (dsl-section m :settings)))]
+    (is (:ok m))
+    (is (= ":all" (:selector (first (:targets m)))))
+    (is (= "$effort" (:value (dsl-field row :thinking))) "a reference is shown as itself")
+    (is (= [":settings" "0" ":thinking"] (:path (dsl-field row :thinking))))))
+
+(deftest entity-gui-has-a-section-for-every-dsl-kind
+  (let [text (str "{:settings [{:id :base :model \"sonnet\" :tools [:claude] :in :all}"
+                  "            {:model \"opus\" :in \"projects/app\"}]"
+                  " :skill-packs {[:uri \"file:///x\"] {:alias team}}"
+                  " :agents {[team \"r\"] {:in :all}}"
+                  " :plugins {[:gh \"o/r\" \"p\"] {:in :all :version :latest}}"
+                  " :statusline {:segments [:model]}}")
         m (form/model text)]
     (is (:ok m))
-    (is (= "entities" (:layout (second (:sections m)))))
-    (is (= ":all" (:selector (first (:targets m)))))
-    (is (str/includes? (:value (first (:fields (second (:sections m))))) "$effort"))))
+    (is (= #{":#def" ":settings" ":permissions" ":mcps" ":skill-packs" ":skills" ":providers" ":memory"
+             ":trust" ":hooks" ":plugins" ":agents" ":extensions" ":statusline"}
+           (set (map :key (:sections m)))))
+    (let [[base app] (:entries (dsl-section m :settings))]
+      (is (= ["base  · :all" "#2  · \"projects/app\""] [(:label base) (:label app)]))
+      (testing "placement is on every row, :tools edited where the row wrote it"
+        (is (= [":settings" "0" ":tools"] (:path (dsl-field base :acli))))
+        (is (= [":claude"] (:value (dsl-field base :acli))))
+        (is (= [":settings" "1" ":acli"] (:path (dsl-field app :acli))))
+        (is (false? (:present (dsl-field app :acli))))
+        (is (= "\"projects/app\"" (:value (dsl-field app :in))))))
+    (let [agent (first (:entries (dsl-section m :agents)))]
+      (is (= "[team \"r\"]" (:label agent)))
+      (is (= [":agents" "[team \"r\"]" ":in"] (:path (dsl-field agent :in))))
+      (is (= [":claude"] (:options (dsl-field agent :acli))) "only Claude reads subagents"))
+    (is (= ":latest" (:value (dsl-field (first (:entries (dsl-section m :plugins))) :version))))
+    (is (str/includes? (get-in (dsl-section m :statusline) [:raw :value]) ":segments"))
+    (is (= "row" (:id-kind (dsl-section m :settings))))
+    (is (= "edn" (:id-kind (dsl-section m :agents))))))
+
+(deftest entity-gui-edits-rows-and-keyed-entries-in-place
+  (let [text (str ";; mine\n{:settings\n [{:model \"a\" :in :all} ; first\n  {:in \"projects\"}]\n\n"
+                  " :agents {[team \"r\"] {:in :all}}}\n")
+        edit #(edit/apply-ops text (form/ops->edits [%]))]
+    (is (= (str/replace text "{:in \"projects\"}" "{:in \"projects\" :model \"b\"}")
+           (edit {:op "set" :path [":settings" "1" ":model"] :type "scalar" :value "b"})))
+    (is (= (str/replace text "{:in \"projects\"}]" "{:in \"projects\"}\n  {:in :all :acli [:codex]}]")
+           (edit {:op "append" :path [":settings"] :edn "{:in :all :acli [:codex]}"}))
+        "a new row is broken and indented like the rows above it, with no commas")
+    (is (= (str/replace text "{[team \"r\"] {:in :all}}" "{[team \"r\"] {:in :all :acli [:claude]}}")
+           (edit {:op "set" :path [":agents" "[team \"r\"]" ":acli"] :type "kw-set" :value [":claude"]})))
+    (is (= (str/replace text "{[team \"r\"] {:in :all}}" "{}")
+           (edit {:op "unset" :path [":agents" "[team \"r\"]"]})))
+    (is (not (str/includes? (edit {:op "unset" :path [":settings" "0"]}) "{:model \"a\" :in :all}")))
+    (is (str/includes? (edit {:op "append" :path [":mcps"] :edn "{:in :all}"}) ":mcps [{:in :all}]")
+        "a section not in the file yet is created")
+    (is (thrown? Exception (edit {:op "set" :path [":settings" "5" ":model"] :type "scalar" :value "x"}))
+        "a row that is not there is refused, not appended")))
 
 (deftest entity-partial-settings-prune
   (let [root (temp-dir) file (str root "/config.toml")]

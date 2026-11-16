@@ -38,19 +38,21 @@ printf '# shared memory\n' > "$H/notes/AGENTS.md"
 cat > "$H/.config/agents.edn" <<'EDN'
 {:#def {effort "high"}
 
- :executors
- {:claude {:model "sonnet" :thinking $effort :on #{:auto-compact}}
-  :codex  {:model "gpt-5.6-sol" :reasoning-effort $effort}}
+ :settings
+ [{:id :claude :model "sonnet" :thinking $effort :on #{:auto-compact} :acli [:claude] :in :all}
+  {:id :codex :model "gpt-5.6-sol" :reasoning-effort $effort :acli [:codex] :in :all}]
 
  :mcps
- {:search "search-mcp --stdio"
-  :notes  {:url "https://notes.example.com/mcp" :type :http :tools [:codex]}}
+ [{:id :search :cmd "search-mcp --stdio" :in :all}
+  {:id :notes :url "https://notes.example.com/mcp" :transport :http :acli [:codex] :in :all}]
 
- :skill-packs {:skills-repo {:uri "file://$HOME/projects/skills-repo" :dir "skills"}}
- :skills      {:review {:from :skills-repo :tools [:claude :codex]}}
- :memory      {:shared {:from "~/notes/AGENTS.md" :mode :symlink}}
+ :skill-packs {[:uri "file://$HOME/projects/skills-repo"] {:alias skills-repo :dir "skills"}}
 
- :projects {:sample {:skills [:release-notes]}}}
+ :skills
+ {[skills-repo "review"] {:in :all :acli [:claude :codex]}
+  [skills-repo "release-notes"] {:in "projects/sample"}}
+
+ :memory [{:from "~/notes/AGENTS.md" :mode :symlink :in :all}]}
 EDN
 
 cd "$SB"

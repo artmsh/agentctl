@@ -2053,7 +2053,8 @@ const debounce = new Map();
 
 const attr = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const pkey = (path) => path.join(" ");
-const idOf = (kind, name) => (kind === "symbol" ? name : ":" + name.replace(/^:/, ""));
+// a keyed DSL section's key is a selector written as EDN, sent as typed
+const idOf = (kind, name) => (kind === "symbol" || kind === "edn" ? name : ":" + name.replace(/^:/, ""));
 
 function widget(f) {
   const path = attr(JSON.stringify(f.path)), t = f.type;
@@ -2162,16 +2163,19 @@ function groupHtml(g) {
 }
 
 function sectionHtml(sec) {
-  if (sec.layout === "entities") {
-    return `<details class="sec" data-key="${attr(sec.key)}" open><summary><span class="sec-title">${esc(sec.title)}</span></summary>` +
-      `<div class="sec-body"><div class="rows">${sec.fields.map(rowHtml).join("")}</div></div></details>`;
-  }
   const declared = sec.entries.filter((e) => e.declared);
-  const isOpen = closed.has(sec.key) ? false : (opened.has(sec.key) || declared.length > 0);
-  const add = sec["id-kind"] === "fixed" ? "" :
-    `<div class="add"><input type="text" class="newid" placeholder="New ${esc(sec.entry)} name" ` +
-    `data-section="${attr(sec.key)}" data-kind="${attr(sec["id-kind"])}" data-template="${attr(sec.template || "{}")}">` +
-    `<button type="button" class="addentry">+ Add ${esc(sec.entry)}</button></div>`;
+  const isOpen = closed.has(sec.key) ? false
+    : (opened.has(sec.key) || declared.length > 0 || !!(sec.raw && sec.raw.present));
+  const kind = sec["id-kind"];
+  const add = kind === "fixed" ? "" :
+    kind === "row"
+      // an entity row has no name to type: it is appended, placed :all
+      ? `<div class="add"><button type="button" class="addrow-dsl" data-section="${attr(sec.key)}" ` +
+        `data-template="${attr(sec.template || "{}")}">+ Add ${esc(sec.entry)}</button></div>`
+      : `<div class="add"><input type="text" class="newid" placeholder="${kind === "edn" ? "Key, e.g. [pack &quot;name&quot;]" : `New ${esc(sec.entry)} name`}" ` +
+        `data-section="${attr(sec.key)}" data-kind="${attr(kind)}" data-template="${attr(sec.template || "{}")}">` +
+        `<button type="button" class="addentry">+ Add ${esc(sec.entry)}</button></div>`;
+  const raw = sec.raw ? `<div class="entry"><div class="rows">${rowHtml(sec.raw)}</div></div>` : "";
   return `<details class="sec" data-key="${attr(sec.key)}"${isOpen ? " open" : ""}>` +
          `<summary><span class="sec-title">${esc(sec.title)}</span>` +
          (declared.length ? `<span class="count">${declared.length}</span>` : "") +
@@ -2180,7 +2184,7 @@ function sectionHtml(sec) {
          `<div class="sec-body">` +
          (sec.layout === "table"
            ? tableHtml(sec)
-           : (sec.groups || []).map(groupHtml).join("") +
+           : raw + (sec.groups || []).map(groupHtml).join("") +
              sec.entries.map((e) => entryHtml(sec, e)).join("") + add) +
          `</div></details>`;
 }
@@ -2385,11 +2389,18 @@ setupEl.addEventListener("click", (e) => {
   if (del) { sendOps([{op: "unset", path: JSON.parse(del.dataset.del)}]); return; }
   const add = e.target.closest("[data-add]");
   if (add) { sendOps([{op: "set", path: JSON.parse(add.dataset.add), edn: add.dataset.template}]); return; }
+  const addrowDsl = e.target.closest(".addrow-dsl");
+  if (addrowDsl) {
+    opened.add(addrowDsl.dataset.section);
+    sendOps([{op: "append", path: [addrowDsl.dataset.section], edn: addrowDsl.dataset.template}]);
+    return;
+  }
   const addentry = e.target.closest(".addentry");
   if (addentry) {
     const input = addentry.previousElementSibling;
     const name = input.value.trim();
-    if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(name)) { input.focus(); return; }
+    const ok = input.dataset.kind === "edn" ? /^\[.+\]$/.test(name) : /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(name);
+    if (!ok) { input.focus(); return; }
     input.value = "";
     opened.add(input.dataset.section);
     sendOps([{op: "set", path: [input.dataset.section, idOf(input.dataset.kind, name)],
