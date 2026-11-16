@@ -477,21 +477,46 @@
             (:entities cfg))
       (some #(and (= id (:from %)) (= :global (:scope %)) (seq (:tools %))) (vals (:skills cfg)))))
 
+(defn taken-whole?
+  "A git pack some project takes whole, which the `skills` CLI installs there
+   by URL. agentctl clones it as well, only to learn the names it brings: the
+   CLI writes each of them over whatever the project already has."
+  [cfg id]
+  (and (not (cloned-for-user? cfg id))
+       (boolean (some #(some #{id} (:skills %)) (vals (:projects cfg))))))
+
+(declare pack-op)
+
 (defn pack-ops
-  "Ops that fetch or update git-backed skill packs."
+  "Ops that fetch or update the git-backed skill packs agentctl links from."
   [cfg]
   (for [[id pack] (:skill-packs cfg)
         :when (and (= :git (:type pack)) (cloned-for-user? cfg id))
-        :let [root (:root pack)
+        :let [o (pack-op id pack)]
+        :when o]
+    o))
+
+(defn project-pack-ops
+  "Ops that fetch the git packs projects take whole (`taken-whole?`). They
+   serve projects only, so a `--user` run leaves them out (`:for-projects`)."
+  [cfg]
+  (for [[id pack] (:skill-packs cfg)
+        :when (and (= :git (:type pack)) (taken-whole? cfg id))
+        :let [o (pack-op id pack)]
+        :when o]
+    (assoc o :for-projects true)))
+
+(defn- pack-op [id pack]
+  (let [root (:root pack)
               present (u/exists? (str root "/.git"))
               local (when present (git-head root))
               remote (git-remote-head (:uri pack) (:ref pack))
               [label repo] (uri-parts (:uri pack))
-              runs (checkout-runs pack present)
-              cmds (mapv :argv runs)
-              what (if (:implicit pack) "skill" "pack")]
-        :when (or (not present) (and remote local (not= local remote)))]
-    (plan/op {:action (if present :update :create)
+        runs (checkout-runs pack present)
+        cmds (mapv :argv runs)
+        what (if (:implicit pack) "skill" "pack")]
+    (when (or (not present) (and remote local (not= local remote)))
+      (plan/op {:action (if present :update :create)
               :tool :agentctl :kind :skill-packs :id id
               ;; a repository that is one skill reads as that skill, not a pack
               :shown-kind (when (:implicit pack) :skills)
@@ -514,4 +539,4 @@
                                               " exited " exit ": "
                                               (or (last (remove str/blank? (str/split-lines (str err))))
                                                   (not-empty out) "no output"))
-                                         {:exit exit}))))})))
+                                         {:exit exit}))))}))))

@@ -347,40 +347,101 @@
                              (fs/create-dirs (fs/parent p))
                              (fs/create-sym-link p src)))})]))))
 
+(defn- written-by-add
+  "The paths `skills add` writes for the name `n` and these tools: the copy,
+   and claude's link when claude is among them."
+  [dir n tools]
+  (cond-> [(copy-path dir n tools)]
+    (and (contains? tools :claude) (shared? tools)) (conj (claude-link dir n))))
+
+(defn- add-stays-because
+  "Why the directory at `p` must not be written over by `skills add`, or nil.
+   One git or a placement needs stays, as it does for a link; and so does one
+   the CLI did not install, whatever it holds: the CLI replaces a copy with
+   no backup and no comparison, so only its own are its to replace."
+  [cfg dir lock p n]
+  (when (and (u/exists? p) (not (fs/sym-link? p)))
+    (or (sources/kept-because cfg dir p)
+        (when-not (contains? lock n) "the `skills` CLI did not install it"))))
+
+(defn- pack-names
+  "The names a whole remote pack brings, from agentctl's own clone of it
+   (`sources/project-pack-ops`); nil until that clone is on disk."
+  [cfg u]
+  (let [p (get-in cfg [:skill-packs (:pack u)])]
+    (when (and p (sources/materialized? p))
+      (vec (distinct (map skill-name (sources/skill-dirs p)))))))
+
+(defn- install-op
+  "The `skills add` op for unit `u`, backing up `replaced` — the copies it
+   writes over — and the lock first."
+  [cfg pid dir u tools replaced]
+  (let [oid (keyword (name pid) (name (:entity u)))
+        argv (vec (concat (command) ["add" (:source u)]
+                          (mapcat #(vector "-s" %) (select-args u))
+                          (mapcat #(vector "-a" (agents %)) (sort tools))
+                          ["-y"]))]
+    (plan/op {:action (if (seq replaced) :update :create)
+              :tool :agentctl :kind :skills :id oid :project pid :project-path dir
+              :target (str dir "/.agents/skills") :category :fs
+              :owns (mapv #(vector % :skills oid) (sort tools))
+              :summary (str "skills add " (:source u))
+              :cmds [argv]
+              :display (display cfg u tools)
+              :exec! (fn []
+                       (fs/create-dirs dir)
+                       (doseq [p (concat replaced [(str dir "/skills-lock.json")])
+                               :when (u/exists? p)]
+                         (u/backup! p))
+                       (run! dir argv "skills add"))})))
+
 (defn- add-op
   "Installs a remote unit with `skills add`, which writes each name's copy
-   over whatever is there. A name whose copy or claude directory must stay
-   (git or a placement needs it) is reported and left out; a whole pack
-   (`*`) names nothing until the CLI has fetched it, so it cannot be checked."
+   over whatever is there. A name whose copy must stay (`add-stays-because`)
+   is reported and left out, and whatever the CLI does replace is backed up
+   first. A whole pack is installed name by name, from the names agentctl's
+   clone of it lists; before that clone exists the names are unknown, so it
+   is installed whole only while nothing in the project could be written
+   over, and is otherwise left until the clone has been made."
   [cfg pid dir u tools]
   (let [oid (keyword (name pid) (name (:entity u)))
-        kept (for [n (:names u)
-                   p [(canonical dir n) (claude-link dir n)]
-                   :when (and (u/exists? p) (not (fs/sym-link? p)))
-                   :let [why (sources/kept-because cfg dir p)]
-                   :when why]
-               [n p why])
-        skip (set (map first kept))
-        u' (cond-> u (seq skip) (assoc :names (vec (remove skip (:names u)))
-                                       :select (vec (remove skip (select-args u)))))]
-    (concat
-     (for [[_ p why] kept]
-       (sources/kept-op {:tool :agentctl :kind :skills :id oid :project pid :project-path dir
-                         :display (display cfg u tools)}
-                        p why))
-     (when (and (or (empty? skip) (seq (:names u'))) (not (installed? dir u' tools)))
-       (let [argv (vec (concat (command) ["add" (:source u)]
-                               (mapcat #(vector "-s" %) (select-args u'))
-                               (mapcat #(vector "-a" (agents %)) (sort tools))
-                               ["-y"]))]
-         [(plan/op {:action (if (some #(fs/exists? (copy-path dir % tools)) (:names u')) :update :create)
-                    :tool :agentctl :kind :skills :id oid :project pid :project-path dir
-                    :target (str dir "/.agents/skills") :category :fs
-                    :owns (mapv #(vector % :skills oid) (sort tools))
-                    :summary (str "skills add " (:source u))
-                    :cmds [argv]
-                    :display (display cfg u tools)
-                    :exec! (fn [] (fs/create-dirs dir) (run! dir argv "skills add"))})])))))
+        lock (read-lock dir)
+        whole? (= ["*"] (:select u))
+        names (if whole? (pack-names cfg u) (:names u))
+        report #(sources/kept-op {:tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                                  :display (display cfg u tools)}
+                                 %1 %2)]
+    (if (and whole? (nil? names))
+      ;; the names are not known yet: every existing child the CLI could write
+      (let [targets (distinct (for [d [(str dir "/.agents/skills") (str dir "/.claude/skills")]
+                                    :when (fs/directory? d)
+                                    c (fs/list-dir d)
+                                    :let [n (str (fs/file-name c)) p (str c)]
+                                    :when (some #{p} (written-by-add dir n tools))]
+                                [n p]))
+            staying (keep (fn [[n p]] (some->> (add-stays-because cfg dir lock p n) (vector p))) targets)]
+        (if (seq staying)
+          ;; not `:pending`: beside the clone it still says what is at stake
+          [(plan/op {:action :noop :warn true :tool :agentctl :kind :skills
+                     :id oid :project pid :project-path dir
+                     :summary (str "not installed until the pack is cloned and its names are known: "
+                                   "the `skills` CLI could write over "
+                                   (str/join ", " (map (comp u/tilde first) staying)))
+                     :display (display cfg u tools)})]
+          (when-not (installed? dir u tools)
+            [(install-op cfg pid dir u tools (map second targets))])))
+      (let [kept (for [n names p (written-by-add dir n tools)
+                       :let [why (add-stays-because cfg dir lock p n)]
+                       :when why]
+                   [n p why])
+            skip (set (map first kept))
+            left (vec (remove skip names))
+            u' (assoc u :names left :select left)]
+        (concat
+         (for [[_ p why] kept] (report p why))
+         (when (and (seq left) (not (installed? dir u' tools)))
+           [(install-op cfg pid dir u' tools
+                        (filter u/exists? (mapcat #(written-by-add dir % tools) left)))]))))))
 
 ;; ---------------------------------------------------------------- plan
 

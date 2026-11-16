@@ -60,8 +60,17 @@ skill's own source. A kept copy that the `skills` CLI installed keeps its
 lock entry, since `skills remove` would delete the copy as well — and the CLI
 clears a name from every agent's directory in the repository (`.cursor/skills`
 as much as `.agents/skills`), so a name is not removed while any of those
-must stay. A whole remote pack names its skills only once the CLI has
-fetched it, so its install is not checked this way. A redundant link into a kept
+must stay.
+
+`skills add` replaces a copy outright, so it is held to more: it writes
+only over copies the CLI itself installed (listed in `skills-lock.json`),
+and backs those up first; any other directory under the name stays, whatever
+it holds. A git pack a project takes whole is installed name by name: agentctl
+clones it into `~/.agents/skill-packs` to learn its names and passes each with
+`-s`, leaving out those whose copy stays. Until that clone exists the names are
+unknown, so the pack is installed whole only while nothing in the project could
+be written over; otherwise the plan says so and `apply!` installs it once the
+clone is made. A redundant link into a kept
 copy, such as claude's `.claude/skills/<name>`, is still removed. A plan
 with nothing left to change prints no warnings, so `validate` repeats these
 reports under SKILLS for every agent; they do not fail its exit code.

@@ -1656,4 +1656,70 @@ EDN
     || { cat "$H/validate.txt"; fail "validate does not report the missing source"; }
 )
 
+echo "37. skills add never writes over a project's own copy, a whole pack's or a named skill's"
+(
+  # git_pack NAME SHAPE OWN: the git pack kit (review, audit) for codex and
+  # claude in proj, whole (SHAPE=whole) or by name (SHAPE=named), beside the
+  # project's own review: committed (OWN=committed) or hand-made (OWN=handmade)
+  git_pack() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    G="$H/remote/kit"; P="$H/projects/proj"
+    mkskill "$G/review" review theirs; mkskill "$G/audit" audit theirs
+    git -C "$G" init -q; commit_all "$G"
+    mkdir -p "$P"; touch "$P/README"; git -C "$P" init -q
+    [ "$3" = committed ] && mkskill "$P/.agents/skills/review" review ours
+    commit_all "$P"
+    [ "$3" = handmade ] && mkskill "$P/.agents/skills/review" review ours
+    if [ "$2" = whole ]; then
+      cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git :in "projects/proj" :acli [:codex :claude]}}}
+EDN
+    else
+      cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex :claude]}
+          [kit "audit"] {:in "projects/proj" :acli [:codex :claude]}}}
+EDN
+    fi
+    (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+    ! grep -q -- '-s "\*"' "$H/plan.txt" && ! grep -q -- "-s review" "$H/plan.txt" \
+      || { cat "$H/plan.txt"; fail "$1: skills add is planned over the project's review"; }
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+    ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "$1: an op failed"; }
+    grep -q "body ours" "$P/.agents/skills/review/SKILL.md" || fail "$1: the project's review was written over"
+    [ -d "$P/.agents/skills/audit" ] && [ ! -L "$P/.agents/skills/audit" ] \
+      && grep -q '"audit"' "$P/skills-lock.json" \
+      || fail "$1: audit was not installed by the skills CLI"
+    [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "$1: tracked files changed"; }
+    run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "$1: not converged"; }
+    (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan3.txt" 2>&1
+    grep -q "project copy ~/projects/proj/.agents/skills/review kept" "$H/plan3.txt" \
+      || { cat "$H/plan3.txt"; fail "$1: the kept review is not reported"; }
+  }
+  git_pack whole-committed whole committed
+  # before the clone the names are unknown: the plan says what is at stake
+  grep -q 'not installed until the pack is cloned and its names are known: the `skills` CLI could write over ~/projects/proj/.agents/skills/review' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the whole pack's dry plan does not say why it waits"; }
+  git_pack whole-handmade whole handmade
+  git_pack named-committed named committed
+  git_pack named-handmade named handmade
+  grep -q 'project copy ~/projects/proj/.agents/skills/review kept — the `skills` CLI did not install it' "$H/plan3.txt" \
+    || { cat "$H/plan3.txt"; fail "the hand-made review is not reported as kept"; }
+
+  # a copy the CLI installed from elsewhere is the CLI's to replace, after a backup
+  H=$(fresh_home cli-copy-replaced); export AGENTCTL_HOME="$H"
+  G="$H/remote/kit"; P="$H/projects/proj"
+  mkskill "$G/review" review theirs
+  git -C "$G" init -q; commit_all "$G"
+  mkskill "$P/.agents/skills/review" review older
+  printf '{"version":2,"skills":{"review":{"source":"elsewhere/kit","sourceType":"git"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "cli-copy-replaced: apply! failed"; }
+  grep -q "body theirs" "$P/.agents/skills/review/SKILL.md" || fail "the CLI's own copy was not replaced"
+  grep -rqs "body older" "$H/.config/agentctl/backups" || fail "the replaced copy was not backed up"
+)
+
 echo "all agentctl e2e checks passed"

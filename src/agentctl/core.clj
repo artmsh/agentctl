@@ -176,7 +176,7 @@
   "`--user` keeps what lands outside every project: user-wide files, and the
    packs cloned for them, which belong to no project either."
   [ops {:keys [user]}]
-  (if user (remove #(or (:project %) (:project-path %)) ops) ops))
+  (if user (remove #(or (:project %) (:project-path %) (:for-projects %)) ops) ops))
 
 (defn- project-ids
   "The declared projects one `--project` value selects: a project id as is,
@@ -538,6 +538,7 @@
                             (= :projects (:kind o)) (assoc :kind (dsl-section o)))) tool-ops)
                    tool-ops)]
     (-> (concat (sources/pack-ops cfg)
+                (sources/project-pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
                 ;; a collision report names the copy as well, but says what pi
