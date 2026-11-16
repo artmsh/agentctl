@@ -1852,8 +1852,105 @@ for pair in "dsl projects entity-DSL" "old trust old-format"; do
   [ "$code" = 1 ] && grep -q "^error: -k $2: an $3 config plans nothing as $2" "$UF/host-$1.txt" \
     || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
 done
+echo "41. codex nested tables converge through state.edn on disk and prune what they wrote"
+mkdir -p "$SB/.codex"
+printf 'model = "m-a"\n[tui]\nstatus_line = [\n    "model",\n]\n\n[tui.model_availability_nux]\n"m-a" = 4\n' \
+  > "$SB/.codex/config.toml"
+cat > "$SB/codex.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "dev"
+             :keymap {:chat {:open_presets "alt-t"}}
+             :presets {0 {:input "/model" :label "model picker"} 1 {:input "/status"}}
+             :status-line [:model-with-reasoning :context-used]
+             :permission-profiles {:dev {:extends ":workspace"
+                                         :filesystem {"~/Library/Application Support/Example" "write"}}}}]}
+EDN
+run apply! -f "$SB/codex.edn" --all -t codex -y > "$SB/codex1.txt"
+grep -q '^\[tui.presets.1\]' "$SB/.codex/config.toml" || fail "codex preset not written"
+grep -q 'Application Support/Example" = "write"' "$SB/.codex/config.toml" || fail "codex profile not written"
+set +e
+run apply -f "$SB/codex.edn" --all -t codex > "$SB/codex2.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/codex2.txt"; fail "codex nested settings did not converge after a state.edn round trip"; }
+python3 - "$SB/codex.edn" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+open(p, 'w').write(s.replace(' 1 {:input "/status"}', ''))
+PY
+run apply! -f "$SB/codex.edn" --all -t codex -y > "$SB/codex3.txt"
+grep -q 'tui.presets.1' "$SB/.codex/config.toml" && fail "dropped codex preset slot not pruned"
+set +e
+run apply -f "$SB/codex.edn" --all -t codex > "$SB/codex4.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/codex4.txt"; fail "codex settings did not converge after a prune"; }
+python3 -c 'import sys,tomllib; t=tomllib.load(open(sys.argv[1],"rb")); assert t["tui"]["model_availability_nux"] == {"m-a": 4}, t; assert t["tui"]["status_line"] == ["model-with-reasoning", "context-used"], t' \
+  "$SB/.codex/config.toml" || fail "codex [tui] state or footer wrong"
 
-echo "41. --only statusline/ID: config is its one id, and it is named like -k statusline"
+echo "42. what a config no longer declares is pruned, whatever is left of it"
+PR="$SB/prune-any"
+# pr <home> <args…>: each case gets a home of its own
+pr() { local h="$PR/$1"; shift; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }
+trusted() { grep -q 'trust_level = "trusted"' "$PR/$1/.codex/config.toml" 2>/dev/null; }
+for h in vec empty old switch; do
+  mkdir -p "$PR/$h/proj"
+  printf '{:trust [{:in "%s/proj" :acli [:codex]}]}\n' "$PR/$h" > "$PR/$h/dsl.edn"
+  printf '{:projects {:p {:path "%s/proj" :trusted true :executors #{:codex}}}}\n' "$PR/$h" > "$PR/$h/old.edn"
+  printf '{:mcps []}\n' > "$PR/$h/vec.edn"
+  printf '{}\n' > "$PR/$h/empty.edn"
+done
+# an emptied DSL config, as a section vector or as nothing at all
+for h in vec empty; do
+  pr "$h" apply! -f "$PR/$h/dsl.edn" --all -t codex -y > /dev/null
+  trusted "$h" || fail "setup: DSL trust not written ($h)"
+  pr "$h" apply! -f "$PR/$h/$h.edn" --all -t codex -y > "$PR/$h/prune.txt"
+  trusted "$h" && { cat "$PR/$h/prune.txt"; fail "emptying the DSL config to $h.edn left its trust behind"; }
+  set +e
+  pr "$h" apply -f "$PR/$h/$h.edn" --all -t codex > "$PR/$h/after.txt"; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$PR/$h/after.txt"; fail "$h.edn: the pruned trust is still owned"; }
+done
+# an old-format config prunes none of what it declares
+pr old apply! -f "$PR/old/old.edn" --all -t codex -y > /dev/null
+trusted old || fail "setup: old-format trust not written"
+set +e
+pr old apply -f "$PR/old/old.edn" --all -t codex > "$PR/old/again.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$PR/old/again.txt"; fail "a converged old-format config planned a change"; }
+# nor what a DSL config wrote that it declares the old way
+pr switch apply! -f "$PR/switch/dsl.edn" --all -t codex -y > /dev/null
+pr switch apply! -f "$PR/switch/old.edn" --all -t codex -y > "$PR/switch/old.txt"
+trusted switch || { cat "$PR/switch/old.txt"; fail "rewriting the DSL trust the old way pruned it"; }
+
+echo "43. --debug and AGENTCTL_DEBUG add the stack trace on stderr, nothing on stdout"
+DB="$SB/debug"
+mkdir -p "$DB/dir.edn"
+db() { (cd "$DB" && AGENTCTL_HOME="$DB" run "$@"); }
+for mode in flag env off; do
+  set +e
+  case $mode in
+    flag) db apply -f "$DB/dir.edn" --debug > "$DB/$mode.out" 2> "$DB/$mode.err" ;;
+    env) AGENTCTL_DEBUG=1 db apply -f "$DB/dir.edn" > "$DB/$mode.out" 2> "$DB/$mode.err" ;;
+    off) AGENTCTL_DEBUG=0 db apply -f "$DB/dir.edn" > "$DB/$mode.out" 2> "$DB/$mode.err" ;;
+  esac
+  code=$?
+  set -e
+  [ "$code" = 1 ] && [ "$(wc -l < "$DB/$mode.out")" -eq 1 ] && grep -q '^error: .*Is a directory' "$DB/$mode.out" \
+    || { cat "$DB/$mode.out" "$DB/$mode.err"; fail "$mode: the error line changed"; }
+  if [ "$mode" = off ]; then
+    [ -s "$DB/$mode.err" ] && { cat "$DB/$mode.err"; fail "AGENTCTL_DEBUG=0 printed a trace"; }
+  else
+    grep -q 'FileNotFoundException' "$DB/$mode.err" && grep -q '	at ' "$DB/$mode.err" \
+      || { cat "$DB/$mode.err"; fail "$mode: no stack trace on stderr"; }
+  fi
+done
+# under --json stdout stays the one document
+set +e
+db apply -f "$DB/dir.edn" --json --debug > "$DB/json.out" 2> "$DB/json.err"
+set -e
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$DB/json.out" \
+  || { cat "$DB/json.out"; fail "--debug broke the --json document"; }
+grep -q 'FileNotFoundException' "$DB/json.err" || { cat "$DB/json.err"; fail "--json --debug printed no trace"; }
+
+echo "44. --only statusline/ID: config is its one id, and it is named like -k statusline"
 SO="$SB/statusline-only"
 mkdir -p "$SO"
 so() { (cd "$SO" && AGENTCTL_HOME="$SO" run "$@"); }
@@ -1881,7 +1978,7 @@ set -e
 [ "$code" = 0 ] && grep -q -- '--only statusline/config — nothing declared or owned' "$SO/none.txt" \
   || { cat "$SO/none.txt"; fail "--only statusline/config with nothing declared was silent"; }
 
-echo "42. :statusline :acli derives Claude's statusLine and Pi's extension; a hand-written one wins"
+echo "45. :statusline :acli derives Claude's statusLine and Pi's extension; a hand-written one wins"
 SD="$SB/statusline-derive"
 mkdir -p "$SD/bin" "$SD/renderer/adapters/pi-extension"
 printf 'export default function () {}\n' > "$SD/renderer/adapters/pi-extension/index.ts"

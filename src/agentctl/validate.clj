@@ -375,6 +375,17 @@
    [:kimi kimi/config-file]
    [:kimi kimi/mcp-file]])
 
+(defn check-codex-permissions
+  "What Codex would make of config.toml's permissions after an apply. A
+   plan that would break it is refused, which a drift count alone would
+   report as one pending change."
+  [cfg st]
+  (when (some #{:codex} (config/active-tools cfg))
+    (try
+      (for [[level where message] (codex/permission-findings (common/settings-for cfg :codex) st (:entity-dsl? cfg))]
+        (f level where message))
+      (catch Exception e [(f :error [:executors :codex] (ex-message e))]))))
+
 (defn check-config-secrets
   "agents.edn is the one file agentctl owns outright, so a secret typed straight
    into it is worth naming: the ref forms exist precisely to keep it out."
@@ -466,6 +477,7 @@
                          (check-providers cfg deep?)
                          (check-vault cfg)
                          (check-claude-settings cfg opts)
+                         (check-codex-permissions cfg st)
                          (check-plaintext-secrets cfg)
                          (check-config-secrets cfg)
                          (conflicts (:ops planned))

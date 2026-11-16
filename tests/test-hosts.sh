@@ -16,7 +16,14 @@ export AGENTCTL_HOME="$SB"
 unset DSH_HOME DSH_AGENTS_HOME
 export AGENTCTL_SSH_CMD="$ROOT/tests/ssh-stub"
 mkdir -p "$SB/bin"
-printf '#!/bin/sh\nexit 0\n' > "$SB/bin/codex"; chmod +x "$SB/bin/codex"
+# whether codex reads ~/.agents/skills goes by its version; set CODEX_VERSION
+# to answer another one, or nothing
+cat > "$SB/bin/codex" <<'STUB'
+#!/bin/sh
+[ "${1:-}" = --version ] && printf '%s\n' "${CODEX_VERSION-codex-cli 0.169.0}"
+exit 0
+STUB
+chmod +x "$SB/bin/codex"
 export PATH="$SB/bin:$PATH"
 run() { "$ROOT/agentctl" "$@"; }
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -182,5 +189,171 @@ expect 0 apply -f "$SB/dsl.edn" --host box
 grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "not converged after fetch: $(cat "$SB/out")"
 run apply -f "$SB/dsl.edn" > "$SB/out" 2>&1 || true
 grep -q 'delta' "$SB/out" && fail "host pack leaked into the local plan of a DSL config"
+
+echo "16. -k skills keeps the fetch of a pack its skills come from"
+rm -rf "$SB/.agents/skill-packs/gitpack"
+sed "s|$SB/far2|$SB/far3|" "$SB/dsl.edn" > "$SB/k.edn"
+mkdir -p "$SB/far3"
+expect 2 apply -f "$SB/k.edn" --host box -k skills
+grep -q 'clone' "$SB/out" || fail "-k skills dropped the pack fetch: $(cat "$SB/out")"
+expect 0 apply! -f "$SB/k.edn" --host box -k skills -y
+[ -f "$SB/far3/.codex/skills/delta/SKILL.md" ] || fail "-k skills did not place the fetched pack's skill: $(cat "$SB/out")"
+expect 0 apply -f "$SB/k.edn" --host box -k skills
+grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "-k skills not converged: $(cat "$SB/out")"
+
+# awl reads ~/.agents/skills; codex reads it too from 0.95.0 on, and lists a
+# skill copied into both roots twice. A host of its own, so earlier ownership
+# plans nothing here.
+F="$SB/far5"; P="$SB/pack5"; AG="$F/.agents/skills"; CX="$F/.codex/skills"
+HS="$SB/.config/agentctl/hosts/box2.edn"
+mkdir -p "$F" "$P/alpha" "$P/beta"
+printf -- '---\nname: alpha\ndescription: A.\n---\n' > "$P/alpha/SKILL.md"
+printf -- '---\nname: beta\ndescription: B.\n---\n' > "$P/beta/SKILL.md"
+awl_config() { cat > "$SB/awl.edn" <<EDN
+{:hosts {:box2 {:ssh "box" :os :linux :home "$F"
+                :skill-packs {[:uri "file://$P"] {:acli $1}}}}}
+EDN
+}
+W="-f $SB/awl.edn --host box2"
+converged() { expect 0 apply $W "$@"; grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "not converged: $(cat "$SB/out")"; }
+
+echo "17. codex and awl, where codex reads ~/.agents/skills: one copy, there, replacing hand-made links"
+awl_config '[:codex]'
+expect 0 apply! $W -y
+[ -d "$CX/alpha" ] || fail "fixture: no codex copy"
+mkdir -p "$AG"; chmod 500 "$AG"
+awl_config '[:codex :awl]'
+expect 1 apply! $W -y
+chmod 700 "$AG"
+grep -q 'was not written' "$SB/out" || fail "a move whose write failed still pruned: $(cat "$SB/out")"
+[ -d "$CX/alpha" ] || fail "codex copy pruned though its replacement failed"
+grep -q '\[:codex :skills "alpha"\]' "$HS" || fail "codex copy no longer owned after a failed move"
+for s in alpha beta; do ln -s "$CX/$s" "$AG/$s"; done
+awl_config '[:codex :awl]'
+expect 2 apply $W
+grep -q '2 to add, 0 to change, 2 to remove' "$SB/out" && fail "links counted as absent"
+grep -q '0 to add, 2 to change, 2 to remove' "$SB/out" || fail "move not planned: $(cat "$SB/out")"
+grep -q "not owned by agentctl" "$SB/out" || fail "hand-made link not called out"
+grep -q "placed in $AG/alpha instead" "$SB/out" || fail "codex copy not said to move"
+grep -q "codex reads it there too" "$SB/out" || fail "plan does not say codex reads the shared copy"
+expect 0 apply! $W -y
+for s in alpha beta; do
+  [ -d "$AG/$s" ] && [ ! -L "$AG/$s" ] || fail "$s not copied into ~/.agents/skills"
+  [ -e "$CX/$s" ] && fail "$s left in ~/.codex/skills, where codex lists it a second time"
+done
+ls "$F/.config/agentctl/backups/"*/_.agents_skills_alpha >/dev/null || fail "replaced link not backed up"
+ls "$F/.config/agentctl/backups/"*/_.codex_skills_alpha >/dev/null || fail "moved codex copy not backed up"
+grep -q '\[:awl :skills "alpha"\]' "$HS" || fail "~/.agents/skills ownership not recorded: $(cat "$HS")"
+grep -q '\[:codex :skills "alpha"\]' "$HS" && fail "codex still owns the copy that moved"
+converged
+expect 0 validate $W
+grep -q 'host matches' "$SB/out" || fail "validate after converging: $(cat "$SB/out")"
+expect 0 state --host box2
+grep -q 'awl .*skills .*alpha' "$SB/out" || fail "state --host does not list awl's: $(cat "$SB/out")"
+
+echo "18. a skill added to the pack is placed on the next apply"
+mkdir -p "$P/gamma"; printf -- '---\nname: gamma\ndescription: G.\n---\n' > "$P/gamma/SKILL.md"
+expect 2 apply $W
+grep -q '1 to add, 0 to change, 0 to remove' "$SB/out" || fail "new pack skill not planned: $(cat "$SB/out")"
+expect 0 apply! $W -y
+[ -f "$AG/gamma/SKILL.md" ] || fail "new pack skill not placed"
+converged
+
+echo "19. a codex older than 0.95 does not read ~/.agents/skills: it gets a copy of its own"
+CODEX_VERSION='codex-cli 0.94.0' expect 2 apply $W
+grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "old codex not given copies: $(cat "$SB/out")"
+CODEX_VERSION='codex-cli 0.94.0' expect 0 apply! $W -y
+for s in alpha beta gamma; do [ -d "$CX/$s" ] && [ -d "$AG/$s" ] || fail "$s not in both roots"; done
+CODEX_VERSION='codex-cli 0.94.0' converged
+echo "    and loses it once codex reads the shared root"
+expect 2 apply $W
+grep -q '0 to add, 0 to change, 3 to remove' "$SB/out" || fail "codex copies not dropped: $(cat "$SB/out")"
+expect 0 apply! $W -y
+[ -e "$CX/alpha" ] && fail "codex copy kept beside the shared one"
+converged
+
+echo "20. a codex that gives no version gets a copy of its own, and a warning"
+CODEX_VERSION='' expect 2 apply $W
+grep -q 'gave no version' "$SB/out" || fail "unknown codex version not reported: $(cat "$SB/out")"
+grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "unknown codex not given copies: $(cat "$SB/out")"
+
+echo "21. a hand-made copy codex reads beside agentctl's is reported, never touched"
+mkdir -p "$CX/beta"; printf 'mine\n' > "$CX/beta/SKILL.md"
+expect 0 apply $W
+grep -q 'lists beta twice' "$SB/out" || fail "duplicate in codex not reported: $(cat "$SB/out")"
+expect 0 apply! $W -y
+grep -q mine "$CX/beta/SKILL.md" || fail "hand-made copy touched"
+rm -rf "$CX/beta"
+
+echo "22. -t awl is a host's to select, -t codex selects what codex reads"
+expect 0 apply $W -t awl
+expect 0 apply $W -t codex
+expect 1 apply -f "$SB/awl.edn" -t awl
+grep -q 'reads only :skills' "$SB/out" || fail "-t awl accepted for this machine"
+
+echo "23. awl alone keeps the copy; dropping the declaration prunes it into backups"
+awl_config '[:awl]'
+converged
+cat > "$SB/awl.edn" <<EDN
+{:hosts {:box2 {:ssh "box" :os :linux :home "$F"}}}
+EDN
+expect 2 apply $W
+grep -q '0 to add, 0 to change, 3 to remove' "$SB/out" || fail "dropped declaration not pruned: $(cat "$SB/out")"
+expect 0 apply! $W -y
+for s in alpha beta gamma; do [ -e "$AG/$s" ] && fail "$s not pruned"; done
+ls "$F/.config/agentctl/backups/"*/_.agents_skills_gamma >/dev/null || fail "pruned skill not backed up"
+grep -q ':awl' "$HS" && fail "pruned skills still owned: $(cat "$HS")"
+converged
+
+echo "24. a git pack only awl reads is fetched here, and placed in the same run"
+rm -rf "$SB/.agents/skill-packs/gitpack"
+cat > "$SB/awl.edn" <<EDN
+{:hosts {:box2 {:ssh "box" :os :linux :home "$F"
+                :skill-packs {[:uri "file://$SB/gitpack"] {:type :git :acli [:awl]}}}}}
+EDN
+expect 2 apply $W -k skills
+grep -q 'clone' "$SB/out" || fail "awl-only git pack not fetched: $(cat "$SB/out")"
+expect 0 apply! $W -y
+[ -f "$AG/delta/SKILL.md" ] || fail "awl-only git pack not placed: $(cat "$SB/out")"
+converged
+echo "    and so is one whose single skill awl reads"
+cat > "$SB/awl.edn" <<EDN
+{:hosts {:box2 {:ssh "box" :os :linux :home "$F"
+                :skill-packs {[:uri "file://$SB/gitpack"] {:alias gp :type :git :in :none}}
+                :skills {[gp "delta"] {:acli [:awl]}}}}}
+EDN
+expect 2 apply $W
+grep -q 'clone' "$SB/out" || fail "pack of an awl-only skill not fetched: $(cat "$SB/out")"
+expect 0 apply! $W -y
+converged
+
+echo "25. apply! --host --json -y prints one document with what it applied"
+JH="$SB/json-host"; JFAR="$JH/far"
+mkdir -p "$JH/pack/one" "$JFAR"
+printf -- '---\nname: one\ndescription: O.\n---\n' > "$JH/pack/one/SKILL.md"
+cat > "$JH/agents.edn" <<EDN
+{:hosts {:jbox {:ssh "jbox" :os :linux :home "$JFAR"
+                :skill-packs {[:uri "file://$JH/pack"] {:acli [:codex]}}}}}
+EDN
+jh_json() { # jh_json <out>: apply! --json -y on jbox exits 0
+  set +e
+  AGENTCTL_HOME="$JH" run apply! -f "$JH/agents.edn" --host jbox --json -y > "$1" 2> "$1.err"; local code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$1" "$1.err" >&2; fail "apply! --host --json -y exited $code"; }
+}
+jh_json "$JH/first.json"
+python3 - "$JH/first.json" <<'PY' || { cat "$JH/first.json" >&2; fail "apply! --host --json did not report what it applied"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["host"] == "jbox", d
+assert any(o["kind"] == "skills" and o["id"] == "one" and o["action"] == "create" for o in d["ops"]), d
+assert d["applied"]["failed"] == [], d
+assert any(o["tool"] == "codex" and o["kind"] == "skills" and o["id"] == "one" for o in d["applied"]["done"]), d
+assert d["backups"] and d["summary"] and d["findings"] == [] and d["warnings"] == [], d
+PY
+[ -f "$JFAR/.codex/skills/one/SKILL.md" ] || fail "apply! --host --json -y did not copy the skill"
+jh_json "$JH/again.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["applied"] == {"done": [], "failed": []} else 1)' "$JH/again.json" \
+  || { cat "$JH/again.json" >&2; fail "a converged apply! --host --json reported something applied"; }
 
 echo "hosts e2e OK"

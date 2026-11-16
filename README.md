@@ -43,6 +43,10 @@ segment.
   agent's status line, and that renderer's own `--check` validates it before anything is written.
 - TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
   each CLI's own subcommand, so keys a CLI writes for itself survive.
+- Codex's nested tables are declarable too: keymap, presets and the native footer
+  ([Codex TUI](docs/GUIDE.md#codex-tui)), and `[permissions.<name>]` profiles
+  ([permission profiles](docs/GUIDE.md#codex-permission-profiles)). Hooks are declarable for
+  Claude Code and Codex; vendor hooks in the same file are left alone ([hooks](docs/GUIDE.md#hooks)).
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
   values and every MCP header; review its output before sharing a config.
@@ -67,7 +71,9 @@ outside agentctl's eight.
 
 ## Install
 
-Requires [Babashka](https://babashka.org/) (`bb`) and git. Optional: `bw` for `!bw://` secret
+Requires [Babashka](https://babashka.org/) (`bb`) and git, plus python3 3.11+ (stdlib
+`tomllib`) to read and check TOML configs such as Codex's: agentctl tries `python3.15` down to
+`python3.11`, then `python3`, or uses `AGENTCTL_PYTHON`. Optional: `bw` for `!bw://` secret
 references, `gh` for `[:gh …]` skill packs, and `npx` for skills placed in a repository (run
 through the [`skills`](https://skills.sh) CLI).
 
@@ -139,7 +145,7 @@ behind a per-run token in the URL it prints, and Apply is its only control that 
 For one person running several coding-agent CLIs who wants their settings, MCP servers, skills,
 memory and providers in one reviewed file. Not for agent CLIs other than the eight above (an
 unknown tool is a config error; see [Comparison](#comparison)), or for remote hosts beyond
-codex's user-wide skills, where other kinds are reported, not written. One author, no tagged
+codex's and awl's user-wide skills, where other kinds are reported, not written. One author, no tagged
 releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describes.
 
 ## Limitations
@@ -174,9 +180,9 @@ regenerates the screenshot.
 
 ## Documentation
 
-- [docs/GUIDE.md](docs/GUIDE.md): working-directory scope, GUI, MCP scope, Kimi, DeepSeek
-  Harness, hooks, extensions, shared status line, Claude plugins, project skills, remote
-  hosts, reading a plan.
+- [docs/GUIDE.md](docs/GUIDE.md): working-directory scope, Codex TUI and permission profiles,
+  GUI, MCP scope, Kimi, DeepSeek Harness, hooks, extensions, shared status line, Claude
+  plugins, project skills, remote hosts, reading a plan.
 - [docs/AGENTCTL.md](docs/AGENTCTL.md): design rules and every DSL key, including the legacy map
   form that [examples/agents.edn](examples/agents.edn) uses.
 - [docs/SCOPE-DSL.md](docs/SCOPE-DSL.md): the entity-first DSL and its `:in` selector.

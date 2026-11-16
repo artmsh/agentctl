@@ -292,12 +292,13 @@ underscores; keyword and string keys both work. Codex validates the supported
 actions and shortcuts for the installed version. See the
 [official keymap reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-Codex CLI 0.165.0 rejects `open_model` in the `global` and `chat` contexts
-under strict configuration checking. Use `/model` to open the selector and
-`/keymap` to inspect the actions the installed release exposes. An accepted
-`codex mcp list --json` invocation is no longer proof that an action exists:
-unknown fields are ignored unless strict checking is enabled. Re-probe in a
-scratch `CODEX_HOME` without changing the real configuration:
+Codex CLI 0.169.0 has no keymap action that opens the model picker
+(`open_model` is rejected in `global` and `chat` under strict configuration
+checking); bind `chat.open_presets` and declare a `/model` preset instead (see
+`:presets` below). `/keymap` shows the actions the installed release exposes.
+An accepted `codex mcp list --json` invocation is no longer proof that an
+action exists: unknown fields are ignored unless strict checking is enabled.
+Re-probe in a scratch `CODEX_HOME` without changing the real configuration:
 
 ```sh
 probe_dir=$(mktemp -d)
@@ -313,6 +314,106 @@ Only declared actions are updated. Undeclared bindings, other TUI settings,
 comments, and Codex-owned state are preserved. Omitting an action (or using an
 empty `:keymap`) leaves its existing binding alone. Import includes the current
 keymap, and the control panel offers it as an EDN field.
+
+### Codex `:presets`
+
+Saved prompts for the Codex presets browser, keyed by slot:
+
+```edn
+{:executors
+ {:codex {:keymap {:chat {:open_presets "alt-t"}}
+          :presets {0 {:input "/model" :label "model picker"}
+                    1 {:input "/model m-b --reasoning=low" :label "fast"}}}}}
+```
+
+Each slot writes its own `[tui.presets.<n>]` table in `~/.codex/config.toml`.
+`:input` is required and is submitted exactly as typed, so a slash command with
+arguments works; `:label` names the entry in the browser. `chat.open_presets`
+opens the browser, and a digit then runs that slot: with the declaration above,
+alt-t then 0 opens the model picker. `validate` rejects a slot outside 0-9, a
+missing or non-string `:input`, and any field other than `:input` and `:label`
+(codex-cli 0.169.0 accepts only those two and ignores the rest silently).
+
+The write is surgery on the slot's table: the rest of `[tui]`, including the
+counters Codex keeps there (`[tui.model_availability_nux]`), is never replaced.
+A declared slot is owned whole, not key by key (`codex/whole-table?`). The table
+is made to hold exactly the declared fields, so a preset Codex saved in that
+slot is replaced, label included, and the plan shows the label going. Under the
+entity DSL, dropping the slot removes the whole table. Owning only `input`
+would leave `[tui.presets.N] label = …` behind, and Codex refuses that config
+(`missing field input`). A slot saved from Codex itself (`n · new` in the
+browser) that the config never declared is not agentctl's and stays. Import reads presets back as `{0 {:input …}}`.
+
+### Codex `:status-line`
+
+The native footer, `[tui] status_line`, as an item list:
+
+```edn
+{:executors
+ {:codex {:status-line [:model-with-reasoning :five-hour-limit :weekly-limit
+                        :used-tokens :context-used :current-dir :git-branch]}}}
+```
+
+Only that key of `[tui]` is set; Codex keeps its own state in the same table.
+A multi-line array Codex wrote is replaced whole. Items are keywords or strings
+in Codex's spelling. codex-cli 0.169.0 accepts any string at load time and drops
+an unknown one at startup with "Ignored invalid status line items", so
+`validate` checks each item against what that version renders (the list its
+`/statusline` picker shows, plus the older spellings `project` and `model-name`)
+and names the accepted ones on error. A map value is Claude Code's
+command-style status line; from a unified settings row it reaches codex as an
+unsupported setting, not an error. Import reads the list back as keywords.
+
+### Codex `:permission-profiles`
+
+`[permissions.<name>]` profiles, beside `:sandbox` (which writes
+`default_permissions`, the active one):
+
+```edn
+{:executors
+ {:codex {:sandbox "local-dev"
+          :permission-profiles
+          {:local-dev {:extends ":workspace"
+                       :filesystem {"~/Library/Application Support/Example" "write"
+                                    ":project_roots" {"." "write"}}
+                       :network {:enabled true :domains {"localhost" "allow"}}}}}}}
+```
+
+A profile is plain data in Codex's spelling (codex-cli 0.169.0):
+`description`, `extends` (`:read-only`, `:workspace` or another profile's
+name), `workspace_roots` (root → boolean), `filesystem` (path → `read` / `write`
+/ `none` / `deny`, or a map of subpaths; paths absolute, `~/…` or `:special`;
+`glob_scan_max_depth`) and `network` (`enabled`, `domains` host → `allow` /
+`deny`, and the rest of Codex's network keys, passed through). `validate`
+rejects anything else in a profile, a non-string or unknown built-in
+`extends`, a relative filesystem path or unknown mode, and a non-boolean
+`enabled`; Codex itself ignores an unknown field silently.
+
+`plan/toml-tree-ops` turns the nested map into one `toml-set-op` per table,
+each owning only its declared keys. A nested map becomes a sub-table, unless
+`config.toml` already holds that key as an inline table
+(`domains = { localhost = "allow" }`). Then the declared entries are merged
+into it where it stands, the hand-written ones are kept, and a write never
+defines a table twice. An inline table a prune empties goes with its key. A
+table defined by dotted keys (`network.domains = …`) is not recognised, and
+the write is refused as invalid TOML rather than redefining it. Ownership is key
+by key: under the entity DSL, removing a declared rule removes that key, a
+removed profile loses every key agentctl wrote and the tables they leave
+empty, and a rule added by hand is never touched.
+
+Codex 0.169.0 will not start with `[permissions]` tables and no
+`default_permissions`. It also refuses a default that names no profile the file
+holds, or a built-in other than `:read-only`, `:workspace` and
+`:danger-full-access`. `codex/permission-findings` checks both rules against
+`config.toml` as it would be after the apply: the declared profiles, plus those
+on disk that agentctl will not prune (everything under the legacy
+`:executors` form, which never prunes). The default is `:sandbox` if declared,
+otherwise what is on disk, unless agentctl wrote it and will prune it. A
+violation is an error in `validate` and refuses `apply` before any op, with the
+declared, kept and built-in names listed. It is checked only when agentctl
+touches permissions, so a file broken by hand does not block an unrelated
+setting. Import reads profiles back with field
+names as keywords and paths and hosts as strings.
 
 ### `:permissions`
 
@@ -336,9 +437,10 @@ and are never rewritten.
 
 ### `:hooks`
 
-Claude Code only. In the entity DSL a hook is a `:hooks` row placed like any other entity:
-`:in :all` writes `~/.claude/settings.json`, and a project selector writes that
-repository's `.claude/settings.json`:
+Claude Code and Codex (Codex: see below). In the entity DSL a hook is a `:hooks`
+row placed like any other entity: `:in :all` writes `~/.claude/settings.json`,
+and a project selector writes that repository's `.claude/settings.json`. A row
+reaches Codex only when its `:acli` names `:codex`:
 
 ```clojure
 :hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
@@ -347,8 +449,9 @@ repository's `.claude/settings.json`:
          :in "projects/sample"}]
 ```
 
-The old format declares user-scope hooks under `:executors :claude :hooks`; a
-hook under a project's `:executors :claude` there is reported, not written:
+The old format declares user-scope hooks under `:executors :claude :hooks` (or
+`:executors :codex :hooks`); a hook under a project's `:executors :claude` there
+is reported, not written:
 
 ```clojure
 :executors
@@ -391,6 +494,52 @@ it is what the ownership manifest keys on, not `:event`. An entry missing one
 gets a positional placeholder (`:SessionStart-0`) so two id-less hooks can't
 collide onto the same key, and `structural-findings` reports the missing
 `:id` as an error rather than planning against a name nobody chose.
+
+#### Codex hooks
+
+The same shape under `:executors :codex :hooks`, written to
+`~/.codex/hooks.json`, whose layout matches Claude's (`hooks[event][]` of
+`{:matcher … :hooks [{:type "command" …}]}`). In the entity DSL a `:hooks` row
+reaches Codex only when its `:acli` names `:codex`; a row without `:acli`, with
+`:acli :all`, or a `:hooks` key in a `:settings` row that does not name `:codex`
+stays Claude's, because events and tool-name matchers differ between the two. Codex
+hooks are user-wide only: a row placed in a project is reported, not written.
+
+```clojure
+{:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"
+          :timeout 10 :status-message "noting" :acli [:codex] :in :all}]}
+```
+
+codex-cli 0.169.0 dispatches `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
+`PreModelRequest`, `PostModelRequest`, `PreToolUse`, `PermissionRequest`,
+`PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`,
+`Stop` and `Interrupt`, and loads any other event key without a word, so
+`validate` rejects an unknown event. A command hook takes `:command`
+(required), `:timeout` (seconds), `:async`, `:status-message`,
+`:command-windows` and `:additional-context-limit`; any other field is an
+error. Ownership is Claude's: each id owns one element, found by value, and
+vendor hooks in the file (installers write there) are never touched or pruned.
+The comparison ignores keys whose value is null, because installers write
+`"matcher": null` where agentctl omits the key. Declaring a vendor's exact hook
+therefore adopts that group instead of appending a duplicate, and dropping the
+declaration later removes it. The plan reports a converged hook as unchanged
+(`--show-noop`). A hooks file that does not parse (one trailing comma is
+enough) is never rewritten. The plan says so, `apply!` fails that op, and the
+state keeps the element it last wrote. This holds for Claude's settings.json
+hooks as well.
+
+Codex will not run a hook until it is reviewed: it keeps a trust hash per hook
+in `config.toml`, under `[hooks.state."<hooks.json path>:<event>:<group>:<index>"]`.
+agentctl never writes those entries and never pre-trusts. Every new or changed
+command needs review in Codex (it asks at startup, or `/hooks`). The keys are
+positional, so agentctl keeps positions where it can: a new hook is appended
+after everything already there, and a changed one is rewritten at its own
+index, so only that hook needs review. Removing a hook moves every later group
+of the same event up one index, and Codex then asks to review those again.
+
+Import rebuilds a Codex hook only when agentctl's state records it and it is
+still in `hooks.json`; the rest are a vendor's or hand-made, and import says
+how many it left out. Declaring one would make it agentctl's to prune.
 
 ### Project location (legacy)
 
@@ -714,7 +863,7 @@ changing built-in models in place.
 {:hosts {:win {:ssh "user@example.com" ; ssh destination; options belong in ~/.ssh/config
                :os :windows           ; :windows, :linux or :macos
                :home "C:\\scratch"     ; optional: pins the remote home, ignoring CODEX_HOME
-               :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex]}}
+               :skill-packs {[:uri "file://$HOME/packs/x"] {:acli [:codex :awl]}}
                :skills {[:gh "owner/skill"] {:acli [:codex]}}}}}
 ```
 
@@ -725,7 +874,18 @@ host ones never reach a local plan.
 
 A host has no projects: `:in` is `:all` (or `:none` on a pack that a `[pack "skill"]`
 key names), and anything else is a config error, as is a non-keyed section. Host
-keys other than the ones above, and any tool but codex, are reported as not provisioned.
+keys other than the ones above, and any tool but codex and awl, are reported as not
+provisioned.
+
+A host has no `agents.edn` for awl to read, so `:awl` there places copies, in
+`~/.agents/skills/<name>`. Codex keeps `$CODEX_HOME/skills`, and from 0.95.0 on also
+reads `~/.agents/skills`, listing a skill once per copy. A skill selected by both
+tools goes into `~/.agents/skills` alone when the host's `codex --version` is 0.95.0
+or later. Otherwise it goes into both, with a warning when the version cannot be
+read. Codex has to be on the host's `PATH` to be provisioned. awl is not looked for.
+Ownership in the host's state file is per directory: `codex` for `$CODEX_HOME/skills`,
+`awl` for `~/.agents/skills`. A skill whose placement changes is copied to its new
+directory and pruned from the old one in the same run, writes first.
 
 The transport is one generated script per operation, sent on stdin. Nothing is spliced
 into the ssh command line, because Windows OpenSSH's `DefaultShell` may be cmd, PowerShell
@@ -828,6 +988,8 @@ masked, and so is any old env or header value a change replaces or removes.
 -y, --yes          apply!: skip the confirmation prompt
     --port N       gui: listen on this port (default: any free one)
     --no-open      gui: do not open a browser
+    --debug        on an error, also print its stack trace to stderr (so does
+                   AGENTCTL_DEBUG=1); stdout keeps the one error line or document
 ```
 
 ### Reading a plan
@@ -868,6 +1030,13 @@ still says only whether anything would change: 0.
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the e2e test provisions a throwaway
 home.
+
+TOML configs (Codex, Kimi) are read and checked by python's `tomllib`, so they
+need python3 3.11+. agentctl uses `AGENTCTL_PYTHON` when set, with no fallback,
+and otherwise the first of `python3.15` … `python3.11`, `python3` on `PATH`
+that has `tomllib`. With none, a run that has to read or write one of those
+files stops before its first op. Reading the file as empty instead would plan
+what exists as new, and apply would never converge.
 
 ### gui
 
