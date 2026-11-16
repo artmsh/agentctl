@@ -201,18 +201,17 @@
   (let [declared (:hooks (common/settings-for cfg tool))
         managed (into #{} (map keyword) (state/managed-ids st tool :hooks))]
     (concat
-     (for [[id decl] declared
-           :let [path (hook-path decl)
-                 value (hook-group decl)
-                 old (:value (state/entry st tool :hooks id))
-                 op (plan/json-array-merge-op
-                     {:tool tool :kind :hooks :id id
-                      :file settings-file :path path :old old :value value
-                      :report-converged? true
-                      :summary (str "settings.json hooks." (name (last path))
-                                    (when-let [m (:matcher decl)] (str " [" m "]")))})]
-           :when op]
-       op)
+     (mapcat (fn [[id decl]]
+               (let [path (hook-path decl)
+                     entry (state/entry st tool :hooks id)]
+                 (plan/json-array-place-ops
+                  {:tool tool :kind :hooks :id id
+                   :file settings-file :path path :old (:value entry) :old-path (:path entry)
+                   :value (hook-group decl)
+                   :report-converged? true
+                   :summary (str "settings.json hooks." (name (last path))
+                                 (when-let [m (:matcher decl)] (str " [" m "]")))})))
+             declared)
      (for [id managed
            :when (not (contains? declared id))
            :let [entry (state/entry st tool :hooks id)

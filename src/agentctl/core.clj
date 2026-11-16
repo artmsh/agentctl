@@ -308,16 +308,18 @@
   (let [desired (into {} (for [[pid p] (:projects cfg) [id h] (get-in p [:tools :claude :hooks])]
                            [(keyword (name pid) (name id)) {:project pid :project-path (:path p) :decl h}]))]
     (concat
-     (keep (fn [[id {:keys [project project-path decl]}]]
-             (when-let [o (plan/json-array-merge-op
-                          {:tool :claude :kind :hooks :id id :project project
-                           :file (str project-path "/.claude/settings.json")
-                           :path [:hooks (keyword (u/kw->str (:event decl)))]
-                           :old (:value (state/entry st :claude :hooks id)) :value (claude/hook-group decl)
-                           ;; as user-scope hooks do: under --show-noop a
-                           ;; converged hook is the confirmation a change landed
-                           :report-converged? true})]
-               (assoc o :project-path project-path))) desired)
+     (mapcat (fn [[id {:keys [project project-path decl]}]]
+               (let [entry (state/entry st :claude :hooks id)]
+                 (map #(assoc % :project-path project-path)
+                      (plan/json-array-place-ops
+                       {:tool :claude :kind :hooks :id id :project project
+                        :file (str project-path "/.claude/settings.json")
+                        :path [:hooks (keyword (u/kw->str (:event decl)))]
+                        :old (:value entry) :old-path (:path entry) :value (claude/hook-group decl)
+                        ;; as user-scope hooks do: under --show-noop a
+                        ;; converged hook is the confirmation a change landed
+                        :report-converged? true}))))
+             desired)
      (keep (fn [[[t k sid] data]]
              (let [id (keyword sid)]
                (when (and (= t :claude) (= k :hooks) (:project-path data) (not (contains? desired id)))

@@ -240,4 +240,20 @@ c=$(code_of run apply! -f "$SB/h.edn" --all -t codex -y)
 grep -q 'no default_permissions' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the refusal does not name the finding"; }
 cmp -s "$CONF" "$SB/before.toml" || fail "config.toml changed on a refused run"
 
+echo "10. a hook whose :event changes moves: the old element goes in the same apply!"
+rm -f "$HOOKS"
+printf 'model = "m-a"\n' > "$CONF"
+for ev in Stop SessionStart; do
+  cat > "$SB/i.edn" <<EDN
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+ :hooks [{:id :note :event :$ev :command "note" :acli [:codex] :in :all}]}
+EDN
+  c=$(code_of run apply! -f "$SB/i.edn" --all -t codex -y)
+  [ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! ($ev) exited $c"; }
+done
+c=$(code_of run apply -f "$SB/i.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "a moved codex hook does not converge ($c)"; }
+python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["hooks"]; assert not h.get("Stop"), h; assert len(h["SessionStart"]) == 1, h' "$HOOKS" \
+  || { cat "$HOOKS"; fail "a moved codex hook left its old element"; }
+
 echo "all codex e2e checks passed"

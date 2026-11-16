@@ -475,7 +475,9 @@ similar tools inject their own entries directly. An array carries no keys, so
 agentctl locates *its* element by value, not by index or position, and never
 touches an entry it did not write: declaring a hook here never disturbs
 what another tool put in the same array, and dropping one from agents.edn
-prunes only that element. Declare only hooks you actually authored; a
+prunes only that element. Changing a hook's `:event` moves it: the same
+apply removes the element from the old event's array and adds it to the new
+one, in Claude's `settings.json` and Codex's `hooks.json` alike. Declare only hooks you actually authored; a
 third party's own hook does not belong in agents.edn and reproducing it
 here would fight that tool's own writes to the file.
 

@@ -783,6 +783,22 @@
                           arr' (vec (remove #(same-element? % old) arr))]
                       (u/write-json! file (assoc-in data path arr'))))})))))
 
+(defn json-array-place-ops
+  "The ops that keep one caller-owned element in the array at `path`, given
+   where it was last written (`old-path`, from the state manifest). An
+   element whose array changed — a hook whose `:event` changed — is removed
+   from the old array and added to the new one in the same apply;
+   `json-array-merge-op` alone looks for `old` only at `path`, so it would
+   add the new element and leave the old one behind, owned by nobody."
+  [{:keys [path old old-path] :as args}]
+  (let [moved? (and (some? old) (seq old-path)
+                    (not= (mapv u/kw->str old-path) (mapv u/kw->str path)))]
+    (if moved?
+      (keep identity [(json-array-unset-op (assoc args :path (vec old-path)
+                                                  :summary (str "moved to " (str/join "." (map u/kw->str path)))))
+                      (json-array-merge-op (dissoc args :old))])
+      (keep identity [(json-array-merge-op args)]))))
+
 (defn yaml-set-op
   [{:keys [tool kind id file path value summary risk project]}]
   (let [current (u/read-yaml file)
