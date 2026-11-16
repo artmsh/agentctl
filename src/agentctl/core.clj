@@ -232,10 +232,10 @@
 (def project-skill-dirs
   {:claude claude/project-skills-dir :codex codex/project-skills-dir
    :antigravity antigravity/project-skills-dir :kimi kimi/project-skills-dir
-   :dsh dsh/project-skills-dir})
+   :dsh dsh/project-skills-dir :pi pi/project-skills-dir})
 
 (defn- share-project-skill-links
-  "Codex, antigravity, kimi and the DeepSeek Harness read one
+  "Codex, antigravity, kimi, pi and the DeepSeek Harness read one
    `<repo>/.agents/skills`. A link any of them wants is planned once, and
    never removed on behalf of another."
   [cfg ops]
@@ -376,7 +376,8 @@
         dups (skills-cli/global-duplicate-ops cfg tool-cfg selected
                                               {:claude claude/skills-dir :codex codex/skills-dir
                                                :antigravity antigravity/skills-dir
-                                               :kimi kimi/skills-dir :dsh dsh/skills-dir})
+                                               :kimi kimi/skills-dir :dsh dsh/skills-dir
+                                               :pi pi/skills-dir})
         tool-ops (if (:entity-dsl? cfg)
                    (map (fn [o]
                           (cond-> o

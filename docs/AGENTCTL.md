@@ -53,7 +53,7 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` | `$DSH_HOME/skills` |
 | `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` | `$DSH_HOME/AGENTS.md` |
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json`; project `.agents/skills` from `:skills` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
@@ -501,8 +501,10 @@ A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 what the clone brought — one run, not two.
 
 For current entity-first declarations, a repository placement uses the skills
-CLI. Claude reads `<project>/.claude/skills`, while Codex and Antigravity
-share `<project>/.agents/skills`. The legacy project registry is kept for
+CLI. Claude reads `<project>/.claude/skills`, while Codex, Antigravity, Kimi,
+Pi and the DeepSeek Harness share `<project>/.agents/skills`. Pi reads it only
+in a project it trusts; see [Pi](GUIDE.md#pi) for how it settles a skill name
+found both there and user-wide. The legacy project registry is kept for
 existing files; see [`SCOPE-DSL.md`](SCOPE-DSL.md) for current placement rules.
 
 ### MCP shorthand
@@ -851,6 +853,11 @@ otherwise hand-curated) is a `warn` and never fails the exit code.
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers
 only in part, is `unknown`, and its drift is not reported as clean.
+
+`SKILLS` also repeats the plan's reports that hold once it has converged: a
+project copy kept beside a user-wide skill and why, one pi loads in place of a
+user-wide skill of the same name, and skills placed in a project pi does not
+trust. They are warnings and never fail the exit code.
 
 ## Import is lossy w.r.t. sugar
 

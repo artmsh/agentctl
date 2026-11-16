@@ -140,8 +140,14 @@
                                :summary (str "trust " (u/tilde (:path proj)))})))
         (:projects cfg)))
 
+(defn- user-skills
+  "Pi's user-wide skills, with any `:per-tool :path` applied. A skill a
+   project named lives in that project and is installed by `skills-cli`."
+  [cfg]
+  (sources/for-tool cfg (into {} (filter (fn [[_ s]] (= :global (:scope s)))) (sources/all-skills cfg)) tool))
+
 (defn skill-ops [cfg st]
-  (let [desired (sources/for-tool cfg (sources/all-skills cfg) tool)
+  (let [desired (user-skills cfg)
         managed (into #{} (map keyword) (state/managed-ids st tool :skills))]
     (concat
      (keep (fn [[id s]]
@@ -149,11 +155,120 @@
                (plan/link-op {:tool tool :kind :skills :id id :src (:source s)
                               :dest (str skills-dir "/" (name id)) :mode (:mode s)})))
            desired)
+     ;; a namespaced id is a project's skill and is not ours to remove from here
      (keep (fn [id]
-             (when-not (contains? desired id)
+             (when (and (nil? (namespace id)) (not (contains? desired id)))
                (plan/unlink-op {:tool tool :kind :skills :id id
                                 :dest (str skills-dir "/" (name id))})))
            managed))))
+
+;; ---------------------------------------------------------------- project skills
+
+(defn project-skills-dir
+  "Where a project's skills go for pi: the shared `.agents/skills`, which pi
+   reads and the `skills` CLI's `pi` agent fills. Pi's own `.pi/skills` is
+   read as well, and checked for collisions, but agentctl puts nothing there."
+  [proj] (str (:path proj) "/.agents/skills"))
+
+(defn own-project-skills-dir [proj] (str (:path proj) "/.pi/skills"))
+
+(defn- trust-decision
+  "The nearest decision trust.json holds for `dir` or a directory above it,
+   as a `[path trusted?]` entry — how pi itself reads the file."
+  [dir]
+  (let [;; keys are paths; compare them resolved, so /var and /private/var agree
+        decisions (into {} (for [[k v] (u/read-json trust-file) :when (boolean? v)
+                                 :let [p (subs (str k) 1)]]
+                             [(or (u/real-path p) p) v]))]
+    ;; `some` skips a false value, and a nearer false is a decision too
+    (first (keep #(find decisions %)
+                 (take-while some? (iterate #(some-> (fs/parent %) str)
+                                            (or (u/real-path dir) (u/abs-path dir))))))))
+
+(defn trusted?
+  "Does pi trust the project? It discovers project skills only then. A
+   decision this config makes is the one the run writes, so it counts first."
+  [proj]
+  (true? (if (some? (:trusted proj)) (:trusted proj) (some-> (trust-decision (:path proj)) val))))
+
+(defn- repo-root [dir]
+  (some #(when (u/exists? (str % "/.git")) %)
+        (take-while some? (iterate #(some-> (fs/parent %) str) dir))))
+
+(defn discovery-dirs
+  "Where pi finds a project's skills, in its order: `.pi/skills`, then
+   `.agents/skills` in the project and each directory above it up to the
+   repository root (the filesystem root outside one) — never the user's own
+   `~/.agents/skills`, which it reads as a user directory."
+  [proj]
+  (let [p (u/real-path (:path proj))
+        stop (repo-root p)
+        user (u/real-path (str u/home "/.agents/skills"))
+        ups (take-while some? (iterate #(when (and (not= % stop) (fs/parent %)) (str (fs/parent %))) p))]
+    (cons (str p "/.pi/skills")
+          (remove #(= (u/real-path %) user) (map #(str % "/.agents/skills") ups)))))
+
+(defn- skills-in [dir]
+  (when (fs/directory? dir)
+    (sort (for [c (map str (fs/list-dir dir)) :when (u/resolves? (str c "/SKILL.md"))] c))))
+
+(defn- md [dir] (u/real-path (str dir "/SKILL.md")))
+
+(defn collision-ops
+  "Pi keys skills on their frontmatter name, keeps the first one it finds —
+   a trusted project's before the user's, `~/.pi/agent/skills` before
+   `~/.agents/skills` — and warns at startup about every later one. Two
+   paths to one SKILL.md are one skill. A project copy that differs from the
+   user-wide skill is the project's own and is kept; this says pi will load
+   it in place of the user-wide one. `gone` holds the copies this plan
+   removes, which collide with nothing once it has run."
+  [cfg gone]
+  (let [user (into {} (for [[sid s] (user-skills cfg) :when (:source s)
+                            :let [src (u/abs-path (:source s))]]
+                        [(sources/skill-name src) {:sid sid :md (md src)}]))
+        warn (fn [m] (plan/op (merge {:action :noop :warn true :conflict true :tool tool :kind :skills} m)))]
+    (concat
+     (for [[pid proj] (:projects cfg)
+           :when (and (contains? (:for-tools proj) tool) (trusted? proj))
+           c (mapcat skills-in (discovery-dirs proj))
+           :let [n (sources/skill-name c) g (get user n)]
+           :when (and g (not= (md c) (:md g)) (not (gone (sources/leaf-path c))))]
+       (warn {:project pid :id (keyword (name pid) (name (:sid g))) :target c
+              :summary (str "pi loads " (u/tilde c) " here in place of the user-wide " n
+                            " and warns of the collision — rename one, or leave :pi out of the user-wide "
+                            n " to keep this one quietly")}))
+     (for [c (skills-in (str u/home "/.agents/skills"))
+           :let [n (sources/skill-name c) g (get user n)]
+           :when (and g (not= (md c) (:md g)))]
+       (warn {:id (:sid g) :target c
+              :summary (str (u/tilde c) " has the name of pi's user-wide " n
+                            " — pi keeps the one in ~/.pi/agent/skills and warns of the collision")})))))
+
+(defn- untrusted-ops
+  "Skills placed in a project pi does not trust are never read by it."
+  [cfg]
+  (for [[pid proj] (:projects cfg)
+        :when (and (contains? (:for-tools proj) tool)
+                   (seq (:skills (sources/project-skills cfg proj)))
+                   (not (trusted? proj)))]
+    (plan/op {:action :noop :warn true :conflict true :tool tool :kind :skills :project pid
+              :id (keyword (name pid) "skills") :project-path (:path proj)
+              :display {:kind "skills" :entity pid :agents ["pi"]}
+              :summary "pi reads project skills only in a project it trusts — place :trust for pi there, or trust it in pi"})))
+
+(defn project-skill-ops
+  "Installing a project's skills is the `skills` CLI's job (`skills-cli`).
+   What is left here: dropping a project copy of a user-wide skill from
+   either directory pi reads, and saying where pi would still load a
+   project skill in place of a user-wide one."
+  [cfg]
+  (let [unlinks (for [[pid proj] (:projects cfg)
+                      :when (contains? (:for-tools proj) tool)
+                      dir [(project-skills-dir proj) (own-project-skills-dir proj)]
+                      o (sources/global-project-unlink-ops cfg tool pid dir skills-dir)]
+                  o)
+        gone (set (for [o unlinks :when (plan/mutating? o)] (sources/leaf-path (:target o))))]
+    (concat unlinks (collision-ops cfg gone) (untrusted-ops cfg))))
 
 (defn memory-ops [cfg]
   (keep (fn [[id m]]
@@ -219,7 +334,7 @@
 (defn plan [cfg st]
   (concat (settings-ops cfg) (mcp-ops cfg st)
           (common/project-scope-skip-ops cfg tool) (provider-ops cfg)
-          (project-ops cfg) (skill-ops cfg st) (memory-ops cfg)
+          (project-ops cfg) (skill-ops cfg st) (project-skill-ops cfg) (memory-ops cfg)
           (remove nil? (extension-ops cfg st))))
 
 (defn present? [] (some? (u/which "pi")))

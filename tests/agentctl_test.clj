@@ -1339,15 +1339,15 @@
         (is (some #(and (= :error (:level %)) (str/includes? (:message %) "shared")
                        (str/includes? (:message %) "more than one pack"))
                   findings))))
-    (testing "pi has no project skills directory, so a bare-resolved skill still reaches it user-wide"
+    (testing "a bare-resolved skill still reaches pi, in the project that names it"
       ;; regression: dropping the :skills entry must not silently stop pi
-      ;; (and omp, same shape) from installing a skill it only ever
-      ;; discovered by naming a project's executors — see bare-project-skills
+      ;; from installing a skill it only ever discovered by naming a
+      ;; project's executors — see bare-project-skills
       (is (contains? (:skills cfg) :wrap-up))
       (is (contains? (:tools (:wrap-up (:skills cfg))) :pi))
-      (is (contains? (set (core/inventory cfg)) [:pi :skills :wrap-up]))
-      (is (some #(and (= :create (:action %)) (= :wrap-up (:id %)))
-                (pi/skill-ops cfg state/empty-state))))))
+      (is (contains? (set (map #(vec (take 3 %)) (core/inventory cfg))) [:pi :skills :example/wrap-up]))
+      (is (not-any? #(= :wrap-up (:id %)) (pi/skill-ops cfg state/empty-state))
+          "not user-wide: pi reads the project's own"))))
 
 (deftest a-project-skill-is-owned-where-it-was-installed
   (let [dir (temp-dir)
@@ -1359,12 +1359,10 @@
                                                  :skills [:wrap-up]}}}
                               "x")
         inv (set (map #(vec (take 3 %)) (core/inventory cfg)))]
-    (testing "claude and codex own it under the project it belongs to"
-      (doseq [t [:claude :codex]]
+    (testing "each tool owns it under the project it belongs to"
+      (doseq [t [:claude :codex :pi]]
         (is (contains? inv [t :skills :proj/wrap-up]))
-        (is (not (contains? inv [t :skills :wrap-up])))))
-    (testing "pi has no project skills directory, so its copy is user-wide"
-      (is (contains? inv [:pi :skills :wrap-up])))))
+        (is (not (contains? inv [t :skills :wrap-up])))))))
 
 (deftest a-server-left-behind-in-mcp-json-is-reported-not-deleted
   ;; local scope owning a server does not remove the copy the repo still ships
@@ -2608,8 +2606,11 @@
       (let [cfg (config/normalize raw "test")
             ops (core/build-plan cfg state/empty-state {:tools #{:pi}})]
         (is (= 1 (count (:projects cfg))))
-        (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) ops))
-        (is (some #(and (= :skills (:kind %)) (:warn %)) ops)))))
+        (is (seq (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops)))
+        (is (every? #(= #{:pi} (set (map first (:owns %))))
+                    (filter #(and (= :skills (:kind %)) (plan/mutating? %)) ops))
+            "placed for pi alone")
+        (is (some #(and (= :skills (:kind %)) (:warn %)) ops) "pi does not trust the project"))))
   (let [raw {:settings [{:id :unified :model "a" :on #{:auto-compact} :in :all}
                         {:id :claude :model "b" :off #{:auto-compact} :tools [:claude] :in :all}
                         {:id :later-unified :model "c" :in :all}]}
@@ -3168,6 +3169,80 @@
                       (remove #(re-find #"^\S*[~+\-] skill" (str/triml (str/replace % #"\u001b\[[0-9;]*m" "")))
                               (str/split-lines loud)))
             "verbose detail never starts with a change sigil")))))
+
+(deftest pi-reads-a-projects-skills-from-the-shared-directory
+  (let [root (temp-dir) repo (str root "/repo") review (str root "/review")
+        cfg #(config/normalize {:skills {[:uri review] {:in repo :acli [:pi]}}} "test")]
+    (skill-dir! review "review")
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [pi/skills-dir (str root "/pi-skills") pi/trust-file (str root "/trust.json")
+                  u/home (str root "/home")]
+      (let [ops (core/build-plan (cfg) state/empty-state {:tools #{:pi}})
+            skills (filter #(= :skills (:kind %)) ops)]
+        (is (contains? common/project-skill-tools :pi))
+        (is (some #(= [["ln" "-sfn" (u/abs-path review) (str repo "/.agents/skills/review")]] (:cmds %)) skills)
+            "linked where pi and the skills CLI's pi agent read")
+        (is (not-any? #(str/starts-with? (str (:target %)) pi/skills-dir) skills) "not user-wide")
+        (is (not-any? #(str/includes? (str (:summary %)) "not installed") ops))
+        (is (some #(str/includes? (str (:summary %)) "only in a project it trusts") skills)
+            "an untrusted project's skills are never read by pi")))))
+
+(deftest pi-trust-is-the-nearest-trust-json-decision
+  (let [root (temp-dir) repo (str root "/work/repo") file (str root "/trust.json")]
+    (fs/create-dirs repo)
+    (with-redefs [pi/trust-file file]
+      (is (false? (pi/trusted? {:path repo})) "no decision is no trust")
+      (u/write-json! file {(str root "/work") true})
+      (is (true? (pi/trusted? {:path repo})) "a trusted parent covers the project")
+      (u/write-json! file {(str root "/work") true (u/real-path repo) false})
+      (is (false? (pi/trusted? {:path repo})) "the nearest decision wins")
+      (is (true? (pi/trusted? {:path repo :trusted true})) "the config's own decision counts first"))))
+
+(deftest pi-collisions-between-user-and-project-skills
+  (let [root (temp-dir) repo (str root "/repo") sub (str repo "/app") pack (str root "/pack")
+        raw (fn [trust?] (cond-> {:skill-packs {[:uri (str "file://" pack)] {:alias 'kit}}
+                                  :skills {['kit "wrap-up"] {:in :all :acli [:pi]}
+                                           ['kit "audit"] {:in :all :acli [:pi]}
+                                           ['kit "linked"] {:in :all :acli [:pi]}
+                                           ['kit "review"] {:in sub :acli [:pi]}}}
+                           trust? (assoc :trust [{:in sub :acli [:pi]}])))
+        plan-for (fn [trust?] (filter #(= :skills (:kind %))
+                                      (core/build-plan (config/normalize (raw trust?) "test")
+                                                       state/empty-state {:tools #{:pi}})))
+        collisions (fn [ops] (filter #(str/includes? (str (:summary %)) "in place of the user-wide") ops))]
+    (doseq [n ["wrap-up" "audit" "linked" "review"]] (skill-dir! (str pack "/" n) n))
+    (fs/create-dirs sub)
+    (git! repo "init" "-q")
+    ;; a different wrap-up in the repository root, which pi reads from a subdirectory too
+    (fs/create-dirs (str repo "/.agents/skills/own"))
+    (spit (str repo "/.agents/skills/own/SKILL.md") "---\nname: wrap-up\ndescription: ours\n---\n")
+    ;; the same bytes as the user-wide audit, in an independent file
+    (fs/copy-tree (str pack "/audit") (str sub "/.pi/skills/audit"))
+    ;; a link to the very file the user-wide link reaches is one skill to pi
+    (fs/create-sym-link (str sub "/.pi/skills/linked") (str pack "/linked"))
+    (with-redefs [pi/skills-dir (str root "/pi-skills") pi/trust-file (str root "/trust.json")
+                  u/home (str root "/home")]
+      (let [ops (plan-for true)
+            [c] (collisions ops)]
+        (is (= 1 (count (collisions ops))) "only the differing wrap-up collides")
+        (is (= (str (u/real-path repo) "/.agents/skills/own") (:target c)) "found above the project, below the repository root")
+        (is (:conflict c) "validate repeats it")
+        (is (some #(and (plan/mutating? %) (= (str sub "/.pi/skills/audit") (:target %))) ops)
+            "the identical copy goes, so it collides with nothing")
+        (let [trusted (update (config/normalize (raw true) "test") :projects
+                              update-vals #(assoc % :trusted true))
+              hits (set (map #(sources/skill-name (:target %)) (pi/collision-ops trusted #{})))]
+          (is (= #{"wrap-up" "audit"} hits)
+              "before the plan runs: a copy is another skill to pi, a link to the same SKILL.md is not")))
+      (is (empty? (collisions (plan-for false))) "pi reads nothing in a project it does not trust")
+      ;; u/home is the test's own here: this writes into the user's ~/.agents/skills
+      (let [user-copy (str u/home "/.agents/skills/wrap-up")]
+        (try
+          (skill-dir! user-copy "wrap-up")
+          (spit (str user-copy "/SKILL.md") "---\nname: wrap-up\ndescription: another\n---\n")
+          (is (some #(str/includes? (str (:summary %)) "pi keeps the one in ~/.pi/agent/skills") (plan-for false))
+              "~/.agents/skills is pi's user directory too")
+          (finally (fs/delete-tree user-copy)))))))
 
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

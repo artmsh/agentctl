@@ -30,7 +30,7 @@ alone plans nothing, and a git pack is not cloned for it.
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
-`.agents/skills` (read by codex, antigravity, kimi and the DeepSeek Harness),
+`.agents/skills` (read by codex, antigravity, kimi, pi and the DeepSeek Harness),
 claude gets a link in `.claude/skills`, and the install is recorded in
 `skills-lock.json`. A dropped
 skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
@@ -50,7 +50,9 @@ A project copy is kept, and the plan says why, when:
 
 A kept copy that the `skills` CLI installed keeps its lock entry, since
 `skills remove` would delete the copy as well. A redundant link into a kept
-copy, such as claude's `.claude/skills/<name>`, is still removed.
+copy, such as claude's `.claude/skills/<name>`, is still removed. A plan
+with nothing left to change prints no warnings, so `validate` repeats these
+reports under SKILLS for every agent; they do not fail its exit code.
 
 Imports emit this format. The older map-and-project format ([AGENTCTL.md](AGENTCTL.md#legacy-map-form))
 remains supported; use one format per file.
@@ -427,11 +429,41 @@ A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
-Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi and the
-DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
-declared skills live there. For Pi and OMP a project's declared skills are
-installed user-wide instead — that is the only place those tools read skills
-from — and are owned there.
+Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi, Pi and
+the DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
+declared skills live there. OMP reads skills only from the user's home, so for
+OMP a project's declared skills are installed user-wide instead and are owned
+there.
+
+### Pi
+
+Pi reads a project's skills from `.pi/skills` and from `.agents/skills` in the
+working directory and each directory above it, up to the repository root. It
+reads them only in a project it trusts: place `:trust` for pi on the project
+(or trust it in pi) or the plan says pi will never see what it installs there.
+Pi's own `~/.pi/agent/skills` and `~/.agents/skills` are its user-wide
+directories. Earlier versions of agentctl installed a project's skills for pi
+user-wide; `apply!` now moves each one into the project, removing the
+user-wide link it made. In a project pi does not trust, that takes the skill
+away from pi until the project is trusted.
+
+Pi keys a skill on the `name:` in its SKILL.md, keeps the first one it finds —
+a trusted project's before the user's, `~/.pi/agent/skills` before
+`~/.agents/skills` — and warns at startup about every later one. Two paths to
+the same SKILL.md are one skill to it, but an identical copy is a second one.
+So for pi agentctl:
+
+- removes a project copy, in `.agents/skills` or `.pi/skills`, that is
+  identical to a skill installed user-wide for pi, as it does for the other
+  agents (and keeps it in the cases listed above);
+- reports a project skill that differs from a user-wide one of the same name:
+  pi loads the project's one there and warns of the collision. Rename one, or
+  leave `:pi` out of the user-wide skill to keep the project's quietly;
+- reports a skill in `~/.agents/skills` that has the name of a user-wide one;
+- says when a project's skills are placed where pi does not trust it.
+
+These reports are warnings: `apply` shows them while it has changes to make,
+and `validate` repeats them under SKILLS once the plan has converged.
 
 ## Remote hosts
 

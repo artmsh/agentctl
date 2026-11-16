@@ -1013,4 +1013,48 @@ assert o["display"]["source"] == o["from"] == "~/projects/sample/.agents/skills/
 ' || fail "the JSON display source disagrees with from"
 )
 
+echo "25. pi reads a project's skills in the project, and is told where one shadows a user-wide skill"
+(
+  H=$(fresh_home pi-project-skills); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  for s in wrap-up audit review; do
+    mkdir -p "$K/$s"; printf -- "---\nname: $s\ndescription: Shared $s.\n---\n" > "$K/$s/SKILL.md"
+  done
+  # the project's own wrap-up, and an identical copy of audit in pi's own directory
+  mkdir -p "$P/.agents/skills/wrap-up" "$P/.pi/skills"
+  printf -- '---\nname: wrap-up\ndescription: Ours.\n---\n' > "$P/.agents/skills/wrap-up/SKILL.md"
+  cp -R "$K/audit" "$P/.pi/skills/audit"
+  git -C "$P" init -q
+  cat > "$H/untrusted.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}
+          [shared "audit"] {:in :all :acli [:pi]}
+          [shared "review"] {:in "projects/proj" :acli [:pi]}}}
+EDN
+  { sed '$ s/}$//' "$H/untrusted.edn"; echo ' :trust [{:in "projects/proj" :acli [:pi]}]}'; } > "$H/agents.edn"
+  (run apply -f "$H/untrusted.edn" --all -t pi || true) > "$H/plan0.txt" 2>&1
+  grep -q 'pi reads project skills only in a project it trusts' "$H/plan0.txt" \
+    && ! grep -q 'in place of the user-wide' "$H/plan0.txt" \
+    || { cat "$H/plan0.txt"; fail "an untrusted project: no trust warning, or a collision pi never sees"; }
+  set +e
+  run apply -f "$H/agents.edn" --all -t pi > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "pi project skills: expected drift (exit 2), got $code"; }
+  grep -q "^exec: 'ln -sfn ~/projects/shared/skills/review ~/projects/proj/.agents/skills/review'" "$H/plan.txt" \
+    && grep -q "^exec: 'rm -r ~/projects/proj/.pi/skills/audit'" "$H/plan.txt" \
+    && grep -q 'pi loads ~/projects/proj/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
+    && ! grep -q '\.pi/agent/skills/review' "$H/plan.txt" \
+    && ! grep -q 'only in a project it trusts' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the plan does not place review in the project, drop the audit copy and report the wrap-up collision"; }
+  run apply! -f "$H/agents.edn" --all -t pi -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed"; }
+  [ -f "$P/.agents/skills/review/SKILL.md" ] || fail "review is not in the project's .agents/skills"
+  [ ! -e "$H/.pi/agent/skills/review" ] || fail "a project skill was installed user-wide for pi"
+  [ ! -e "$P/.pi/skills/audit" ] || fail "the identical audit copy is still there"
+  grep -q 'Ours' "$P/.agents/skills/wrap-up/SKILL.md" || fail "the project's own wrap-up was touched"
+  run apply -f "$H/agents.edn" --all -t pi > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "not converged after one apply!"; }
+  (run validate -f "$H/agents.edn" -t pi -k skills || true) > "$H/validate.txt" 2>&1
+  grep -q '! ~/projects/proj/.agents/skills/wrap-up .*pi loads' "$H/validate.txt" \
+    || { cat "$H/validate.txt"; fail "validate does not repeat the collision once converged"; }
+)
+
 echo "all agentctl e2e checks passed"

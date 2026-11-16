@@ -161,11 +161,20 @@
 
 ;; ---------------------------------------------------------------- project copies
 
+(defn skill-name
+  "The name a skill goes by: SKILL.md's `name:`, else its directory. The
+   `skills` CLI installs under it, and pi detects collisions by it."
+  [dir]
+  (or (some->> (u/slurp-safe (str dir "/SKILL.md"))
+               (re-find #"(?m)^name:\s*['\"]?([^'\"\s]+)")
+               second)
+      (str (fs/file-name dir))))
+
 (def project-skill-roots
   "Where in a repository the agents look for skills. A link in one of them may
    lead into a copy kept in another, as claude's `.claude/skills/<name>` leads
    into the `skills` CLI's `.agents/skills/<name>`."
-  [".claude/skills" ".agents/skills"])
+  [".claude/skills" ".agents/skills" ".pi/skills"])
 
 (defn leaf-path
   "`p` with the directories above it resolved and its last segment kept as
@@ -258,9 +267,10 @@
   (set (map u/key-str (keys (:skills (u/read-json (str root "/skills-lock.json")))))))
 
 (defn kept-op
-  "The report for a project copy that stays."
+  "The report for a project copy that stays. `:conflict` marks it as one
+   `validate` repeats: a converged plan prints no warnings."
   [m dest why]
-  (plan/op (merge m {:action :noop :warn true :target dest
+  (plan/op (merge m {:action :noop :warn true :conflict true :target dest
                      :summary (str "project copy " (u/tilde dest) " kept — " why)})))
 
 (defn global-project-unlink-ops
@@ -291,7 +301,7 @@
                   ;; a dangling link points nowhere; nothing is lost removing it
                   (dangling?) (plan/unlink-op (assoc base :dest dest))
                   (not (same?))
-                  (plan/op (merge base {:action :noop :warn true :target dest
+                  (plan/op (merge base {:action :noop :warn true :conflict true :target dest
                                         :summary (str "local copy differs from the user-wide " (name sid) " — kept")}))
                   (and (not link?) (contains? (lock-names root) (fs/file-name dest))) nil
                   :else (plan/unlink-op (assoc base :dest dest)))]

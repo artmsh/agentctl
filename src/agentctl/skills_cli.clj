@@ -30,7 +30,7 @@
    shared `.agents/skills` directory, which is exactly the project root the
    Harness scans, so an install for it lands where the Harness reads."
   {:claude "claude-code" :codex "codex" :antigravity "antigravity" :kimi "kimi-code-cli"
-   :dsh "universal"})
+   :dsh "universal" :pi "pi"})
 
 (def agent-labels
   "How the plan names each tool in a `[agents: …]` line, where the CLI's own
@@ -41,8 +41,9 @@
 
 (def shared-tools
   "Tools that read the CLI's shared `.agents/skills` copy rather than a
-   directory of their own."
-  #{:codex :antigravity :kimi :dsh})
+   directory of their own. Pi has `.pi/skills` as well, but the CLI's `pi`
+   agent installs into the shared directory, and so does agentctl."
+  #{:codex :antigravity :kimi :dsh :pi})
 
 (defn command
   "The CLI invocation. `AGENTCTL_SKILLS_CMD` replaces it (tests run offline)."
@@ -61,13 +62,9 @@
   [dir n tools]
   (if (shared? tools) (canonical dir n) (claude-link dir n)))
 
-(defn skill-name
+(def skill-name
   "The name the CLI installs a skill under: SKILL.md's `name:`, else the directory."
-  [dir]
-  (or (some->> (u/slurp-safe (str dir "/SKILL.md"))
-               (re-find #"(?m)^name:\s*['\"]?([^'\"\s]+)")
-               second)
-      (str (fs/file-name dir))))
+  sources/skill-name)
 
 (defn- real [p] (or (u/real-path p) (u/abs-path p)))
 
