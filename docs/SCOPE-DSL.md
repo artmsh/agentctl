@@ -182,7 +182,7 @@ every tool that supports the kind.
 | `:settings` | unified or per-CLI settings | `{:settings {:model "opus"} :tools [:claude] :in "projects"}` |
 | `:memory` | a memory/AGENTS.md file | `{:memory "~/notes/AGENTS.md" :mode :symlink :in :all}` |
 | `:trust` | mark a path trusted | `{:trust true :in ["Brain" "projects"]}` |
-| `:hooks` | Claude Code hooks | `{:hooks {…} :tools [:claude] :in :all}` |
+| `:hooks` | Claude Code or Codex hooks (Claude's unless `:tools` names `:codex`, so `:tools :all` means Claude only; Codex's user-wide only) | `{:hooks {…} :tools [:codex] :in :all}` |
 
 `:extensions`, `:hosts` and `:statusline` are not entities. Each is placed once
 for the whole machine (or, for a host, for that machine), takes no `:in`, and is
@@ -205,6 +205,19 @@ map becomes `{:settings {…} :tools [:claude] :in :all}`, and a project's
 `:executors {:claude {:model "opus"}}` override becomes the same stanza with
 `:in "projects/sample"`. Precedence: narrower `:in` wins over broader; among
 equally narrow, later wins; `:tools`-specific wins over unified.
+
+Codex's nested settings ride in the same stanza and are user-wide only
+(`:in :all`); each writes its own `[tui.*]` or `[permissions.*]` table:
+
+```edn
+{:settings {:keymap {:chat {:open_presets "alt-t"}}
+            :presets {0 {:input "/model" :label "model picker"}}
+            :status-line [:model-with-reasoning :context-used :git-branch]
+            :sandbox "local-dev"
+            :permission-profiles {:local-dev {:extends ":workspace"
+                                              :filesystem {"~/data" "write"}}}}
+ :tools [:codex] :in :all}
+```
 
 ## Ids
 

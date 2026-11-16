@@ -159,6 +159,74 @@ This writes the integer `cleanupPeriodDays` to `~/.claude/settings.json`.
 `validate` checks its type and minimum against the cached SchemaStore schema;
 use `validate --deep` to fetch the current schema.
 
+## Codex TUI
+
+Codex keeps its TUI settings in nested `[tui.*]` tables of
+`~/.codex/config.toml`, next to state it writes for itself. Each declared
+setting below is written key by key into its own table, so that state survives.
+
+A model switch two keys away: bind the presets browser and put `/model` in slot 0.
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :keymap {:chat {:open_presets "alt-t"}}
+             :presets {0 {:input "/model" :label "model picker"}}}]}
+```
+
+alt-t opens the browser and 0 runs `/model`, which opens the model picker. A
+preset is `{:input "…" :label "…"}` in slots 0-9; `:input` is required and runs
+as typed. `validate` rejects other slots and fields. A declared slot is
+agentctl's whole: a preset Codex saved in that slot is replaced, its label
+included, and removing the slot from the config removes the table. Presets
+saved from the Codex browser in other slots stay.
+
+Codex has no external status command; its footer is a list of built-in items:
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :status-line [:model-with-reasoning :five-hour-limit :weekly-limit
+                           :used-tokens :context-used :current-dir :git-branch]}]}
+```
+
+This writes `[tui] status_line` and nothing else in `[tui]`. Codex loads an
+unknown item silently and drops it at startup, so `validate` reports one by name
+and lists the items codex-cli 0.169.0 renders. A map value is Claude Code's
+command status line; codex reports it as unsupported rather than as an error.
+
+## Codex permission profiles
+
+`:sandbox` picks Codex's active profile (`default_permissions`);
+`:permission-profiles` declares the profiles themselves, as
+`[permissions.<name>]` tables in Codex's own spelling:
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :sandbox "local-dev"
+             :permission-profiles
+             {:local-dev {:extends ":workspace"
+                          :filesystem {"~/Library/Application Support/Example" "write"}
+                          :network {:enabled true :allow_local_binding true
+                                    :domains {"localhost" "allow" "127.0.0.1" "allow"}}}}}]}
+```
+
+Each table is written key by key, so a rule added to the profile by hand stays,
+and removing a declared rule or profile removes only what agentctl wrote. Paths
+and hosts are strings; field names are keywords. `extends` names `:read-only`,
+`:workspace` or another profile. Filesystem keys must be absolute, start with
+`~/` or name a `:special` root, and map to `read`, `write`, `none` or `deny`, or
+to a map of subpaths. Codex refuses to start when profiles exist without a
+default, or when the default names neither a profile nor a built-in
+(`:read-only`, `:workspace`, `:danger-full-access`). `validate` and `apply`
+therefore check `config.toml` as it would be after the apply: declared
+profiles, plus those agentctl will not prune. A plan that breaks either rule
+is refused before anything is written, for example dropping `:sandbox` while
+a profile stays, or dropping the profile `:sandbox` names. Drop both together.
+Import brings existing profiles in.
+
+`codex sandbox -P local-dev -- touch <path>/x` checks a grant without a model or
+login. `:workspace` already allows the temp directories, so test an undeclared
+path outside them, or extend `:read-only`.
+
 ## GUI
 
 ```sh
@@ -431,9 +499,10 @@ instead of being silently dropped.
 
 ## Hooks
 
-Claude Code hooks. In the entity DSL a hook is a `:hooks` row placed like any other entity:
-`:in :all` writes `~/.claude/settings.json`, and a project selector writes that
-repository's `.claude/settings.json`:
+Claude Code and Codex hooks (Codex's are covered after Claude's). In the entity
+DSL a hook is a `:hooks` row placed like any other entity: `:in :all` writes
+`~/.claude/settings.json`, and a project selector writes that repository's
+`.claude/settings.json`:
 
 ```clojure
 :hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
@@ -477,6 +546,25 @@ several share one:
 — it is still what the ownership manifest tracks, so it stays mandatory
 there; a missing one is a structural error, not a guess. Both forms normalize
 to the same thing and can be mixed in one `:hooks` map.
+
+Codex hooks go to `~/.codex/hooks.json`, with the same ownership: vendor hooks
+in that file are left alone. A `:hooks` row reaches Codex only when its `:acli`
+names it; without `:acli`, or with `:acli :all`, a row stays Claude's, and so do
+`:hooks` inside a `:settings` row that does not name `:codex`:
+
+```clojure
+{:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"
+          :timeout 10 :acli [:codex] :in :all}]}
+```
+
+`validate` rejects an event codex-cli 0.169.0 does not fire and any field
+other than `:command`, `:timeout`, `:async`, `:status-message`,
+`:command-windows` and `:additional-context-limit`. Codex runs a new or changed
+hook only after you review it (at startup, or `/hooks`); agentctl never
+pre-trusts one. Trust is recorded by position in `config.toml`'s
+`[hooks.state]`, which agentctl never edits. A changed hook keeps its place, so
+only it needs review again, but removing one moves the later hooks of that
+event up, and Codex asks to review those again too.
 
 ## Extensions
 

@@ -298,7 +298,7 @@
 
 (defn provider-ops [cfg]
   (let [desired (common/for-tool-resources (:providers cfg) tool)
-        current (try (toml/read-toml config-file) (catch Exception _ nil))]
+        current (toml/read-toml-lenient config-file)]
     (mapcat
      (fn [[id p]]
        (let [type* (provider-type p)]

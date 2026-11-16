@@ -2,6 +2,7 @@
   "Operation records, diffing and terraform-style rendering."
   (:require [agentctl.refs :as refs]
             [agentctl.toml :as toml]
+            [cheshire.core :as json]
             [agentctl.util :as u]
             [clojure.string :as str]))
 
@@ -67,24 +68,36 @@
 
 (defn- plain-map? [v] (and (map? v) (not (refs/ref? v))))
 
+(defn- shown
+  "What a field is called in the plan: a prefixed field's label, else its key."
+  [k]
+  (if (map? k) (:label k) (u/kw->str k)))
+
+(defn- native-key
+  "The key a value is masked by — never the label, whose prefix (a profile
+   or a table name) says nothing about whether the value is a credential."
+  [k]
+  (if (map? k) (:key k) k))
+
 (defn- render-diff
   "One line per changed field, nested. Printing both sides of a map whole makes
    the reader diff it by eye — which is the job this output exists to do."
   [indent k b a]
-  (let [act (diff-action b a)]
+  (let [act (diff-action b a)
+        mk (native-key k)]
     (if (and (or (plain-map? b) (nil? b))
              (or (plain-map? a) (nil? a))
              (or (plain-map? b) (plain-map? a)))
-      (cons (colorize act (str indent (sigil act) " " (u/kw->str k)))
+      (cons (colorize act (str indent (sigil act) " " (shown k)))
             (mapcat (fn [{:keys [key before after]}]
                       (render-diff (str indent "  ") key before after))
                     (map-fields b a)))
       [(colorize act
-                 (str indent (sigil act) " " (u/kw->str k) ": "
+                 (str indent (sigil act) " " (shown k) ": "
                       (case act
-                        :create (render-val k a)
-                        :delete (render-val k b)
-                        (str (render-val k b) " -> " (render-val k a)))))])))
+                        :create (render-val mk a)
+                        :delete (render-val mk b)
+                        (str (render-val mk b) " -> " (render-val mk a)))))])))
 
 (defn changed? [before after ks] (boolean (seq (field-diffs before after ks))))
 
@@ -156,6 +169,13 @@
 
 (defn- op-cmds [o] (when-let [c (:cmds o)] (if (vector? (first c)) c [c])))
 
+(defn- prefixed
+  "A field's label under the op's `:field-prefix` — `presets.5` for a field
+   of preset slot 5, which `input` alone does not say. The diff `:key` stays
+   the native key: ownership records and prunes by it."
+  [o k]
+  (if-let [p (:field-prefix o)] {:label (str p "." (u/kw->str k)) :key k} k))
+
 (defn render-op [o {:keys [verbose]}]
   (let [cmds (op-cmds o)
         line (colorize (:action o) (head-line (:action o) o [(id-str (:id o))]))
@@ -165,7 +185,7 @@
         ;; written) shows it on create too, not only under -v
         diffs (when (or verbose (= :update (:action o)) (:preview o))
                 (mapcat (fn [{:keys [key before after]}]
-                          (render-diff "      " key before after))
+                          (render-diff "      " (prefixed o key) before after))
                         (second (op-diffs o))))
         target (when (and verbose (:target o)) (str "    target: " (u/tilde (:target o))))]
     (str/join "\n" (remove nil? (concat [line detail note]
@@ -229,9 +249,10 @@
    header, and `type` alone would not say whose. An op contributing one field of
    its own naming (a settings key, a permissions bucket) already reads clearly."
   [o collapsed? ds]
-  (if (or collapsed? (> (count ds) 1))
-    #(str (name (:id o)) "." (u/kw->str %))
-    #(u/kw->str %)))
+  (cond
+    (:field-prefix o) #(prefixed o %)
+    (or collapsed? (> (count ds) 1)) #(str (name (:id o)) "." (u/kw->str %))
+    :else #(u/kw->str %)))
 
 (defn render-group [ops opts]
   (if (= 1 (count ops))
@@ -440,17 +461,18 @@
   "`render-diff`, as data. Same recursion into nested maps, same masking; the
    indent becomes a depth the table can indent by itself."
   [depth k b a]
-  (let [act (diff-action b a)]
+  (let [act (diff-action b a)
+        mk (native-key k)]
     (if (and (or (plain-map? b) (nil? b))
              (or (plain-map? a) (nil? a))
              (or (plain-map? b) (plain-map? a)))
-      (cons {:action (name act) :depth depth :key (u/kw->str k)}
+      (cons {:action (name act) :depth depth :key (shown k)}
             (mapcat (fn [{:keys [key before after]}]
                       (diff-rows (inc depth) key before after))
                     (map-fields b a)))
-      [{:action (name act) :depth depth :key (u/kw->str k)
-        :before (when-not (= :create act) (render-val k b))
-        :after (when-not (= :delete act) (render-val k a))}])))
+      [{:action (name act) :depth depth :key (shown k)
+        :before (when-not (= :create act) (render-val mk b))
+        :after (when-not (= :delete act) (render-val mk a))}])))
 
 (defn- op-rows
   "The rows one op contributes to its group. `label` qualifies a field with the
@@ -501,7 +523,7 @@
      :runs (vec (mapcat :runs ops))
      :cmds (vec (for [x ops, c (op-cmds x)]
                   (str/join " " (map (comp u/tilde str) (remove nil? (flatten c))))))
-     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (u/kw->str k)))) ops))}))
+     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (let [l (prefixed % k)] (if (map? l) l (u/kw->str l)))))) ops))}))
 
 (defn plan-data
   "`render-plan` as data: the same visibility rule, the same tool sections and
@@ -612,6 +634,48 @@
                     (u/backup! file)
                     (u/write-json! file (u/dissoc-in (or (u/read-json file) {}) (vec path))))}))))
 
+(defn- sans-nils
+  "`v` with every nil-valued map entry dropped, at any depth."
+  [v]
+  (cond
+    (map? v) (into {} (keep (fn [[k x]] (when (some? x) [k (sans-nils x)]))) v)
+    (sequential? v) (mapv sans-nils v)
+    :else v))
+
+(defn- same-element?
+  "Do two array elements say the same thing? A vendor installer writes
+   `\"matcher\": null` where agentctl leaves the key out; read back, those
+   are one hook, not two."
+  [a b]
+  (= (u/norm (sans-nils a)) (u/norm (sans-nils b))))
+
+(defn- unreadable-json
+  "Why `file` is not JSON — it exists, holds something, and does not parse —
+   or nil. `u/read-json` reads such a file as nil, and an array edit on top
+   of that would write a new file over it, the vendor's hooks gone."
+  [file]
+  (when-let [s (u/slurp-safe file)]
+    (when-not (str/blank? s)
+      (try (json/parse-string s) nil
+           (catch Exception e (or (first (str/split-lines (str (ex-message e)))) "does not parse"))))))
+
+(defn- refused-json-op
+  "The op an array edit plans in a file that does not parse: shown in the
+   plan, and failing when run, so apply! exits non-zero and the state keeps
+   the element it last wrote."
+  [{:keys [tool kind id file path project]} why]
+  (let [msg (str (u/tilde file) " is not valid JSON (" why "): fix it by hand — agentctl will not rewrite it")]
+    (op {:project project :action :update :tool tool :kind kind :id id :target file
+         :path (mapv u/kw->str path) :summary msg :warn true :risk :medium
+         :exec! (fn [] (throw (ex-info msg {:path file})))})))
+
+(defn- read-json-strict
+  "The file's JSON, {} when absent or blank; throws when it does not parse."
+  [file]
+  (when-let [why (unreadable-json file)]
+    (throw (ex-info (str (u/tilde file) " is not valid JSON (" why "): left untouched") {:path file})))
+  (or (u/read-json file) {}))
+
 (defn json-array-merge-op
   "Op that keeps exactly one caller-owned element inside a JSON array at
    `path`, leaving every other element untouched — the shape a hooks array
@@ -623,11 +687,15 @@
    state manifest; nil if never written before, or already gone by hand).
    `value` is what it should be now. If `value` already sits in the array,
    nothing to do; otherwise `old` is removed (if still present) and `value`
-   appended."
+   appended — or, with `:in-place?`, written at `old`'s index, for a reader
+   that keys state by position (Codex's hook trust) and would otherwise see
+   every later element move."
   [{:keys [tool kind id file path old value summary note risk project
-           report-converged?]}]
+           report-converged? in-place?] :as args}]
+  (if-let [why (unreadable-json file)]
+    (refused-json-op args why)
   (let [current (vec (or (get-in (u/read-json file) path) []))
-        present? (fn [v] (some #(= (u/norm %) (u/norm v)) current))]
+        present? (fn [v] (some #(same-element? % v) current))]
     (if (present? value)
       (when report-converged?
         (op {:project project :action :noop :tool tool :kind kind :id id :target file}))
@@ -644,15 +712,16 @@
              ;; a single run, and a stale snapshot would drop earlier writes
              :exec! (fn []
                       (u/backup! file)
-                      (let [data (or (u/read-json file) {})
+                      (let [data (read-json-strict file)
                             arr (vec (or (get-in data path) []))
-                            arr' (if (some #(= (u/norm %) (u/norm old)) arr)
-                                   (vec (remove #(= (u/norm %) (u/norm old)) arr))
-                                   arr)
-                            arr'' (if (some #(= (u/norm %) (u/norm value)) arr')
-                                    arr'
-                                    (conj arr' value))]
-                        (u/write-json! file (assoc-in data path arr''))))})))))
+                            same? (fn [x] #(same-element? % x))
+                            at (when (and in-place? (some? old) (not-any? (same? value) arr))
+                                 (first (keep-indexed (fn [i x] (when ((same? old) x) i)) arr)))
+                            arr'' (if at
+                                    (assoc arr at value)
+                                    (let [arr' (vec (remove (same? old) arr))]
+                                      (if (some (same? value) arr') arr' (conj arr' value))))]
+                        (u/write-json! file (assoc-in data path arr''))))}))))))
 
 (defn json-union-op
   "Op that makes the JSON array at `path` hold every element of `values`,
@@ -688,9 +757,11 @@
 (defn json-array-unset-op
   "Op that removes one caller-owned element (`old`) from a JSON array at
    `path`. Nothing to remove is no op at all — mirrors `json-unset-op`."
-  [{:keys [tool kind id file path old summary note risk project]}]
+  [{:keys [tool kind id file path old summary note risk project] :as args}]
+  (if-let [why (unreadable-json file)]
+    (refused-json-op args why)
   (let [current (vec (or (get-in (u/read-json file) path) []))]
-    (when (some #(= (u/norm %) (u/norm old)) current)
+    (when (some #(same-element? % old) current)
       (op {:project project :action :delete :tool tool :kind kind :id id
            :target file
            :path (mapv u/kw->str path)
@@ -700,10 +771,10 @@
            :risk (or risk :medium)
            :exec! (fn []
                     (u/backup! file)
-                    (let [data (or (u/read-json file) {})
+                    (let [data (read-json-strict file)
                           arr (vec (or (get-in data path) []))
-                          arr' (vec (remove #(= (u/norm %) (u/norm old)) arr))]
-                      (u/write-json! file (assoc-in data path arr'))))}))))
+                          arr' (vec (remove #(same-element? % old) arr))]
+                      (u/write-json! file (assoc-in data path arr'))))})))))
 
 (defn yaml-set-op
   [{:keys [tool kind id file path value summary risk project]}]
@@ -736,8 +807,8 @@
 
 (defn toml-set-op
   "Set scalar keys inside a TOML table via surgical edit."
-  [{:keys [tool kind id file table kvs summary note risk project]}]
-  (let [current (try (toml/read-toml file) (catch Exception _ nil))
+  [{:keys [tool kind id file table kvs summary note risk project field-prefix]}]
+  (let [current (toml/read-toml-lenient file)
         before (if (seq table) (get-in current (vec (map u/kw->str table))) current)
         diffs (field-diffs (into {} (map (fn [[k v]] [(u/kw->str k) v])) before)
                            (into {} (map (fn [[k v]] [(u/kw->str k) v])) kvs)
@@ -749,14 +820,35 @@
            :summary summary
            :note note
            :diffs diffs
+           :field-prefix field-prefix
            :risk (or risk :low)
            :exec! (fn []
                     (u/backup! file)
                     (toml/update-file! file #(toml/set-keys % (vec table) kvs)))}))))
 
+(defn toml-tree-ops
+  "`toml-set-op`s that make the nested map `value` hold under `table`: one op
+   per table, each owning only the keys it declares, so hand-added keys in the
+   same tables survive. Every nested map is a table of its own: one the file
+   holds inline (`domains = {…}`) is written into where it stands, entry by
+   entry, and one it lacks gets a `[header]`. `id-for` names each table's op
+   from its path below `table`; `field-prefix` heads each field's label in
+   the plan."
+  [{:keys [tool kind file table value summary project id-for field-prefix]}]
+  (let [walk (fn walk [path sub m]
+               (let [kvs (into {} (keep (fn [[k v]] (when-not (map? v) [(u/key-str k) v]))) m)]
+                 (cons (when (seq kvs)
+                         (toml-set-op {:tool tool :kind kind :project project :id (id-for sub)
+                                       :file file :table path :kvs kvs
+                                       :field-prefix (when field-prefix (str/join "." (cons field-prefix sub)))
+                                       :summary (str summary (when (seq sub) (str " " (str/join "." sub))))}))
+                       (mapcat (fn [[k v]] (walk (conj path (u/key-str k)) (conj sub (u/key-str k)) v))
+                               (filter (comp map? val) m)))))]
+    (remove nil? (walk (vec table) [] value))))
+
 (defn toml-remove-table-op
   [{:keys [tool kind id file table summary project]}]
-  (let [current (try (toml/read-toml file) (catch Exception _ nil))
+  (let [current (toml/read-toml-lenient file)
         before (get-in current (vec (map u/kw->str table)))]
     (when (some? before)
       (op {:project project :action :delete :tool tool :kind kind :id id :target file

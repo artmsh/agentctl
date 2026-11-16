@@ -1852,5 +1852,37 @@ for pair in "dsl projects entity-DSL" "old trust old-format"; do
   [ "$code" = 1 ] && grep -q "^error: -k $2: an $3 config plans nothing as $2" "$UF/host-$1.txt" \
     || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
 done
+echo "41. codex nested tables converge through state.edn on disk and prune what they wrote"
+mkdir -p "$SB/.codex"
+printf 'model = "m-a"\n[tui]\nstatus_line = [\n    "model",\n]\n\n[tui.model_availability_nux]\n"m-a" = 4\n' \
+  > "$SB/.codex/config.toml"
+cat > "$SB/codex.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "dev"
+             :keymap {:chat {:open_presets "alt-t"}}
+             :presets {0 {:input "/model" :label "model picker"} 1 {:input "/status"}}
+             :status-line [:model-with-reasoning :context-used]
+             :permission-profiles {:dev {:extends ":workspace"
+                                         :filesystem {"~/Library/Application Support/Example" "write"}}}}]}
+EDN
+run apply! -f "$SB/codex.edn" --all -t codex -y > "$SB/codex1.txt"
+grep -q '^\[tui.presets.1\]' "$SB/.codex/config.toml" || fail "codex preset not written"
+grep -q 'Application Support/Example" = "write"' "$SB/.codex/config.toml" || fail "codex profile not written"
+set +e
+run apply -f "$SB/codex.edn" --all -t codex > "$SB/codex2.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/codex2.txt"; fail "codex nested settings did not converge after a state.edn round trip"; }
+python3 - "$SB/codex.edn" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+open(p, 'w').write(s.replace(' 1 {:input "/status"}', ''))
+PY
+run apply! -f "$SB/codex.edn" --all -t codex -y > "$SB/codex3.txt"
+grep -q 'tui.presets.1' "$SB/.codex/config.toml" && fail "dropped codex preset slot not pruned"
+set +e
+run apply -f "$SB/codex.edn" --all -t codex > "$SB/codex4.txt"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$SB/codex4.txt"; fail "codex settings did not converge after a prune"; }
+python3 -c 'import sys,tomllib; t=tomllib.load(open(sys.argv[1],"rb")); assert t["tui"]["model_availability_nux"] == {"m-a": 4}, t; assert t["tui"]["status_line"] == ["model-with-reasoning", "context-used"], t' \
+  "$SB/.codex/config.toml" || fail "codex [tui] state or footer wrong"
 
 echo "all agentctl e2e checks passed"
