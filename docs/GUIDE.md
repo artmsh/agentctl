@@ -399,7 +399,9 @@ The resolved value is what lands in `settings.json`, so the plan flags the op
 `⚠ secret value written into the project` (or into `~/.claude/settings.json`)
 and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
 same on both sides is marked `(changed)`. An old value that a change replaces
-or drops is masked too, even when the new value is a plain literal. A project's
+or drops is masked too, even when the new value is a plain literal. The same
+holds for every tool and every output — `-v`, `--json`, `apply!` and the GUI:
+a value that came from a reference is masked whatever its field is called. A project's
 `.claude/settings.json` is usually committed; `.claude/settings.local.json` is
 the private one.
 

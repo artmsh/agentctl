@@ -959,6 +959,12 @@ Plans print `bw:dev-keys/hosted/api-key`, never the resolved value. Changes that
 end up writing a resolved secret into a tool's config file are tagged
 `⚠ writes resolved secret` and counted before the confirmation prompt.
 
+Every value a reference resolved to is masked (`"sk-t…ef"`) in every output:
+the text plan, `-v`, `--json`, `apply!` and the GUI, for every tool, whatever
+the field is called. So is the old value on the before side of a change to
+one, and any old env or header value a change replaces or removes: a rotated
+or dropped secret is still a secret, though nothing resolves it any more.
+
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
 `$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
@@ -1129,8 +1135,10 @@ different thing from a plan read after saving and re-running.
   re-render. The form is never re-rendered under a field that has focus — that
   eats the caret and the last keystrokes with it.
 - **The plan crosses the wire as rendered text, never as ops.** Masking lives in
-  `plan/render-val`; serializing `:diffs` would route around it and put a
-  credential read out of an existing tool config into a JSON payload.
+  `plan/mask-op`, which `render-plan`, `plan-data` and `--json`'s `op->data`
+  all go through, and `refs/scrub` takes every resolved value out of what is
+  left; serializing raw `:diffs` would route around both and put a credential
+  into a JSON payload.
   `plan/*color*` is bound to `false` and the page colours by sigil.
 - **Apply is gated three ways**: an explicit `confirm` in the request body (the
   browser dialog is a courtesy, not the gate), a re-plan on the server, and the

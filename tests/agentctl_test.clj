@@ -1885,6 +1885,35 @@
       (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
              (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
 
+(deftest a-resolved-value-is-masked-whatever-its-field-is-called
+  (refs/forget!)
+  (try
+    (is (= "sk-test-resolvedvalue77" (refs/resolved-value (refs/parse "!cmd://echo sk-test-resolvedvalue77"))))
+    (let [o (plan/op {:tool :kimi :kind :mcps :id :docs :action :update :summary "x sk-test-resolvedvalue77"
+                      :diffs [{:key :docs
+                               ;; read back from JSON (keywords), merged with
+                               ;; the declaration (strings): one field twice
+                               :before {:env {:DOCS "old-plain-value-1" :MODE "fast"}}
+                               :after {:env {:DOCS "old-plain-value-1" "DOCS" "sk-test-resolvedvalue77"
+                                             :MODE "fast" "MODE" "fast"}
+                                       :x-docs "sk-test-resolvedvalue77"
+                                       :args ["--opt" "sk-test-resolvedvalue77"]}}]})
+          m (plan/mask-op o)
+          [{:keys [before after]}] (:diffs m)]
+      (testing "the resolved value is masked in every field and in the summary"
+        (is (= "sk-t…77" (get-in after ["env" "DOCS"])))
+        (is (= "sk-t…77" (get after "x-docs")))
+        (is (= ["--opt" "sk-t…77"] (get after "args")))
+        (is (= "x sk-t…77" (:summary m))))
+      (testing "the old value it replaces is masked, an unchanged plain one is not"
+        (is (= "old-…-1" (get-in before ["env" "DOCS"])))
+        (is (= "fast" (get-in before ["env" "MODE"]))))
+      (testing "the text plan masks what the op does"
+        (let [text (plan/render-plan [o] {:verbose true})]
+          (is (not (str/includes? text "sk-test-resolvedvalue77")))
+          (is (not (str/includes? text "old-plain-value-1"))))))
+    (finally (refs/forget!))))
+
 (deftest every-adapter-holds-back-what-an-unresolved-secret-would-leave-partial
   ;; a locked vault: every ref below stays unresolved, and `bw` never runs
   (let [ref "!bw://vendor/KEY"

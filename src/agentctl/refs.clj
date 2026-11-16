@@ -111,6 +111,12 @@
 
 (def ^:private cache (atom {}))
 
+(def ^:private resolved-secrets
+  "Every value a ref other than a literal resolved to. Output is scrubbed of
+   them wherever they land: a value's name says nothing reliable about whether
+   it is a credential (`x-docs`, `DOCS_ENV`), but where it came from does."
+  (atom #{}))
+
 (defn- bw-unlocked? []
   (let [{:keys [exit out]} (u/sh "bw" "status")]
     (and (zero? exit) (str/includes? out "\"unlocked\""))))
@@ -137,6 +143,7 @@
    vault."
   []
   (reset! cache {})
+  (reset! resolved-secrets #{})
   (reset! bw-probe (probe-bw)))
 
 (defn- bw-fetch [{:ref/keys [item field]}]
@@ -208,6 +215,9 @@
                              :else {:status :ok :value (str/trim out)}))
                     :bw (bw-fetch r))]
           (swap! cache assoc r res)
+          (when (and (= :ok (:status res)) (not= :literal (:ref/kind r))
+                     (string? (:value res)) (not (str/blank? (:value res))))
+            (swap! resolved-secrets conj (:value res)))
           res))))
 
 (defn resolved-value [r]
@@ -278,3 +288,50 @@
 (defn mask [v]
   (let [s (str v)]
     (if (<= (count s) 8) "********" (str (subs s 0 4) "…" (subs s (- (count s) 2))))))
+
+(defn masked?
+  "A string `mask` produced. Masked once, a value is not masked again: a mask
+   of a mask says less, and says it differently on each side of a diff."
+  [v]
+  (boolean (and (string? v) (re-matches #"(?s)(?:\*{8}|.{4}….{2})(?: \(changed\))?" v))))
+
+(def ^:private min-embedded
+  "How long a resolved value must be before it is searched for inside other
+   text. A short one (`1`, `on`) would mask half the plan; it is still masked
+   where it is the whole value."
+  6)
+
+(defn resolved-secret?
+  "True when `v` is, or carries, a value a ref resolved to."
+  [v]
+  (boolean
+   (and (string? v)
+        (some #(or (= v %) (and (>= (count %) min-embedded) (str/includes? v %)))
+              @resolved-secrets))))
+
+(defn scrub
+  "`x` with every resolved value masked, at any depth and inside any string.
+   The last line of defence for output: a summary, a note, a command line or
+   an error can carry one as surely as a diff can."
+  [x]
+  (let [secrets (sort-by (comp - count) @resolved-secrets)]
+    (if (empty? secrets)
+      x
+      (letfn [(clean [s]
+                (cond
+                  (some #(= s %) secrets) (mask s)
+                  :else (reduce (fn [t sec]
+                                  (if (and (>= (count sec) min-embedded) (str/includes? t sec))
+                                    (str/replace t sec (mask sec))
+                                    t))
+                                s secrets)))
+              (walk [v]
+                (cond
+                  (string? v) (clean v)
+                  (record? v) v
+                  (map? v) (into (empty v) (map (fn [[k x]] [k (walk x)])) v)
+                  (vector? v) (mapv walk v)
+                  (set? v) (into (empty v) (map walk) v)
+                  (seq? v) (map walk v)
+                  :else v))]
+        (walk x)))))

@@ -39,9 +39,10 @@
    (cond
      (refs/ref? v) (refs/describe v)
      (nil? v) "∅"
-     (refs/credential? k v) (pr-str (refs/mask v))
+     (refs/masked? v) (pr-str v)
+     (or (refs/credential? k v) (refs/resolved-secret? v)) (pr-str (refs/mask v))
+     (coll? v) (pr-str (u/norm (refs/scrub v)))
      (string? v) (pr-str v)
-     (coll? v) (pr-str (u/norm v))
      :else (pr-str v))))
 
 (defn field-diffs
@@ -98,6 +99,66 @@
                         :create (render-val mk a)
                         :delete (render-val mk b)
                         (str (render-val mk b) " -> " (render-val mk a)))))])))
+
+(def ^:private secret-maps
+  "Maps whose every value may be a credential under a name that does not say
+   so: an MCP server's environment and its HTTP headers."
+  #{"env" "headers" "http_headers" "env_http_headers"})
+
+(defn- mask-leaf [k v hit?]
+  (cond
+    (or (nil? v) (refs/ref? v) (refs/masked? v)) v
+    (or hit? (refs/credential? k v) (refs/resolved-secret? v)) (refs/mask v)
+    (coll? v) (refs/scrub v)
+    :else v))
+
+(defn- mask-diff
+  "`[before after]` of one diff with every credential masked, as every output
+   must show it — text, GUI and JSON alike, so none of them can print what
+   another hides. A value is masked when its name says it is a credential,
+   when it is what a ref resolved to, or when it is the before side of either
+   — a rotated or dropped secret is still one, though nothing resolves it
+   any more. Inside an environment or a header map any value that changes or
+   goes away is masked on the before side: what it held may have come from a
+   ref the declaration no longer makes, and nothing on disk says which."
+  ([k b a] (mask-diff k b a false))
+  ([k b a secret-map?]
+   (let [mk (native-key k)]
+     (if (and (or (plain-map? b) (nil? b))
+              (or (plain-map? a) (nil? a))
+              (or (plain-map? b) (plain-map? a)))
+       ;; a side read from JSON is keyed by keywords, a declared one by
+       ;; strings, and a merged one by both: keyed by name, as `u/norm`
+       ;; compares them, the same field meets itself and is masked once
+       (let [inner? (or secret-map? (contains? secret-maps (u/kw->str mk)))
+             by-name (fn [m] (when m (into (sorted-map) (map (fn [[kk v]] [(u/key-str kk) v])) m)))
+             b (by-name b)
+             a (by-name a)
+             pairs (into {} (for [kk (distinct (concat (keys b) (keys a)))]
+                              [kk (mask-diff kk (get b kk) (get a kk) inner?)]))
+             side (fn [m pick] (when m (into (sorted-map) (map (fn [kk] [kk (pick (pairs kk))])) (keys m))))]
+         [(side b first) (side a second)])
+       (let [changed? (not= (u/norm b) (u/norm a))
+             a-hit? (or (refs/credential? mk a) (refs/resolved-secret? a))
+             a' (mask-leaf mk a false)
+             b' (mask-leaf mk b (and changed? (or a-hit? secret-map?)))]
+         ;; a rotated secret can mask the same on both sides; the change
+         ;; must still show
+         [b' (if (and changed? (some? a') (= b' a') (not (refs/masked? a)))
+               (str a' " (changed)")
+               a')])))))
+
+(defn mask-op
+  "`o` as output may show it: every diff masked by `mask-diff`, and every
+   resolved value scrubbed from whatever else it carries. The op that runs is
+   untouched — only what is printed, served or serialized goes through here."
+  [o]
+  (refs/scrub
+   (cond-> o
+     (seq (:diffs o))
+     (update :diffs (partial mapv (fn [{:keys [key before after] :as d}]
+                                    (let [[b a] (mask-diff key before after)]
+                                      (assoc d :before b :after a))))))))
 
 (defn changed? [before after ks] (boolean (seq (field-diffs before after ks))))
 
@@ -376,7 +437,15 @@
   [ops {:keys [show-noop]}]
   (boolean (or (some mutating? ops) show-noop (some :warn ops))))
 
+(declare render-plan*)
+
 (defn render-plan
+  "The plan as text. Every op is masked first (`mask-op`) and the text
+   scrubbed after: no output mode may print a value another one hides."
+  [ops opts]
+  (refs/scrub (render-plan* (map mask-op ops) opts)))
+
+(defn- render-plan*
   [ops {:keys [show-noop] :as opts}]
   ;; a warning noop is the report that a declared setting went nowhere — hiding
   ;; it would make the config look applied when it was not. A converged check is
@@ -535,12 +604,13 @@
   (let [visible (if show-noop
                   ops
                   (filter #(or (mutating? %) (:warn %) (quiet-noop? %)) ops))
-        by-tool (group-by :tool visible)]
-    (vec (for [tool (sort-by name (keys by-tool))
+        by-tool (group-by :tool (map mask-op visible))]
+    (refs/scrub
+     (vec (for [tool (sort-by name (keys by-tool))
                :let [tool-ops (sort-by (juxt (comp name :kind) (comp u/kw->str :id))
                                        (get by-tool tool))]]
            {:tool (name tool)
-            :groups (mapv group-data (chunk-ops tool-ops))}))))
+            :groups (mapv group-data (chunk-ops tool-ops))})))))
 
 (defn summary-line
   "Counts by action. A resource held back on an unresolved secret is a noop

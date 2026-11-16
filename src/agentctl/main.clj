@@ -129,8 +129,11 @@
           :else (recur (rest args) (assoc opts :command a))))
       opts)))
 
-(defn- op->data [o]
-  (-> o (dissoc :exec!) (update :tool u/kw->str) (update :kind u/kw->str) (update :id u/kw->str)))
+(defn- op->data
+  "An op as `--json` prints it: masked exactly as the text plan is."
+  [o]
+  (-> o (dissoc :exec!) plan/mask-op
+      (update :tool u/kw->str) (update :kind u/kw->str) (update :id u/kw->str)))
 
 (defn- load! [opts]
   (config/load-config (or (:file opts) config/default-path)))
