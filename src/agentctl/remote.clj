@@ -234,7 +234,10 @@
                         "end=$(( $(date +%s) + 5 ))\n"
                         "while kill -0 \"$p\" 2>/dev/null && [ \"$(date +%s)\" -lt \"$end\" ]; do sleep 0.1; done\n"
                         "if kill -0 \"$p\" 2>/dev/null; then v=; else wait \"$p\" && v=$(head -n 1 \"$o\") || v=; fi\n"
-                        "kill -9 \"-$p\" 2>/dev/null || kill -9 \"$p\" 2>/dev/null || true\n"
+                        ;; no group to kill (dash without setsid or perl has no
+                        ;; job control): the tree, children before parents
+                        "kt() { for c in $( (pgrep -P \"$1\" || ps -e -o pid= -o ppid= | awk -v p=\"$1\" '$2==p{print $1}') 2>/dev/null); do kt \"$c\"; done; kill -9 \"$1\" 2>/dev/null || true; }\n"
+                        "kill -9 \"-$p\" 2>/dev/null || kt \"$p\"\n"
                         "wait \"$p\" 2>/dev/null || true; rm -f \"$o\"\n"
                         "printf 'V\\t" t "\\t%s\\n' \"$(e \"$v\")\"\n"
                         "else printf 'T\\t" t "\\t0\\n'; fi\n")))

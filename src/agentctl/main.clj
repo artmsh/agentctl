@@ -259,7 +259,8 @@
              :skipped (map name (:skipped planned))
              :warnings warnings
              :findings (mapv finding->data findings)
-             :summary (plan/summary-line ops)}]
+             :summary (plan/summary-line ops)
+             :withheld (plan/withheld-changes ops)}]
     (when-not (:json opts)
       (doseq [w warnings] (println (str "  ⚠ " w)))
       (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
@@ -331,7 +332,8 @@
                        :warnings (vec warnings)
                        :findings (mapv finding->data findings)
                        :secrets (count (filter #(= :secret (:risk %)) changes))
-                       :summary (plan/summary-line ops)}
+                       :summary (plan/summary-line ops)
+                       :withheld (plan/withheld-changes ops)}
                 scope (assoc :scope {:where (u/kw->str (:where scope))
                                      :path (:path scope)
                                      :projects (mapv u/kw->str (sort (:projects scope)))}))]

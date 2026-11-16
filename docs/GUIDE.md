@@ -181,7 +181,8 @@ setting below is written key by key into its own table, so that state survives.
 A `config.toml` that is a symlink, into a dotfiles checkout say, is left alone:
 agentctl does not write through it. The plan says so in one warning that lists
 each change withheld, and counts them as pending: `apply` exits 2 and `apply!` 1
-until the link is replaced or the declaration matches the file.
+until the link is replaced or the declaration matches the file. Under `--json` each
+one is an entry of `withheld`: `{action, kind, id, target, keys}`.
 
 A model switch two keys away: bind the presets browser and put `/model` in slot 0.
 
