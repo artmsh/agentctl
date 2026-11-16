@@ -833,6 +833,9 @@ cat > "$SB/agents.edn" <<EDN
 EDN
 plan -k mcps
 [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "the dropped approvals are not drift: exit $code"; }
+# aflip's .mcp.json copy is agentctl's, and goes in this plan: no warning about it
+grep -q "also declared in" "$SB/plan.txt" && { cat "$SB/plan.txt"; fail "the plan warns about a copy it prunes"; }
+grep -qF -- '- aflip' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the .mcp.json copy is not pruned"; }
 for id in adocs aflip; do
   grep -qF -- "- enabledMcpjsonServers: \"$id\"" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not remove the approval of $id"; }
 done

@@ -713,10 +713,14 @@
     (concat
      ;; a copy left behind in .mcp.json still ships the server — and its token —
      ;; to everyone who clones the repo. Not ours to delete: agentctl never
-     ;; wrote it, and the file may hold servers it knows nothing about
+     ;; wrote it, and the file may hold servers it knows nothing about. A copy
+     ;; agentctl did write there is pruned by this same plan
+     ;; (`project-mcp-prune-ops`), and needs no warning
      (for [[mid m] (common/project-mcps cfg proj tool)
+           :let [oid (keyword (str (name id) "/" (name mid)))]
            :when (and (not= :project (:scope m))
-                      (contains? tracked (keyword (u/kw->str mid))))]
+                      (contains? tracked (keyword (u/kw->str mid)))
+                      (not= :project (:scope (state/entry st tool :mcps oid))))]
        (plan/op {:action :noop :warn true :tool tool :kind :mcps :project id
                  :id (keyword (str (name id) "/" (name mid)))
                  :summary (str "⚠ also declared in " (u/tilde (project-mcp-file proj))
