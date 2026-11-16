@@ -52,14 +52,18 @@ c=$(AGENTCTL_PYTHON="$SB/bin/old-python" code_of run apply! -f "$SB/a.edn" --all
 [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "a first write without tomllib exited $c, not 1"; }
 [ ! -e "$CONF" ] || fail "config.toml written without an interpreter to check it"
 
-echo "2. a config.toml tomllib cannot read is edited, not refused, and the reason is said"
+echo "2. a config.toml this python cannot read is an error naming the fix, and stays untouched"
 # what tomllib before python 3.15 makes of Codex's TOML 1.1; a repeated key
 # is rejected by every version, so the check does not depend on which one runs
 printf 'model = "m-a"\nmodel = "m-a"\n' > "$CONF"
-c=$(code_of run apply! -f "$SB/a.edn" --all -t codex -y)
-[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "an edit to an unreadable config.toml exited $c"; }
-grep -q 'not TOML 1.0' "$SB/out.txt" || { cat "$SB/out.txt"; fail "no warning that the edit went unchecked"; }
-grep -q '^model = "m-b"' "$CONF" || fail "the declared model was not written"
+cp "$CONF" "$SB/before.toml"
+for cmd in apply apply!; do
+  c=$(code_of run $cmd -f "$SB/a.edn" --all -t codex -y)
+  [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "$cmd on an unreadable config.toml exited $c, not 1"; }
+  grep -q 'config.toml does not parse' "$SB/out.txt" && grep -q 'AGENTCTL_PYTHON' "$SB/out.txt" \
+    || { cat "$SB/out.txt"; fail "$cmd does not name the cause and the fix"; }
+  cmp -s "$CONF" "$SB/before.toml" || fail "$cmd changed a config.toml it could not read"
+done
 
 echo "3. headers are found by name, and a [table] line inside a string stays in it"
 cat > "$CONF" <<'TOML'
@@ -217,5 +221,39 @@ grep -q 'hooks.json is not valid JSON' "$SB/out.txt" || { cat "$SB/out.txt"; fai
 c=$(code_of run apply! -f "$SB/g.edn" --all -t codex -y)
 [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "apply! on a broken hooks.json exited $c, not 1"; }
 cmp -s "$HOOKS" "$SB/before.json" || fail "a hooks.json that does not parse was rewritten"
+
+echo "9. a broken permissions setup refuses runs that write codex settings, and only warns others"
+rm -f "$HOOKS"
+printf 'model = "m-a"\n' > "$CONF"
+cp "$CONF" "$SB/before.toml"
+cat > "$SB/h.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b"
+             :permission-profiles {:dev {:extends ":read-only"}}}]
+ :mcps [{:id :docs :cmd "/bin/echo docs" :in :all :acli [:codex]}]}
+EDN
+c=$(code_of run apply -f "$SB/h.edn" --all -k mcps -t codex)
+[ "$c" != 1 ] || { cat "$SB/out.txt"; fail "-k mcps -t codex was refused on a permissions finding"; }
+grep -q 'no default_permissions' "$SB/out.txt" || { cat "$SB/out.txt"; fail "-k mcps -t codex does not warn about the permissions finding"; }
+grep -q 'docs' "$SB/out.txt" || { cat "$SB/out.txt"; fail "-k mcps -t codex does not plan the MCP server"; }
+c=$(code_of run apply! -f "$SB/h.edn" --all -t codex -y)
+[ "$c" = 1 ] || { cat "$SB/out.txt"; fail "a run that writes codex settings exited $c, not 1"; }
+grep -q 'no default_permissions' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the refusal does not name the finding"; }
+cmp -s "$CONF" "$SB/before.toml" || fail "config.toml changed on a refused run"
+
+echo "10. a hook whose :event changes moves: the old element goes in the same apply!"
+rm -f "$HOOKS"
+printf 'model = "m-a"\n' > "$CONF"
+for ev in Stop SessionStart; do
+  cat > "$SB/i.edn" <<EDN
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+ :hooks [{:id :note :event :$ev :command "note" :acli [:codex] :in :all}]}
+EDN
+  c=$(code_of run apply! -f "$SB/i.edn" --all -t codex -y)
+  [ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! ($ev) exited $c"; }
+done
+c=$(code_of run apply -f "$SB/i.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "a moved codex hook does not converge ($c)"; }
+python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["hooks"]; assert not h.get("Stop"), h; assert len(h["SessionStart"]) == 1, h' "$HOOKS" \
+  || { cat "$HOOKS"; fail "a moved codex hook left its old element"; }
 
 echo "all codex e2e checks passed"

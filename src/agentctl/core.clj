@@ -331,16 +331,18 @@
   (let [desired (into {} (for [[pid p] (:projects cfg) [id h] (get-in p [:tools :claude :hooks])]
                            [(keyword (name pid) (name id)) {:project pid :project-path (:path p) :decl h}]))]
     (concat
-     (keep (fn [[id {:keys [project project-path decl]}]]
-             (when-let [o (plan/json-array-merge-op
-                          {:tool :claude :kind :hooks :id id :project project
-                           :file (str project-path "/.claude/settings.json")
-                           :path [:hooks (keyword (u/kw->str (:event decl)))]
-                           :old (:value (state/entry st :claude :hooks id)) :value (claude/hook-group decl)
-                           ;; as user-scope hooks do: under --show-noop a
-                           ;; converged hook is the confirmation a change landed
-                           :report-converged? true})]
-               (assoc o :project-path project-path))) desired)
+     (mapcat (fn [[id {:keys [project project-path decl]}]]
+               (let [entry (state/entry st :claude :hooks id)]
+                 (map #(assoc % :project-path project-path)
+                      (plan/json-array-place-ops
+                       {:tool :claude :kind :hooks :id id :project project
+                        :file (str project-path "/.claude/settings.json")
+                        :path [:hooks (keyword (u/kw->str (:event decl)))]
+                        :old (:value entry) :old-path (:path entry) :value (claude/hook-group decl)
+                        ;; as user-scope hooks do: under --show-noop a
+                        ;; converged hook is the confirmation a change landed
+                        :report-converged? true}))))
+             desired)
      (keep (fn [[[t k sid] data]]
              (let [id (keyword sid)]
                (when (and (= t :claude) (= k :hooks) (:project-path data) (not (contains? desired id)))
@@ -557,6 +559,35 @@
                        (or (not= :pi %) (not= :untrusted (pi/trust as-pi))))
                  (:for-tools p)))))
 
+(defn refuse-unparseable-json
+  "Every mutating op whose target is a JSON file that does not parse, as a
+   refusal: shown in the plan, failing on apply!, the file left byte for
+   byte. Adapters read such a file as nil, so whatever they planned on top of
+   it would write a new file over the old one. This holds for any JSON
+   writer, the ones added later included."
+  [ops]
+  (let [why (memoize plan/unreadable-json)]
+    (map (fn [o]
+           (let [t (str (:target o))]
+             (if-let [w (and (plan/mutating? o) (str/ends-with? t ".json") (why t))]
+               (plan/refused-json-op (assoc (select-keys o [:tool :kind :id :project :path :project-path]) :file t) w)
+               o)))
+         ops)))
+
+(defn gate-codex-permissions
+  "Codex's permissions check (`codex/permission-findings`) refuses a run
+   whose plan, after `-t`/`-k`/`-p`/`--only`/`--user`, still writes codex
+   settings — only those can leave config.toml's profiles and its default
+   out of step. Any other run (`-k mcps -t codex`) gets the finding as a
+   warning. `gates` were set aside before the filters, so a warning survives
+   a `-k` that names another kind."
+  [gates ops]
+  (if (empty? gates)
+    ops
+    (if (some #(and (= :codex (:tool %)) (= :settings (:kind %)) (plan/mutating? %)) ops)
+      (throw (ex-info (:summary (first gates)) {:path [:executors :codex :sandbox]}))
+      (concat ops (map #(dissoc % :refuse-if-settings-change) gates)))))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -593,7 +624,7 @@
                             (:project o) (assoc :project-path (get-in cfg [:projects (:project o) :path]))
                             (= :projects (:kind o)) (assoc :kind (dsl-section o)))) tool-ops)
                    tool-ops)]
-    (-> (concat (sources/pack-ops cfg)
+    (let [all (concat (sources/pack-ops cfg)
                 (sources/project-pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
@@ -609,6 +640,8 @@
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st))
                 (when (selected :claude) (claude-agents/plan-ops cfg st)))
+          gates (filter :refuse-if-settings-change all)]
+      (-> (remove :refuse-if-settings-change all)
         (keep-kinds opts)
         (keep-projects cfg opts)
         (keep-only cfg opts)
@@ -617,7 +650,9 @@
         drop-moot-collisions
         (->> (annotate-skill-ops cfg))
         same-command
-        vec)))
+        refuse-unparseable-json
+        (->> (gate-codex-permissions gates))
+        vec))))
 
 (defn missing-tools [cfg opts]
   (remove (fn [t] ((get-in registry [t :present?])))

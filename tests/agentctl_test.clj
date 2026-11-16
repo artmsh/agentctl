@@ -138,14 +138,17 @@
       (is (nil? (toml/find-python old-py)))
       (is (nil? (toml/find-python (str dir "/no-such-python"))))
       (is (some? (toml/find-python nil)) "this suite runs with a python3 3.11+ on PATH")))
-  (testing "a file that does not parse reads as nil leniently, but a missing interpreter is never swallowed"
+  (testing "a file this python cannot parse is an error naming the cause and the fix, never an empty table"
     (let [f (str (temp-dir) "/c.toml")]
       (u/write-text! f "a = 1\na = 2\n")
-      (is (nil? (toml/read-toml-lenient f)))
-      (is (nil? (toml/read-toml-lenient (str f ".absent"))))
+      (doseq [read [toml/read-toml]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"(?s)c\.toml does not parse.*TOML 1\.1.*3\.15.*AGENTCTL_PYTHON"
+                              (read f))))
+      (is (nil? (toml/read-toml (str f ".absent"))))
       (with-redefs [toml/python! (fn [] (throw (ex-info "no python" {:type :agentctl.toml/no-python})))]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml-lenient f)))
-        (is (nil? (toml/read-toml-lenient (str f ".absent"))) "an absent file needs no interpreter")))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml f)))
+        (is (nil? (toml/read-toml (str f ".absent"))) "an absent file needs no interpreter")))))
 
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)
@@ -1372,7 +1375,9 @@
       (is (empty? (config/structural-findings cfg)))
       (with-redefs [codex/config-file f]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
-                              (doall (codex/settings-ops cfg))))
+                              (vec (core/gate-codex-permissions
+                                    (filter :refuse-if-settings-change (codex/settings-ops cfg))
+                                    (remove :refuse-if-settings-change (codex/settings-ops cfg))))))
         (is (not (u/exists? f)))
         (u/write-text! f "default_permissions = \"p\"\n")
         (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough"))))
@@ -1427,6 +1432,27 @@
       (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
       (with-redefs [codex/config-file f]
         (is (seq (codex-drift (row {:model "m-b"}) state/empty-state)))))))
+
+(deftest codex-permissions-check-refuses-only-runs-that-touch-codex-settings
+  (let [f (str (temp-dir) "/config.toml")
+        dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}
+        row (fn [m] {:settings [(merge {:id :user-codex :acli [:codex] :in :all :model "m-a"} m)]
+                     :mcps [{:id :docs :cmd "/bin/echo docs" :in :all :acli [:codex]}]})
+        plan (fn [raw st opts] (core/build-plan (config/normalize raw "test") st opts))]
+    (u/write-text! f "model = \"m-a\"\n")
+    (with-redefs [codex/config-file f
+                  codex/mcp-list (constantly {})]
+      (let [{st :st} (converge-codex (row {:sandbox "dev" :permission-profiles {:dev dev}}) state/empty-state)
+            broken (row {:permission-profiles {:dev dev}})]
+        (testing "-k mcps -t codex cannot change permissions: a warning, not a refusal"
+          (let [ops (plan broken st {:tools #{:codex} :kinds #{:mcps}})]
+            (is (some #(and (:warn %) (re-find #"no default_permissions" (str (:summary %)))) ops))
+            (is (some #(and (= :mcps (:kind %)) (plan/mutating? %)) ops) "the MCP server is still planned")))
+        (testing "a run that writes codex settings is refused"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                                (plan broken st {:tools #{:codex}})))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                                (plan broken st {:tools #{:codex} :kinds #{:settings}}))))))))
 
 (def vendor-codex-hooks
   "A hooks.json a vendor installer wrote: one SessionStart and one Stop hook."
@@ -1513,6 +1539,38 @@
         (is (nil? (plan/json-array-merge-op {:tool :claude :kind :hooks :id :x :file f :path [:hooks :Stop]
                                             :value {:hooks [{:type "command" :command "x"}]}})))))))
 
+(deftest a-json-file-that-does-not-parse-is-never-rewritten
+  ;; read as nil, a settings.json with one trailing comma was rewritten
+  ;; holding only what agentctl declared: env and every other key gone
+  (let [f (str (temp-dir) "/settings.json")
+        broken "{\"env\": {\"A\": \"1\"}, \"model\": \"m-a\",}\n"
+        args {:tool :claude :kind :settings :id :model :file f :path [:model]}]
+    (doseq [[label mk] [["set" #(plan/json-set-op (assoc args :value "m-b"))]
+                        ["unset" #(plan/json-unset-op args)]
+                        ["remove" #(plan/json-remove-op args)]]
+            :let [_ (u/write-text! f broken)
+                  o (mk)]]
+      (testing label
+        (is (some? o) "a file that does not parse is reported, not read as empty")
+        (is (:warn o))
+        (is (re-find #"not valid JSON" (str (:summary o))))
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)) "byte for byte")))
+    (testing "an op planned before the file broke still refuses at exec time"
+      (u/write-text! f "{\"model\": \"m-a\"}\n")
+      (let [o (plan/json-set-op (assoc args :value "m-b"))]
+        (u/write-text! f broken)
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)))))
+    (testing "every planned write to a broken JSON file is refused, whichever adapter built it"
+      (u/write-text! f broken)
+      (let [raw-op (plan/op {:action :update :tool :claude :kind :plugins :id :p :target f
+                             :exec! #(u/write-json! f {:enabledPlugins {}})})
+            [o] (core/refuse-unparseable-json [raw-op])]
+        (is (:warn o))
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)))))))
+
 (deftest codex-hooks-refuse-a-hooks-json-that-does-not-parse
   ;; read as nil, an unparseable hooks.json was replaced by one holding only
   ;; agentctl's hook: every vendor hook in it deleted
@@ -1538,6 +1596,25 @@
           (is (= [:update] (map :action ops)))
           (is (seq (:failed (core/execute! ops))))
           (is (= broken (slurp hooks))))))))
+
+(deftest a-settings-rows-hooks-and-hooks-rows-both-contribute
+  (let [settings {:id :user-claude :acli [:claude] :in :all :model "m-a"
+                  :hooks {:Stop [{:id :from-settings :command "a"}]
+                          :from-settings-keyed {:event :SessionStart :command "c"}}}
+        hook {:id :from-row :event :Stop :command "b" :acli [:claude] :in :all}]
+    (testing "whichever placement comes first, every hook reaches the tool"
+      (doseq [raw [{:settings [settings] :hooks [hook]}
+                   {:hooks [hook] :settings [settings]}
+                   ;; a row without :acli is placed in another order
+                   {:settings [settings] :hooks [(dissoc hook :acli)]}
+                   {:settings [(dissoc settings :acli)] :hooks [(dissoc hook :acli)]}]
+              :let [hooks (get-in (config/normalize raw "test") [:tools :claude :hooks])]]
+        (is (= #{:from-settings :from-settings-keyed :from-row} (set (keys hooks))) (pr-str raw))
+        (is (= :Stop (keyword (u/kw->str (:event (:from-settings hooks))))))))
+    (testing "one id declared in both, with different bodies, is a structural error"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hook :from-row is declared twice"
+                            (config/normalize {:settings [(assoc-in settings [:hooks :Stop 0 :id] :from-row)]
+                                               :hooks [hook]} "test"))))))
 
 (deftest codex-hooks-validate-events-and-stay-opt-in
   (testing "validate accepts codex hooks and rejects an event codex never fires"

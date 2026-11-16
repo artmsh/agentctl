@@ -292,6 +292,36 @@
                         {:duplicate k}))))
     es))
 
+(defn- hook-decls
+  "A `:hooks` map, id-keyed or grouped by event, as {id declaration}."
+  [hooks]
+  (into {} (mapcat (fn [[k v]]
+                     (if (sequential? v)
+                       (keep #(when-let [id (:id %)] [id (assoc (dissoc % :id) :event k)]) v)
+                       [[k v]])))
+        hooks))
+
+(defn- merge-hooks
+  "Two `:hooks` maps as one. A `:settings` row's `:hooks` and the `:hooks`
+   rows land in the same map, and a plain `merge` let whichever was placed
+   last replace the other's hooks, which were then pruned. Event groups
+   concatenate; one id declared twice with different bodies is an error."
+  [a b]
+  (let [da (hook-decls a) db (hook-decls b)]
+    (doseq [[id d] db
+            :let [d' (get da id)]
+            :when (and d' (not= (update d' :event u/kw->str) (update d :event u/kw->str)))]
+      (throw (ex-info (str "hook " (pr-str id) " is declared twice, in a :settings row's :hooks and a :hooks row"
+                           " or in two rows; keep one declaration, or give one another :id")
+                      {:id id})))
+    (merge-with (fn [x y] (if (and (sequential? x) (sequential? y)) (vec (distinct (concat x y))) y)) a b)))
+
+(defn- merge-settings
+  "`merge` for one tool's settings, with `:hooks` merged hook by hook."
+  [cur body]
+  (cond-> (merge cur body)
+    (or (:hooks cur) (:hooks body)) (assoc :hooks (merge-hooks (:hooks cur) (:hooks body)))))
+
 (defn compile-config
   "Lower entity vectors to the adapter target model. No writes occur here."
   [raw tools-for]
@@ -325,7 +355,7 @@
                       scope (if (= in :all) :global (if (= at :repo) :project :local))
                       cfg (if pid (update-in cfg [:projects pid :tools] #(vec (set (concat % ts)))) cfg)]
                   (case kind
-                    :settings (reduce #(update-in %1 (if pid [:projects pid :executors %2] [:executors %2]) merge
+                    :settings (reduce #(update-in %1 (if pid [:projects pid :executors %2] [:executors %2]) merge-settings
                                                  ;; hooks in a unified row stay Claude's, as for a :hooks row
                                                  (if (and (= :codex %2) (not (names-codex? decl))) (dissoc body :hooks) body))
                                       cfg ts)
@@ -334,7 +364,7 @@
                     ;; codex hooks are user-wide only; a project row is
                     ;; reported by `core/entity-extra-ops`
                     :hooks (reduce (fn [cfg t]
-                                     (update-in cfg (if pid [:projects pid :executors t :hooks] [:executors t :hooks]) merge
+                                     (update-in cfg (if pid [:projects pid :executors t :hooks] [:executors t :hooks]) merge-hooks
                                                 (or (:hooks body) {id body})))
                                    cfg (filter (if pid #{:claude} #{:claude :codex}) ts))
                     :trust (if pid (-> cfg (assoc-in [:projects pid :trusted] (get body :trusted true))
