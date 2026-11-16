@@ -30,6 +30,7 @@ export AGENTCTL_SKILLS_CMD="$ROOT/tests/skills-stub"
 
 bb -cp "$ROOT/src" "$ROOT/tests/agentctl_test.clj"
 "$ROOT/tests/test-agentctl.sh"
+"$ROOT/tests/test-codex.sh"
 "$ROOT/tests/test-extensions.sh"
 "$ROOT/tests/test-hosts.sh"
 "$ROOT/tests/test-awl.sh"

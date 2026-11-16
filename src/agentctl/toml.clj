@@ -1,7 +1,8 @@
 (ns agentctl.toml
   "Minimal TOML support.
 
-   Reading goes through python3's stdlib tomllib (exact, no hand-rolled parser).
+   Reading goes through python3's stdlib tomllib (exact, no hand-rolled parser;
+   `python!` picks the interpreter).
    Writing is deliberately *surgical*: the file is split into header-delimited
    segments and only the lines we own are rewritten, so comments, ordering and
    tool-written state (codex [hooks.state], [projects.*]) survive untouched."
@@ -10,19 +11,79 @@
             [cheshire.core :as json]
             [clojure.string :as str]))
 
+;; ---------------------------------------------------------------- python
+
+(def python-candidates
+  "Interpreters tried, newest first, when AGENTCTL_PYTHON is unset. tomllib
+   arrived in 3.11; 3.15's also reads TOML 1.1 (a multi-line inline table),
+   which Codex accepts."
+  ["python3.15" "python3.14" "python3.13" "python3.12" "python3.11" "python3"])
+
+(defn- run-python
+  "{:exit :out :err} of `script` run by `py` over stdin `text`; never throws."
+  [py script text]
+  (try @(p/process [py "-c" script] {:in (or text "") :out :string :err :string})
+       (catch Exception e {:exit 127 :out "" :err (.getMessage e)})))
+
+(defn- tomllib? [py] (zero? (:exit (run-python py "import tomllib" ""))))
+
+(defn find-python
+  "The interpreter to read TOML with: `env-python` when set — and then only
+   if it has tomllib, never a silent fallback — else the first candidate on
+   PATH that has it. nil for none."
+  [env-python]
+  (if (str/blank? env-python)
+    (some #(when (and (u/which %) (tomllib? %)) %) python-candidates)
+    (when (tomllib? env-python) env-python)))
+
+(def ^:dynamic *python* "Overrides the lookup; tests rebind it." nil)
+
+(def ^:private found-python (delay (find-python (System/getenv "AGENTCTL_PYTHON"))))
+
+(defn no-python? [e] (= ::no-python (:type (ex-data e))))
+
+(defn python!
+  "The interpreter every TOML read and check runs, or an error saying what
+   to install or set. There is no fallback: without tomllib a config reads as
+   empty, the plan shows what exists as new, and apply never converges."
+  []
+  (or *python* @found-python
+      (throw (ex-info (if-let [e (not-empty (System/getenv "AGENTCTL_PYTHON"))]
+                        (str "AGENTCTL_PYTHON=" e " has no tomllib: TOML configs (Codex, Kimi) need python3 3.11+")
+                        (str "TOML configs (Codex, Kimi) need python3 3.11+ with tomllib, and none is on PATH (tried "
+                             (str/join ", " python-candidates) "): install one or set AGENTCTL_PYTHON"))
+                      {:type ::no-python}))))
+
 ;; ---------------------------------------------------------------- read
 
-(def ^:private py-read
-  "import sys,tomllib,json;print(json.dumps(tomllib.load(open(sys.argv[1],'rb'))))")
+(def ^:private py-load
+  "import sys,tomllib,json;print(json.dumps(tomllib.loads(sys.stdin.read()),default=str))")
+
+(defn parse-text
+  "TOML text as a string-keyed nested map; throws when it does not parse."
+  [text]
+  (let [{:keys [exit out err]} (run-python (python!) py-load text)]
+    (if (zero? exit)
+      (json/parse-string out)
+      (throw (ex-info (str "TOML parse failed: " (last (remove str/blank? (str/split-lines (str err)))))
+                      {:err err})))))
 
 (defn read-toml
-  "Parse a TOML file into a keywordless nested map. Returns nil when absent/unparseable."
+  "Parse a TOML file into a keywordless nested map. nil when absent; throws
+   when it does not parse, or when there is no interpreter to parse it with."
   [path]
   (when (u/exists? path)
-    (let [{:keys [exit out err]} (u/sh "python3" "-c" py-read (u/abs-path path))]
-      (if (zero? exit)
-        (json/parse-string out)
-        (throw (ex-info (str "TOML parse failed: " path) {:err err}))))))
+    (try (parse-text (u/slurp-safe path))
+         (catch clojure.lang.ExceptionInfo e
+           (if (no-python? e) (throw e)
+               (throw (ex-info (str "TOML parse failed: " path) (ex-data e))))))))
+
+(defn read-toml-lenient
+  "`read-toml`, but nil for a file that does not parse. A missing interpreter
+   still throws."
+  [path]
+  (try (read-toml path)
+       (catch Exception e (if (no-python? e) (throw e) nil))))
 
 (defn get-path
   "Look up a dotted path in a parsed TOML map, e.g. [\"mcp_servers\" \"slack\"]."
@@ -272,30 +333,16 @@
                                     (str/starts-with? (:header s) prefix))))
                          (segments text))))))
 
-(def ^:dynamic *python*
-  "The interpreter `parse-error` checks with; rebound by tests."
-  "python3")
-
 (def ^:private py-check
-  "import sys\ntry:\n import tomllib\nexcept ImportError:\n sys.exit(3)\ntomllib.loads(sys.stdin.read())")
-
-(defonce ^:private warned-no-checker (atom false))
+  "import sys,tomllib;tomllib.loads(sys.stdin.read())")
 
 (defn parse-error
-  "Why `text` is not valid TOML, or nil when it is. With no python3, or one
-   older than 3.11 (no tomllib), nothing can be checked: that is warned about
-   once and treated as valid, so the write goes ahead as it did before."
+  "Why `text` is not valid TOML, or nil when it is. Throws when there is no
+   interpreter to check with."
   [text]
-  (let [{:keys [exit err]} (try @(p/process [*python* "-c" py-check] {:in text :out :string :err :string})
-                                (catch Exception _ {:exit ::unavailable}))]
-    (cond
-      (= 0 exit) nil
-      (#{3 ::unavailable} exit)
-      (do (when (compare-and-set! warned-no-checker false true)
-            (binding [*out* *err*]
-              (println "warning: python3 with tomllib (3.11+) not found; TOML edits are written unchecked")))
-          nil)
-      :else (or (last (remove str/blank? (str/split-lines (str err)))) "invalid TOML"))))
+  (let [{:keys [exit err]} (run-python (python!) py-check text)]
+    (when-not (zero? exit)
+      (or (last (remove str/blank? (str/split-lines (str err)))) "invalid TOML"))))
 
 (defn update-file!
   "Apply `f` to the file text (or \"\" when absent) and write it back. A

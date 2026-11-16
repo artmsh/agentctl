@@ -102,18 +102,21 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid TOML"
                             (toml/update-file! f (fn [t] (str t "b = [\n")))))
       (is (= "a = 1\n" (slurp f)))))
-  (testing "with no usable python3 the check is skipped, not turned into a refusal"
-    (let [dir (temp-dir) f (str dir "/c.toml") old-py (str dir "/python-without-tomllib")]
-      (u/write-text! old-py "#!/bin/sh\nexit 3\n")
+  (testing "an interpreter without tomllib is never picked, and AGENTCTL_PYTHON gets no fallback"
+    (let [dir (temp-dir) old-py (str dir "/python-without-tomllib")]
+      (u/write-text! old-py "#!/bin/sh\nexit 1\n")
       (u/sh "chmod" "+x" old-py)
-      (is (some? (toml/parse-error "b = [\n")) "the real checker still rejects")
-      (binding [*err* (java.io.StringWriter.)]
-        (binding [toml/*python* (str dir "/no-such-python")]
-          (is (nil? (toml/parse-error "b = [\n"))))
-        (binding [toml/*python* old-py]
-          (is (nil? (toml/parse-error "b = [\n")))
-          (toml/update-file! f (fn [t] (str t "a = 1\n")))
-          (is (= "a = 1\n" (slurp f))))))))
+      (is (nil? (toml/find-python old-py)))
+      (is (nil? (toml/find-python (str dir "/no-such-python"))))
+      (is (some? (toml/find-python nil)) "this suite runs with a python3 3.11+ on PATH")))
+  (testing "a file that does not parse reads as nil leniently, but a missing interpreter is never swallowed"
+    (let [f (str (temp-dir) "/c.toml")]
+      (u/write-text! f "a = 1\na = 2\n")
+      (is (nil? (toml/read-toml-lenient f)))
+      (is (nil? (toml/read-toml-lenient (str f ".absent"))))
+      (with-redefs [toml/python! (fn [] (throw (ex-info "no python" {:type :agentctl.toml/no-python})))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml-lenient f)))
+        (is (nil? (toml/read-toml-lenient (str f ".absent"))) "an absent file needs no interpreter")))))
 
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)

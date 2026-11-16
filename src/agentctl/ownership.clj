@@ -105,7 +105,7 @@
                           (plan/json-set-op (assoc args :value (vec (remove (set added) current)))))
                         (plan/json-unset-op args)))
                     (str/ends-with? target ".toml")
-                    (let [current (toml/read-toml target)
+                    (let [current (toml/read-toml-lenient target)
                           ks (remove #((desired-fields cfg o) (u/kw->str %)) (map :key diffs))
                           table (get-in current path)]
                       (when (some #(contains? table (u/kw->str %)) ks)

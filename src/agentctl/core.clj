@@ -14,6 +14,7 @@
             [agentctl.scope :as scope]
             [agentctl.ownership :as ownership]
             [agentctl.plan :as plan]
+            [agentctl.toml :as toml]
             [agentctl.skills-cli :as skills-cli]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
@@ -532,8 +533,12 @@
   (or (:owns o) [[(:tool o) (:kind o) (:id o)]]))
 
 (defn execute!
-  "Run every mutating op. Returns {:done [...] :failed [...]}."
+  "Run every mutating op. Returns {:done [...] :failed [...]}. A TOML edit
+   is checked by python's tomllib as it is written; with no interpreter for
+   that, the run stops here, before any op, rather than halfway through."
   [ops]
+  (when (some #(and (plan/mutating? %) (str/ends-with? (str (:target %)) ".toml")) ops)
+    (toml/python!))
   (reduce (fn [acc o]
             (if-not (plan/mutating? o)
               acc

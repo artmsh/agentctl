@@ -854,6 +854,13 @@ setting is declared, it was read, and the file agrees.
 drives) at a scratch tree — that is how the e2e test provisions a throwaway
 home.
 
+TOML configs (Codex, Kimi) are read and checked by python's `tomllib`, so they
+need python3 3.11+. agentctl uses `AGENTCTL_PYTHON` when set, with no fallback,
+and otherwise the first of `python3.15` … `python3.11`, `python3` on `PATH`
+that has `tomllib`. With none, a run that has to read or write one of those
+files stops before its first op. Reading the file as empty instead would plan
+what exists as new, and apply would never converge.
+
 ### gui
 
 A loopback HTTP server and one page: the config on the left, its dry run on the

@@ -65,7 +65,7 @@
                                        :http_headers (get t "http_headers")
                                        :bearer_token_env_var (get t "bearer_token_env_var")}
                            :enabled (get t "enabled" true)}]))
-            (get (try (toml/read-toml config-file) (catch Exception _ nil)) "mcp_servers")))))
+            (get (toml/read-toml-lenient config-file) "mcp_servers")))))
 
 ;; ---------------------------------------------------------------- settings
 
@@ -174,7 +174,7 @@
   "Does config.toml already name a default profile? Codex will not start
    with `[permissions]` tables and none."
   []
-  (some? (get (try (toml/read-toml config-file) (catch Exception _ nil)) "default_permissions")))
+  (some? (get (toml/read-toml-lenient config-file) "default_permissions")))
 
 (def nested-settings
   "Declared settings with an op of their own rather than a root key."
@@ -363,12 +363,12 @@
    trust is the one `project-ops` writes."
   [proj]
   (or (true? (:trusted proj))
-      (= "trusted" (get-in (try (toml/read-toml config-file) (catch Exception _ nil))
+      (= "trusted" (get-in (toml/read-toml-lenient config-file)
                            ["projects" (:path proj) "trust_level"]))))
 
 (defn- project-mcp-ops [cfg pid proj]
   (let [file (project-config-file proj)
-        servers (get (try (toml/read-toml file) (catch Exception _ nil)) "mcp_servers")
+        servers (get (toml/read-toml-lenient file) "mcp_servers")
         ms (common/project-mcps cfg proj tool)]
     (concat
      (when (and (seq ms) (not (trusted? proj)))
@@ -433,7 +433,7 @@
     (for [[id p] desired
           :let [key-ref (:key p)
                 env-var (when (= :env (:ref/kind key-ref)) (:ref/var key-ref))
-                current-name (get-in (try (toml/read-toml config-file) (catch Exception _ nil))
+                current-name (get-in (toml/read-toml-lenient config-file)
                                      ["model_providers" (u/kw->str id) "name"])
                 kvs (u/prune-nils
                      {"base_url" (:url p)
