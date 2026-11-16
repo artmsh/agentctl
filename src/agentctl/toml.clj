@@ -272,15 +272,30 @@
                                     (str/starts-with? (:header s) prefix))))
                          (segments text))))))
 
+(def ^:dynamic *python*
+  "The interpreter `parse-error` checks with; rebound by tests."
+  "python3")
+
 (def ^:private py-check
-  "import sys,tomllib;tomllib.loads(sys.stdin.read())")
+  "import sys\ntry:\n import tomllib\nexcept ImportError:\n sys.exit(3)\ntomllib.loads(sys.stdin.read())")
+
+(defonce ^:private warned-no-checker (atom false))
 
 (defn parse-error
-  "Why `text` is not valid TOML, or nil when it is."
+  "Why `text` is not valid TOML, or nil when it is. With no python3, or one
+   older than 3.11 (no tomllib), nothing can be checked: that is warned about
+   once and treated as valid, so the write goes ahead as it did before."
   [text]
-  (let [{:keys [exit err]} @(p/process ["python3" "-c" py-check] {:in text :out :string :err :string})]
-    (when-not (zero? exit)
-      (or (last (remove str/blank? (str/split-lines (str err)))) "invalid TOML"))))
+  (let [{:keys [exit err]} (try @(p/process [*python* "-c" py-check] {:in text :out :string :err :string})
+                                (catch Exception _ {:exit ::unavailable}))]
+    (cond
+      (= 0 exit) nil
+      (#{3 ::unavailable} exit)
+      (do (when (compare-and-set! warned-no-checker false true)
+            (binding [*out* *err*]
+              (println "warning: python3 with tomllib (3.11+) not found; TOML edits are written unchecked")))
+          nil)
+      :else (or (last (remove str/blank? (str/split-lines (str err)))) "invalid TOML"))))
 
 (defn update-file!
   "Apply `f` to the file text (or \"\" when absent) and write it back. A

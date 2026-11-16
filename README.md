@@ -69,7 +69,8 @@ outside agentctl's eight.
 
 ## Install
 
-Requires [Babashka](https://babashka.org/) (`bb`) and git. Optional: `bw` for `!bw://` secret
+Requires [Babashka](https://babashka.org/) (`bb`) and git, plus python3 3.11+ (stdlib
+`tomllib`) to read and check TOML configs such as Codex's. Optional: `bw` for `!bw://` secret
 references, `gh` for `[:gh …]` skill packs, and `npx` for skills placed in a repository (run
 through the [`skills`](https://skills.sh) CLI).
 

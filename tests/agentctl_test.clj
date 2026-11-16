@@ -101,7 +101,19 @@
       (u/write-text! f "a = 1\n")
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid TOML"
                             (toml/update-file! f (fn [t] (str t "b = [\n")))))
-      (is (= "a = 1\n" (slurp f))))))
+      (is (= "a = 1\n" (slurp f)))))
+  (testing "with no usable python3 the check is skipped, not turned into a refusal"
+    (let [dir (temp-dir) f (str dir "/c.toml") old-py (str dir "/python-without-tomllib")]
+      (u/write-text! old-py "#!/bin/sh\nexit 3\n")
+      (u/sh "chmod" "+x" old-py)
+      (is (some? (toml/parse-error "b = [\n")) "the real checker still rejects")
+      (binding [*err* (java.io.StringWriter.)]
+        (binding [toml/*python* (str dir "/no-such-python")]
+          (is (nil? (toml/parse-error "b = [\n"))))
+        (binding [toml/*python* old-py]
+          (is (nil? (toml/parse-error "b = [\n")))
+          (toml/update-file! f (fn [t] (str t "a = 1\n")))
+          (is (= "a = 1\n" (slurp f))))))))
 
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)
