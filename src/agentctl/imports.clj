@@ -49,11 +49,7 @@
                         (refs/redact scope k)))]))
         m))
 
-(def ^:private plain-env-words
-  "Values common enough as settings, and short enough, to be no one's secret."
-  #{"true" "false" "yes" "no" "on" "off" "enabled" "disabled"
-    "trace" "debug" "info" "warn" "warning" "error" "fatal" "silent" "verbose" "quiet"
-    "fast" "slow" "dev" "development" "prod" "production" "test" "staging" "local"})
+(def ^:private plain-env-words refs/plain-words)
 
 (defn- plain-env-value?
   "Whether an env value is provably no secret: a reference to where the value

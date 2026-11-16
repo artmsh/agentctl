@@ -105,6 +105,18 @@
    so: an MCP server's environment and its HTTP headers."
   #{"env" "headers" "http_headers" "env_http_headers"})
 
+(defn- plain-value?
+  "A value in an env or header map that is no one's secret: a boolean, a
+   small number, a common settings word, a `$VAR` reference or a path."
+  [v]
+  (or (boolean? v)
+      (and (number? v) (< -100000 v 100000))
+      (and (string? v)
+           (or (re-matches #"-?\d{1,5}" v)
+               (contains? refs/plain-words (str/lower-case v))
+               (re-matches #"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?" v)
+               (re-find #"^[/~]" v)))))
+
 (defn- mask-leaf [k v hit?]
   (cond
     (or (nil? v) (refs/ref? v) (refs/masked? v)) v
@@ -139,15 +151,37 @@
              side (fn [m pick] (when m (into (sorted-map) (map (fn [kk] [kk (pick (pairs kk))])) (keys m))))]
          [(side b first) (side a second)])
        (if (and (sequential? b) (sequential? a))
-         ;; argv: a rotated secret sits at the same position on both sides
-         (let [pairs (mapv #(mask-diff mk (nth b % nil) (nth a % nil) secret-map?)
+         ;; argv: a credential position is masked on each side whatever it
+         ;; holds — a value read back from disk that nothing resolves now, or
+         ;; one too short to be searched for — and a rotated secret sits at
+         ;; the same position on both sides
+         (let [mb (refs/mask-argv b)
+               ma (refs/mask-argv a)
+               pairs (mapv (fn [i]
+                             (let [rb (nth b i nil) ra (nth a i nil)
+                                   xb (nth mb i nil) xa (nth ma i nil)
+                                   [db da] (mask-diff mk rb ra secret-map?)
+                                   pb? (not= rb xb)
+                                   pa? (not= ra xa)]
+                               (if (or pb? pa?)
+                                 (let [b' (if pb? xb db) a' (if pa? xa da)]
+                                   [b' (if (and (some? ra) (= b' a') (not= rb ra) (not (refs/masked? ra)))
+                                         (str a' " (changed)")
+                                         a')])
+                                 [db da])))
                            (range (max (count b) (count a))))]
            [(mapv (comp first pairs) (range (count b)))
             (mapv (comp second pairs) (range (count a)))])
        (let [changed? (not= (u/norm b) (u/norm a))
              a-hit? (or (refs/credential? mk a) (refs/resolved-secret? a))
-             a' (mask-leaf mk a false)
-             b' (mask-leaf mk b (and changed? (or a-hit? secret-map?)))]
+             ;; inside an env or header map an unchanged value is masked
+             ;; unless it is plainly no secret: the text plan never prints
+             ;; it, but `--json` prints the whole map, and a value kept from
+             ;; disk may be a secret nothing declares any more
+             kept? (and secret-map? (not changed?))
+             a' (mask-leaf mk a (and kept? (not (plain-value? a))))
+             b' (mask-leaf mk b (or (and changed? (or a-hit? secret-map?))
+                                    (and kept? (not (plain-value? b)))))]
          ;; a rotated secret can mask the same on both sides; the change
          ;; must still show
          [b' (if (and changed? (some? a') (= b' a') (not (refs/masked? a)))

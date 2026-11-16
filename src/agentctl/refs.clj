@@ -248,6 +248,12 @@
    The vendor-prefix test below still masks a real credential under it."
   #"(?i)[a-z]env$")
 
+(def plain-words
+  "Values common enough as settings, and short enough, to be no one's secret."
+  #{"true" "false" "yes" "no" "on" "off" "enabled" "disabled"
+    "trace" "debug" "info" "warn" "warning" "error" "fatal" "silent" "verbose" "quiet"
+    "fast" "slow" "dev" "development" "prod" "production" "test" "staging" "local"})
+
 (defn credential-flag
   "The name a credential-looking flag carries — `api-key` for `--api-key`,
    `token` for `-token` — or nil. A flag naming where the credential lives
@@ -335,40 +341,89 @@
 (def ^:private min-embedded
   "How long a resolved value must be before it is searched for inside other
    text. A short one (`1`, `on`) would mask half the plan; it is still masked
-   where it is the whole value."
-  6)
+   where it is the whole value, and wherever argv puts a credential."
+  4)
+
+(def ^:private embedded-pattern
+  ;; a resolved value inside other text, as a token of its own: after a
+  ;; space, a quote, `=` or `:`, and before a space, a quote or punctuation.
+  ;; A value that is also a word in a host or a path (`config`) leaves the
+  ;; URL and the path readable
+  (memoize
+   (fn [sec]
+     (re-pattern (str "(?<![^\\s\"'=:,(\\[{<>])" (java.util.regex.Pattern/quote sec)
+                      "(?![^\\s\"',;)\\]}>&])")))))
 
 (defn resolved-secret?
-  "True when `v` is, or carries, a value a ref resolved to."
+  "True when `v` is, or carries as a token, a value a ref resolved to."
   [v]
   (boolean
    (and (string? v)
-        (some #(or (= v %) (and (>= (count %) min-embedded) (str/includes? v %)))
+        (some #(or (= v %) (and (>= (count %) min-embedded) (re-find (embedded-pattern %) v)))
               @resolved-secrets))))
 
+(defn- shown-as-is?
+  "A value argv may show: already masked, or a reference (`$VAR`, `!bw://…`)
+   rather than what it resolves to."
+  [v]
+  (or (masked? v) (boolean (re-find #"^[$!]" v))))
+
+(defn mask-argv
+  "argv with the value at every credential position masked: the argument
+   after a credential-looking flag, and such a flag's `=value`. Whatever
+   the value is — resolved this run, read back from disk, or short enough
+   to be found nowhere else — the position says what it is."
+  [args]
+  (loop [xs (seq args), flag? false, out []]
+    (if-not xs
+      out
+      (let [a (first xs)
+            [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))]
+        (cond
+          (and f (credential-flag f))
+          (recur (next xs) false (conj out (if (shown-as-is? v) a (str f "=" (mask v)))))
+
+          (and flag? (string? a) (not (str/starts-with? a "-")))
+          (recur (next xs) false (conj out (if (shown-as-is? a) a (mask a))))
+
+          :else (recur (next xs) (boolean (and (not f) (credential-flag a))) (conj out a)))))))
+
+(def ^:private flag-value-pattern
+  #"(?<![\w-])(--?[A-Za-z][A-Za-z0-9_-]*)(=|\s+)([^\s\"',\]})]+)")
+
+(defn- mask-flag-values
+  "`mask-argv` for argv already joined into text: a summary, a command line,
+   a CLI's error echoing what it was given."
+  [s]
+  (str/replace s flag-value-pattern
+               (fn [[whole f sep v]]
+                 (if (and (credential-flag f) (not (str/starts-with? v "-")) (not (shown-as-is? v)))
+                   (str f sep (mask v))
+                   whole))))
+
 (defn scrub
-  "`x` with every resolved value masked, at any depth and inside any string.
+  "`x` with every resolved value masked, at any depth and inside any string,
+   and every credential position in argv masked, as a vector or as text.
    The last line of defence for output: a summary, a note, a command line or
    an error can carry one as surely as a diff can."
   [x]
   (let [secrets (sort-by (comp - count) @resolved-secrets)]
-    (if (empty? secrets)
-      x
-      (letfn [(clean [s]
-                (cond
-                  (some #(= s %) secrets) (mask s)
-                  :else (reduce (fn [t sec]
-                                  (if (and (>= (count sec) min-embedded) (str/includes? t sec))
-                                    (str/replace t sec (mask sec))
-                                    t))
-                                s secrets)))
-              (walk [v]
-                (cond
-                  (string? v) (clean v)
-                  (record? v) v
-                  (map? v) (into (empty v) (map (fn [[k x]] [k (walk x)])) v)
-                  (vector? v) (mapv walk v)
-                  (set? v) (into (empty v) (map walk) v)
-                  (seq? v) (map walk v)
-                  :else v))]
-        (walk x)))))
+    (letfn [(clean [s]
+              (mask-flag-values
+               (if (some #(= s %) secrets)
+                 (mask s)
+                 (reduce (fn [t sec]
+                           (if (>= (count sec) min-embedded)
+                             (str/replace t (embedded-pattern sec) (java.util.regex.Matcher/quoteReplacement (mask sec)))
+                             t))
+                         s secrets))))
+            (walk [v]
+              (cond
+                (string? v) (clean v)
+                (record? v) v
+                (map? v) (into (empty v) (map (fn [[k x]] [k (walk x)])) v)
+                (vector? v) (mapv walk (mask-argv v))
+                (set? v) (into (empty v) (map walk) v)
+                (seq? v) (map walk (mask-argv v))
+                :else v))]
+      (walk x))))

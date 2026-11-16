@@ -990,6 +990,14 @@ the text plan, `-v`, `--json`, `apply!` and the GUI, for every tool, whatever
 the field is called. So is the old value on the before side of a change to
 one, and any old env or header value a change replaces or removes: a rotated
 or dropped secret is still a secret, though nothing resolves it any more.
+Inside an env or header map an unchanged value is masked too unless it is
+plainly no secret (a boolean, a small number, a common settings word, a `$VAR`
+or a path): the text plan never prints it, but `--json` prints the whole map. In argv the position decides: the
+argument after a credential-looking flag, or such a flag's `=value`, is masked
+in diffs, summaries, command lines and failure messages whatever it holds,
+however short. A resolved value found inside other text is masked only as a
+token of its own, so one that is also a word in a host or a path leaves the
+URL or the path readable.
 
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an

@@ -42,8 +42,9 @@ STUB
 chmod +x "$SB/bin/"*
 export PATH="$SB/bin:$PATH"
 
-vault() { # vault <env> <header> <key> <arg>
-  printf '{"plant": {"ENV": "%s", "HDR": "%s", "KEY": "%s", "ARG": "%s"}}\n' "$1" "$2" "$3" "$4" > "$SB/bw-items.json"
+vault() { # vault <env> <header> <key> <arg>; the rest are fixed
+  printf '{"plant": {"ENV": "%s", "HDR": "%s", "KEY": "%s", "ARG": "%s", "SHORT": "Zq9x", "WORD": "config", "URL": "https://mcp.example.com/urlsecretpath99"}}\n' \
+    "$1" "$2" "$3" "$4" > "$SB/bw-items.json"
 }
 
 cat > "$SB/agents.edn" <<'EDN'
@@ -64,14 +65,15 @@ URL=$(grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$SB/gui.log" | head -1)
 BASE=${URL%%/\?t=*}
 TOK=${URL##*t=}
 
-outputs() { # every output mode, each into its own file; apply! runs last
-  local run=(--all "${TOOLS[@]}" -f "$SB/agents.edn")
+outputs() { # every output mode for $CFG, each into its own file; apply! runs last
+  local cfg=${CFG:-$SB/agents.edn}
+  local run=(--all "${TOOLS[@]}" -f "$cfg")
   set +e
   "$ROOT/agentctl" apply "${run[@]}" > "$SB/plain.txt" 2>&1
   "$ROOT/agentctl" apply "${run[@]}" -v > "$SB/verbose.txt" 2>&1
   "$ROOT/agentctl" apply "${run[@]}" --json > "$SB/plan.json" 2>&1
   python3 -c 'import json,sys; print(json.dumps({"text": open(sys.argv[1]).read(), "tools": ["pi", "omp", "kimi", "antigravity", "codex"]}))' \
-    "$SB/agents.edn" > "$SB/gui-body.json"
+    "$cfg" > "$SB/gui-body.json"
   curl -sS -X POST -H "X-Agentctl-Token: $TOK" -H 'content-type: application/json' \
     --data-binary "@$SB/gui-body.json" "$BASE/api/plan" > "$SB/gui.out"
   "$ROOT/agentctl" apply! "${run[@]}" -y "$@" > "$SB/apply.txt" 2>&1
@@ -185,5 +187,59 @@ for t in claude pi omp kimi antigravity codex; do
 done
 set +e; "$ROOT/agentctl" validate -f "$SB/args.edn" > "$SB/args.txt" 2>&1; set -e
 grep -qF -- '--token' "$SB/args.txt" || { cat "$SB/args.txt"; fail "validate does not report the unresolved argument"; }
+
+refused() { # refused <cfg> <value>...: a refused codex add prints none of them
+  local cfg=$1; shift
+  touch "$SB/codex-refuse"
+  for mode in text json; do
+    set +e
+    if [ $mode = json ]; then
+      "$ROOT/agentctl" apply! --all -t codex -f "$cfg" -y --json > "$SB/fail.txt" 2>&1; code=$?
+    else
+      "$ROOT/agentctl" apply! --all -t codex -f "$cfg" -y > "$SB/fail.txt" 2>&1; code=$?
+    fi
+    set -e
+    [ "$code" = 1 ] && grep -q 'refused' "$SB/fail.txt" || { cat "$SB/fail.txt"; fail "$mode: the refused add is not reported"; }
+    for v in "$@"; do grep -n -- "$v" "$SB/fail.txt" && fail "$mode: the failure printed $v"; done
+  done
+  rm "$SB/codex-refuse"
+}
+
+echo "7. a short secret in argv prints nowhere: summary, diff, GUI, apply! and a failure"
+cat > "$SB/short.edn" <<'EDN'
+{:mcps [{:id :tdocs :command "/bin/echo" :args ["--token" "!bw://plant/SHORT"] :in :all
+         :acli [:pi :omp :kimi :antigravity :codex]}
+        {:id :kdocs :command "/bin/echo" :args ["--api-key=!bw://plant/SHORT"] :in :all
+         :acli [:pi :omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/short.edn" outputs
+grep -q tdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the short-secret servers are not planned"; }
+leaks Zq9x
+refused "$SB/short.edn" Zq9x
+
+echo "8. a secret on disk that the declaration no longer resolves prints nowhere"
+cat > "$SB/stale.edn" <<'EDN'
+{:mcps [{:id :odocs :command "/bin/echo" :args ["--api-key=!bw://plant/ARG" "--token" "!bw://plant/ARG"]
+         :env {"DOCS" "!bw://plant/ENV"} :in :all :acli [:pi :omp :kimi :antigravity :codex]}
+        {:id :ohttp :type :http :url "https://mcp.example.com/o" :headers {"x-docs" "!bw://plant/HDR"} :in :all
+         :acli [:omp :kimi :antigravity :codex]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all "${TOOLS[@]}" -f "$SB/stale.edn" -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the stale-secret servers exited $code"; }
+grep -q argsecretvalue888 "$SB/.pi/agent/mcp.json" || fail "the argument secret was not written"
+sed -i.bak 's|plant/ARG|plant/SHORT|g; s|plant/ENV|plant/SHORT|; s|plant/HDR|plant/SHORT|' "$SB/stale.edn"
+CFG="$SB/stale.edn" outputs
+grep -q odocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the switched servers are not planned"; }
+leaks argsecretvalue888 envsecretvalue444 hdrsecretvalue555 Zq9x
+
+echo "10. a secret that is also a word in a URL or a path leaves them readable"
+cat > "$SB/word.edn" <<'EDN'
+{:mcps [{:id :wdocs :type :http :url "https://config.example.com/w" :headers {"x-site" "!bw://plant/WORD"} :in :all
+         :acli [:kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/word.edn" outputs
+grep -qF 'https://config.example.com/w' "$SB/plan.json" || { grep -n url "$SB/plan.json"; fail "--json masked a word inside a URL"; }
+grep -qF "$SB/.gemini/config/mcp_config.json" "$SB/plan.json" || { grep -n target "$SB/plan.json"; fail "--json masked a word inside a path"; }
+grep -qF '"x-site" : "********"' "$SB/plan.json" || { grep -n x-site "$SB/plan.json"; fail "the secret itself was not masked"; }
 
 echo "all secrets e2e checks passed"
