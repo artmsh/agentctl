@@ -64,6 +64,17 @@
        [(f :error [:skill-packs id] "pack needs :uri")]))
    (:skill-packs cfg)))
 
+(defn check-agents
+  "A subagent definition must be in its pack once the pack is on disk; before
+   that, the pack's own check says it is not fetched yet."
+  [cfg]
+  (for [[id a] (:agents cfg)
+        :let [root (get-in cfg [:skill-packs (:pack a) :root])]
+        :when (and root (u/exists? root) (seq (:tools a)))]
+    (if (u/exists? (:source a))
+      (f :ok [:agents id] (u/tilde (:source a)))
+      (f :error [:agents id] (str "no " (:name a) ".md in " (u/tilde (str root "/agents")))))))
+
 (defn- skill-frontmatter-ok? [dir]
   (let [md (str dir "/SKILL.md")]
     (when-let [text (u/slurp-safe md)]
@@ -415,6 +426,7 @@
                          (statusline/findings cfg opts)
                          (check-clis cfg)
                          (check-packs cfg deep?)
+                         (check-agents cfg)
                          (check-skills cfg)
                          (check-mcps cfg deep?)
                          (check-providers cfg deep?)

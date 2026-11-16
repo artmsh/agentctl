@@ -56,6 +56,7 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 | `:plugins` | `claude plugin marketplace add` + `install`, then `extraKnownMarketplaces` / `enabledPlugins` in the placement's settings file | — | — | — | — | — | — | — |
+| `:agents` | symlink `~/.claude/agents/<name>.md` or `<project>/.claude/agents/<name>.md` | — | — | — | — | — | — | — |
 
 A `:plugins` key is `[:gh "owner/repo" "plugin"]` or `[:uri "…" "plugin"]`. Its
 value takes `:marketplace` (the name the marketplace's own manifest gives it;
@@ -64,6 +65,11 @@ marketplace, written as `source.ref` and passed to the CLI as `owner/repo#ref`,
 `:version` (`:latest` or a pinned version string; without it only presence is
 checked) and `:build`, a shell command run in each new install path. See
 [GUIDE.md](GUIDE.md#claude-plugins) and [Plugin versions](GUIDE.md#plugin-versions).
+
+An `:agents` key is `[pack "name"]` or `[pack ["a" "b"]]`, `pack` being a
+declared `:skill-packs` entry's `:alias` or id. It links
+`<pack root>/agents/<name>.md` as a Claude Code subagent definition; `:in`
+places it user-wide or in projects. See [GUIDE.md](GUIDE.md#claude-subagents).
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
 instructions file. Omp's context-file provider loads `AGENTS.md` from its

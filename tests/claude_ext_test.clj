@@ -3,6 +3,7 @@
    tests/test-plugins.sh inside a sandbox of its own (AGENTCTL_HOME), since
    they write Claude's files under that home."
   (:require [agentctl.adapters.claude :as claude]
+            [agentctl.adapters.claude-agents :as ca]
             [agentctl.adapters.claude-plugins :as cp]
             [agentctl.config :as config]
             [agentctl.imports :as imports]
@@ -211,6 +212,27 @@
     (is (some #(str/includes? % ":version must be :latest") (errors {:version :newest})))
     (is (some #(str/includes? % ":version must be :latest") (errors {:version ""})))
     (is (some #(str/includes? % ":build is a shell command") (errors {:build ["make"]})))))
+
+;; ---------------------------------------------------------------- agents
+
+(deftest agents-lower-to-one-link-per-placement
+  (clean!)
+  (let [pack (str u/home "/repo")
+        _ (fs/create-dirs (str pack "/agents"))
+        c (cfg {:skill-packs {[:uri (str "file://" pack)] {:alias 'team}}
+                :agents {['team ["a" "b"]] {:in :all}
+                         ['team "c"] {:in :all :acli [:codex]}}})
+        ps (ca/placements c)]
+    (is (= #{:a :b} (set (map :id ps))) "a row for no Claude places nothing")
+    (is (= (str pack "/agents/a.md") (:source (first (filter #(= :a (:id %)) ps)))))
+    (is (= (str u/home "/.claude/agents/a.md") (:path (first (filter #(= :a (:id %)) ps)))))
+    (is (some #(= [:warn [:agents :c]] [(:level %) (:where %)])
+              (config/structural-findings c))))
+  (is (thrown-with-msg? Exception #"names undefined pack"
+                        (cfg {:agents {['nope "a"] {:in :all}}})))
+  (is (thrown-with-msg? Exception #"invalid :agents key"
+                        (cfg {:skill-packs {[:uri "file:///x"] {:alias 'team}}
+                              :agents {[:gh "o/r"] {:in :all}}}))))
 
 (let [{:keys [fail error]} (run-tests 'claude-ext-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

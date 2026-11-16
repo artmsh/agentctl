@@ -1564,7 +1564,7 @@
 (deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
   ;; `-k` is checked against `core/kinds`; a kind missing from it would be
   ;; refused, and one missing from --help is a kind nobody knows to ask for
-  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
+  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins :agents
            :providers :memory :trust :extensions :projects :statusline}
          (set core/kinds)))
   (is (= (set (map name core/kinds))

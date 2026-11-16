@@ -425,6 +425,43 @@
     (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
           (concat global project-rows))))
 
+(declare scan-projects)
+
+(defn- import-packs
+  "Packs a subagent link can point into: the existing config's, then those
+   the skill scan found, as `{id {:root …}}`."
+  [existing scanned]
+  (merge (into {} (for [[id decl] scanned] [id (config/norm-pack id decl)]))
+         (when existing
+           (try (:skill-packs (config/normalize existing "import"))
+                (catch Exception _ nil)))))
+
+(defn scan-agents
+  "Claude subagent definitions linked into a known pack's `agents/`, as
+   `:agents` rows: user-wide is `:in :all`, a project's is its path. A plain
+   file, or a link to anywhere else, is the user's own and is not imported."
+  [packs]
+  (let [dirs (into {} (for [[id p] packs
+                            :let [d (some-> (:root p) (str "/agents"))]
+                            :when (and d (u/exists? d))]
+                        [(u/real-path d) id]))
+        found (fn [dir in]
+                (for [f (when (fs/directory? dir) (sort (map str (fs/glob dir "*.md"))))
+                      :when (fs/sym-link? f)
+                      :let [real (u/real-path f)
+                            pid (get dirs (str (fs/parent real)))]
+                      :when (and pid (= (fs/file-name real) (fs/file-name f)))]
+                  {:pack pid :name (str/replace (str (fs/file-name f)) #"\.md$" "") :in in}))
+        projects (distinct (concat (map (comp :path val) (scan-projects))
+                                   (map u/tilde (scope/repositories (str u/home "/projects")))))
+        rows (concat (found (str claude/home "/agents") :all)
+                     (mapcat #(found (str (u/expand %) "/.claude/agents") (u/tilde (u/expand %))) projects))]
+    (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+          (for [[[pid nm] rs] (group-by (juxt :pack :name) rows)
+                :let [ins (map :in rs)]]
+            [[(symbol (name pid)) nm]
+             {:in (if (some #{:all} ins) :all (vec (sort (distinct ins)))) :acli [:claude]}]))))
+
 (defn scan-projects []
   (let [codex-cfg (try (toml/read-toml codex/config-file) (catch Exception _ nil))
         codex-projects (for [[path v] (get codex-cfg "projects")]
@@ -477,6 +514,7 @@
                     {:executors (scan-settings)
                      :mcps (not-empty (scan-mcps))
                      :plugins (not-empty (scan-plugins))
+                     :agents (not-empty (scan-agents (import-packs existing packs)))
                      :skills (not-empty skills)
                      :skill-packs (not-empty packs)
                      :extra-providers (not-empty (scan-providers))
@@ -486,11 +524,20 @@
                      ;; apply! delete the file agentctl owns
                      :statusline (statusline/scan)})]
     {:config (if (scope/dsl? existing)
-               (merge-with (fn [a b]
-                             (if (and (vector? a) (vector? b))
-                               (let [ids (set (keep :id b))]
-                                 (vec (concat (remove #(ids (:id %)) a) b))) b))
-                           (entity-config discovered) existing)
+               (cond-> (merge-with (fn [a b]
+                                     (if (and (vector? a) (vector? b))
+                                       (let [ids (set (keep :id b))]
+                                         (vec (concat (remove #(ids (:id %)) a) b))) b))
+                                   (entity-config discovered) existing)
+                 ;; a link found on disk joins the declared ones; a declared
+                 ;; one keeps its value
+                 (scope/keyed? (:agents discovered))
+                 (assoc :agents (let [declared (set (for [[[pack arg] _] (:agents existing)
+                                                          nm (if (string? arg) [arg] arg)]
+                                                      [(name pack) nm]))]
+                                  (merge (into {} (remove (fn [[[pack nm] _]] (declared [(name pack) nm])))
+                                               (:agents discovered))
+                                         (:agents existing)))))
                (if existing (u/deep-merge discovered existing) discovered))
      :notes @notes}))
 

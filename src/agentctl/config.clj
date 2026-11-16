@@ -17,7 +17,7 @@
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
-  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks :plugins}
+  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks :plugins :agents}
    :codex       #{:settings :mcps :skills :memory :projects :providers}
    :pi          #{:settings :mcps :skills :memory :providers :projects :extensions}
    :omp         #{:settings :mcps :skills :memory :providers}
@@ -208,7 +208,7 @@
 
 ;; ---------------------------------------------------------------- normalize
 
-(declare norm-mcp norm-provider norm-skill norm-plugin)
+(declare norm-mcp norm-provider norm-skill norm-plugin norm-agent)
 
 (defn- norm-per-tool
   "Normalize the per-tool override map with the same normalizer as the base."
@@ -292,6 +292,23 @@
       :scope-by-tool (:scope-by-tool decl)
       :used-by (:used-by decl)
       :tools (tool-selection decl :plugins)})))
+
+(defn- norm-agent
+  "A Claude subagent definition: `<pack root>/agents/<name>.md`, linked as
+   `<name>.md` into `~/.claude/agents` and each placed project's
+   `.claude/agents`. `:targets` maps a project id to its path."
+  [id decl packs]
+  (let [pack (get packs (:from decl))
+        nm (or (:agent decl) (name id))]
+    (u/prune-nils
+     {:id id
+      :kind :agents
+      :pack (:from decl)
+      :name nm
+      :source (when-let [root (:root pack)] (str root "/agents/" nm ".md"))
+      :global (boolean (:global decl))
+      :targets (or (:targets decl) {})
+      :tools (set (filter #(supports? % :agents) (as-set (:tools decl))))})))
 
 (defn norm-pack [id decl]
   (let [decl (or decl {})
@@ -594,6 +611,7 @@
      :skills (scope-skills (merge bare-skills declared-skills) (:skills raw) projects)
      :skill-packs skill-packs
      :plugins (into {} (map (fn [[k v]] [k (norm-plugin k v)])) (:plugins raw))
+     :agents (into {} (keep (fn [[k v]] (when (map? v) [k (norm-agent k v skill-packs)]))) (:agents raw))
      :providers (into {} (map (fn [[k v]] [k (norm-provider k v)]))
                       (merge (:extra-providers raw) (:providers raw)))
      :memory (into {} (map (fn [[k v]] [k (norm-memory k v)])) (:memory raw))
@@ -765,7 +783,7 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :settings :permissions :trust :hooks :plugins :extensions :hosts :statusline :#def})
+    :settings :permissions :trust :hooks :plugins :agents :extensions :hosts :statusline :#def})
 
 (defn- host-findings
   "A host's `:ssh` goes on an ssh command line and its name into a file name, so
@@ -941,6 +959,8 @@
        (finding :error [:plugins id]
                 "plugin needs a marketplace source and plugin name"))
      (plugin-ref-findings cfg)
+     (for [[id a] (:agents cfg) :when (empty? (:tools a))]
+       (finding :warn [:agents id] "only Claude Code reads subagent definitions; :acli selects no tool here"))
      (provider-model-findings cfg)
      (for [[pid proj] (:projects cfg)
            mid (:mcp proj)

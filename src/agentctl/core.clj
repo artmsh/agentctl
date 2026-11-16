@@ -2,6 +2,7 @@
   "Planning engine: turn a normalized config into ops, execute them, track state."
   (:require [agentctl.adapters.antigravity :as antigravity]
             [agentctl.adapters.claude :as claude]
+            [agentctl.adapters.claude-agents :as claude-agents]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.common :as common]
             [agentctl.adapters.dsh :as dsh]
@@ -66,14 +67,14 @@
      ["-k" k (kind-problem k)])))
 
 (defn kind-selected?
-  "Does `-k` let ops of `kind` through? Selecting skills lets the
+  "Does `-k` let ops of `kind` through? Selecting skills or agents lets the
    `:skill-packs` ops through too: a pack op exists only because some skill
-   placement needs its clone, and without it a skill from a pack not on disk
-   yet is never linked while the run reports nothing to change."
+   or agent placement needs its clone, and without it one from a pack not on
+   disk yet is never linked while the run reports nothing to change."
   [{:keys [kinds]} kind]
   (or (empty? kinds)
       (contains? (set kinds) kind)
-      (and (= :skill-packs kind) (contains? (set kinds) :skills))))
+      (and (= :skill-packs kind) (some #{:skills :agents} kinds) true)))
 
 (defn- keep-kinds
   "`-k` keeps ops of the kinds named, and skills keep their packs. Later
@@ -116,8 +117,11 @@
   [ops cfg {:keys [only]}]
   (if (empty? only)
     ops
-    (let [packs (set (for [[kind id] only :when (= :skills kind)
-                           p (only-skill-packs cfg (keyword id)) :when p] p))]
+    (let [packs (set (concat
+                      (for [[kind id] only :when (= :skills kind)
+                            p (only-skill-packs cfg (keyword id)) :when p] p)
+                      (for [[kind id] only :when (= :agents kind)
+                            [aid a] (:agents cfg) :when (= id (name aid))] (:pack a))))]
       (filter #(or (some (fn [sel] (only-match? sel %)) only)
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
               ops))))
@@ -485,7 +489,8 @@
                 (statusline/plan-ops cfg st opts)
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
-                (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
+                (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st))
+                (when (selected :claude) (claude-agents/plan-ops cfg st)))
         (keep-kinds opts)
         (keep-projects cfg opts)
         (keep-only cfg opts)
@@ -558,6 +563,9 @@
      [:claude :plugins (keyword (str (name pid) "/" (name id)))
       {:scope (:scope p) :plugin (:plugin p) :marketplace (:marketplace p)
        :repo (:repo p) :uri (:uri p) :ref (:ref p) :project-id pid :project-path (:path proj)}])
+   ;; a subagent link records where it went and what it points at, so a
+   ;; removal can tell it from a file someone put there since
+   (claude-agents/inventory cfg)
    (for [[id p] (:providers cfg) t (:tools p)] [t :providers id])
    ;; `defaultTools` is an array shared with the user; what an extension put
    ;; in it has to be remembered to be taken out again

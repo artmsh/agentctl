@@ -218,12 +218,14 @@
   [cfg project-ids]
   (let [wanted (set project-ids)]
     (set
-     (for [[pid proj] (:projects cfg)
-           :when (contains? wanted pid)
-           id (:skills proj)
-           pack (packs-for-skill cfg id)
-           :when pack]
-       pack))))
+     (concat
+      (for [[pid proj] (:projects cfg)
+            :when (contains? wanted pid)
+            id (:skills proj)
+            pack (packs-for-skill cfg id)
+            :when pack]
+        pack)
+      (for [[_ a] (:agents cfg) :when (some wanted (keys (:targets a)))] (:pack a))))))
 
 ;; ---------------------------------------------------------------- pack ops
 
@@ -301,7 +303,9 @@
       (some #(and (= :skill-packs (:kind %)) (= id (:id %)) (= :all (:in %))
                   (not= [] (get-in % [:decl :tools])))
             (:entities cfg))
-      (some #(and (= id (:from %)) (= :global (:scope %)) (seq (:tools %))) (vals (:skills cfg)))))
+      (some #(and (= id (:from %)) (= :global (:scope %)) (seq (:tools %))) (vals (:skills cfg)))
+      ;; a Claude subagent is linked by agentctl, user-wide or into a project
+      (some #(and (= id (:pack %)) (seq (:tools %))) (vals (:agents cfg)))))
 
 (defn pack-ops
   "Ops that fetch or update git-backed skill packs."

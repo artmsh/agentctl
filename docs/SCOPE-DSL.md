@@ -240,7 +240,7 @@ should be settled before any of the DSL is written.
 
 ```edn
 {:#def {effort "high"}
- :agents
+ :entities
  [{:settings {:model "sonnet" :thinking $effort} :tools [:claude] :in :all}
   {:skill-pack [:gh "obra/superpowers"] :in :all}   ; not implemented: shape A
   {:mcp :tracker :cmd "tracker-mcp -t stdio" :in "projects"}

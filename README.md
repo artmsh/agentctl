@@ -45,6 +45,9 @@ segment.
   hosted marketplace, user-wide or per project; a git marketplace can be pinned to a branch,
   tag or commit with `:ref`, `:version :latest` upgrades a plugin when its marketplace moves,
   and `:build` builds each new install ([Claude plugins](docs/GUIDE.md#claude-plugins)).
+- `:agents` links Claude Code subagent definitions from a skill pack into `~/.claude/agents` or
+  a project's `.claude/agents`, and removes only the links it made
+  ([Claude subagents](docs/GUIDE.md#claude-subagents)).
 - TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked

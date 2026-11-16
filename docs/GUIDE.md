@@ -576,6 +576,32 @@ Marketplace names are global to Claude: two declarations whose sources share a
 marketplace name re-register it, and every project follows the last one.
 `validate` warns when rows name one marketplace from different sources or refs.
 
+## Claude subagents
+
+`:agents` links subagent definitions kept in a skill pack's `agents/` directory
+into the place Claude Code reads them from:
+
+```clojure
+{:skill-packs {[:gh "example/team-agents"] {:alias team}}
+ :agents {[team "reviewer"]            {:in :all}
+          [team ["planner" "tester"]]  {:in "projects/app"}}}
+```
+
+`:in :all` links `~/.claude/agents/reviewer.md`; a project placement links
+`<project>/.claude/agents/<name>.md`. Each is a symlink to
+`<pack root>/agents/<name>.md`, so a pack update reaches Claude without an
+apply, and the pack is cloned even when it is declared `:in :none`. The plan
+line is `+ agent [agents: claude-code] <source>`.
+
+A link agentctl made is recorded in the state file with the file it points at.
+Dropping the row removes that link, and only while it still points there: a
+file or another link in its place is left alone, and the plan says so. A
+hand-made definition at the destination is backed up before it is replaced,
+and the plan flags it. `validate` reports a name the pack has no `.md` for.
+`import` reads back links in `~/.claude/agents` and the projects'
+`.claude/agents` that point into a known pack; a plain file there is the
+user's own and is not imported.
+
 ## Project skills
 
 A project's `:skills` names a whole skill-pack, a skill declared under `:skills`,

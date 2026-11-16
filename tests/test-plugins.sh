@@ -348,4 +348,94 @@ EDN
   [ "$(cat "$dir/BUILT")" = built ] || fail "the old install path was built again"
 )
 
+echo "16. :agents links a pack's subagent definitions user-wide and into a project, and prunes only its own links"
+(
+  SB="$SB/agents"; mkdir -p "$SB/bin"; ln -s "$ROOT/tests/claude-plugin-stub" "$SB/bin/claude"
+  export AGENTCTL_HOME="$SB" HOME="$SB" PATH="$SB/bin:$PATH"
+  ag() { set +e; run "$@" -f "$SB/agents.edn" --all -t claude > "$SB/out.txt" 2>&1; code=$?; set -e; }
+  agents_owned() { # the ids state.edn owns as Claude agents, one per line
+    bb -e "(doseq [[[t k id] _] (:managed (clojure.edn/read-string (slurp \"$SB/.config/agentctl/state.edn\"))) :when (= [t k] [:claude :agents])] (println id))" | sort
+  }
+  pack="$SB/packs/team"; app="$SB/projects/app"
+  mkdir -p "$pack/agents" "$app/.git" "$SB/.claude/agents"
+  for a in reviewer planner mine; do printf -- '---\nname: %s\ndescription: d\n---\nbody\n' "$a" > "$pack/agents/$a.md"; done
+  echo "hand-made" > "$SB/.claude/agents/notes.md"
+  cat > "$SB/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$pack"] {:alias team}}
+ :agents {[team "reviewer"] {:in :all}
+          [team "planner"] {:in "projects/app"}}}
+EDN
+  ag validate
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail ":agents does not validate: exit $code"; }
+  ag apply
+  [ "$code" = 2 ] || { cat "$SB/out.txt"; fail "agents to link are not drift: exit $code"; }
+  grep -q "+ agent \[agents: claude-code\] ~/packs/team/agents/reviewer.md" "$SB/out.txt" || { cat "$SB/out.txt"; fail "no user-wide agent line"; }
+  grep -A3 "PROJECT(projects/app)" "$SB/out.txt" | grep -q "+ agent \[agents: claude-code\] ~/packs/team/agents/planner.md" \
+    || { cat "$SB/out.txt"; fail "no project agent line"; }
+  ag apply -k skills
+  grep -q "+ agent" "$SB/out.txt" && { cat "$SB/out.txt"; fail "-k skills plans agents"; }
+  ag apply -k agents
+  [ "$(grep -c "+ agent" "$SB/out.txt")" = 2 ] || { cat "$SB/out.txt"; fail "-k agents does not plan both agents"; }
+  ag apply! -y
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "apply! failed: exit $code"; }
+  [ "$(readlink "$SB/.claude/agents/reviewer.md")" = "$pack/agents/reviewer.md" ] || fail "no user-wide link"
+  [ "$(readlink "$app/.claude/agents/planner.md")" = "$pack/agents/planner.md" ] || fail "no project link"
+  [ "$(agents_owned | wc -l | tr -d ' ')" = 2 ] && agents_owned | grep -qx reviewer && agents_owned | grep -q '/planner$' \
+    || { agents_owned; fail "the links are not owned"; }
+  ag apply
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "not converged: exit $code"; }
+
+  echo "17. removing an agent removes only the link agentctl made"
+  cat > "$SB/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$pack"] {:alias team}}
+ :agents {[team "planner"] {:in "projects/app"}}}
+EDN
+  ag apply
+  grep -q -- "- agent \[agents: claude-code\] ~/packs/team/agents/reviewer.md" "$SB/out.txt" || { cat "$SB/out.txt"; fail "no removal line"; }
+  ag apply! -y
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "prune failed: exit $code"; }
+  [ -e "$SB/.claude/agents/reviewer.md" ] || [ -L "$SB/.claude/agents/reviewer.md" ] && fail "the owned link survived its removal"
+  [ "$(cat "$SB/.claude/agents/notes.md")" = hand-made ] || fail "a hand-made definition was touched"
+  [ -f "$pack/agents/reviewer.md" ] || fail "the pack's file went with the link"
+  agents_owned | grep -qx reviewer && fail "a pruned link is still owned"
+  # a link the user turned into a file of their own stays when the row goes
+  rm "$app/.claude/agents/planner.md"; echo "edited" > "$app/.claude/agents/planner.md"
+  cat > "$SB/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$pack"] {:alias team}}}
+EDN
+  ag apply --show-noop
+  grep -q "is not the link agentctl made — left in place" "$SB/out.txt" || { cat "$SB/out.txt"; fail "no warning for a replaced link"; }
+  ag apply! -y
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "apply! with a replaced link failed: exit $code"; }
+  [ "$(cat "$app/.claude/agents/planner.md")" = edited ] || fail "a file the user put in place of the link was removed"
+
+  echo "18. linking over a hand-made definition backs it up first"
+  echo "my own" > "$SB/.claude/agents/mine.md"
+  cat > "$SB/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$pack"] {:alias team}}
+ :agents {[team ["mine" "reviewer"]] {:in :all}}}
+EDN
+  ag apply
+  grep -q "replaces a file agentctl did not write (backed up first)" "$SB/out.txt" || { cat "$SB/out.txt"; fail "the replacement is not flagged"; }
+  ag apply! -y
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "apply! failed: exit $code"; }
+  [ "$(readlink "$SB/.claude/agents/mine.md")" = "$pack/agents/mine.md" ] || fail "not linked over the hand-made file"
+  grep -rqx "my own" "$SB/.config/agentctl/backups" || fail "the hand-made file was not backed up"
+
+  echo "19. import reads links into a declared pack back as :agents"
+  mkdir -p "$app/.claude/agents"; rm -f "$app/.claude/agents/planner.md"
+  ln -s "$pack/agents/planner.md" "$app/.claude/agents/planner.md"
+  ln -s "$SB/elsewhere.md" "$SB/.claude/agents/stray.md"
+  set +e; run import -f "$SB/agents.edn" > "$SB/import.edn" 2> "$SB/import.err"; code=$?; set -e
+  [ "$code" = 0 ] || { cat "$SB/import.err"; fail "import failed: exit $code"; }
+  bb -e "(let [a (:agents (clojure.edn/read-string (slurp \"$SB/import.edn\")))]
+           ;; the declared row stays as written; the link found on disk joins it
+           (assert (= {:in :all} (get a '[team [\"mine\" \"reviewer\"]])) (pr-str a))
+           (assert (= [\"~/projects/app\"] (:in (get a '[team \"planner\"]))) (pr-str a))
+           (assert (= 2 (count a)) (pr-str a)))" || { cat "$SB/import.edn"; fail "import does not round-trip :agents"; }
+  cp "$SB/import.edn" "$SB/agents.edn"
+  ag apply
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "the imported config is not converged: exit $code"; }
+)
+
 echo "all plugin e2e checks passed"
