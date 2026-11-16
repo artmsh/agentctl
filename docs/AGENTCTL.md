@@ -856,7 +856,8 @@ case this machine's checks are skipped. A host that does not answer, or answers
 only in part, is `unknown`, and its drift is not reported as clean.
 
 `SKILLS` also repeats the plan's reports that hold once it has converged: a
-project copy kept beside a user-wide skill and why, one pi loads in place of a
+skill whose source is missing, a project copy kept beside a user-wide skill
+and why, one pi loads in place of a
 user-wide skill of the same name, and skills placed in a project pi asks
 about first or does not read. They are warnings and never fail the exit code.
 

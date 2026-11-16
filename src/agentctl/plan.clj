@@ -698,12 +698,7 @@
            :risk :medium
            :exec! (fn [] (u/backup! file) (toml/update-file! file #(toml/remove-table % (vec table))))}))))
 
-(defn link-op
-  "Ensure `dest` is a symlink to `src` (or a copy when mode = :copy).
-
-   Those two are the whole taxonomy: how an entry gets to its destination.
-   `:hardlink` would be the third and nothing asks for it yet — the shape
-   here has room for it, and `:fs-op` is already the word the plan renders."
+(defn- link-op*
   [{:keys [tool kind id src dest mode project]}]
   (let [mode (or mode :symlink)
         exists (u/exists? dest)
@@ -741,6 +736,24 @@
                       (if (babashka.fs/directory? want)
                         (babashka.fs/copy-tree want dest)
                         (babashka.fs/copy want dest))))}))))
+
+(defn link-op
+  "Ensure `dest` is a symlink to `src` (or a copy when mode = :copy).
+
+   Those two are the whole taxonomy: how an entry gets to its destination.
+   `:hardlink` would be the third and nothing asks for it yet — the shape
+   here has room for it, and `:fs-op` is already the word the plan renders.
+
+   A skill whose source is not on disk is reported and its link left as it
+   is: a link to nothing would dangle, and a dangling one never reads as
+   converged. (Other kinds may link what an earlier op in the same plan
+   fetches, an extension's checkout, so they are not held to this.)"
+  [{:keys [tool kind id src dest mode project] :as m}]
+  (if (and (= :skills kind) (not (u/resolves? src)))
+    (op {:project project :action :noop :warn true :conflict true :tool tool :kind kind :id id
+         :target dest :from (u/tilde (u/abs-path src))
+         :summary (str "source missing: " (u/tilde (u/abs-path src)) " — link not changed")})
+    (link-op* m)))
 
 (defn unlink-op
   [{:keys [tool kind id dest project]}]

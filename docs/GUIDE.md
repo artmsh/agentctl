@@ -549,6 +549,11 @@ their ids in braces (`mcps/{docs search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
 
+A skill whose source is not on disk, such as a `:per-tool :path` into a
+project copy that has since gone, is not linked: the plan says `source
+missing: <path> — link not changed` and leaves whatever link is there, so it
+does not plan the same change on every run. `validate` repeats it under SKILLS.
+
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a
 throwaway home.

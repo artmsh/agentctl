@@ -1253,4 +1253,36 @@ EDN
   run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "other-agent-dir: not converged"; }
 )
 
+echo "31. a user-wide link whose source is gone is reported, and the plan still converges"
+(
+  H=$(fresh_home missing-source); export AGENTCTL_HOME="$H"
+  K="$H/projects/kit/skills"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  # what an earlier cleanup leaves: a stale lock entry beside dangling links,
+  # and pi's user-wide link into the project copy that went with them
+  for p in app lib; do
+    P="$H/projects/$p"; mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+    ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+    printf '{"version":2,"skills":{"wrap-up":{"source":"../kit/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+    git -C "$P" init -q
+  done
+  mkdir -p "$H/.pi/agent/skills"
+  ln -s "$H/projects/lib/.agents/skills/wrap-up" "$H/.pi/agent/skills/wrap-up"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias kit}}
+ :skills {[kit "wrap-up"] {:in :all :acli [:claude :codex :pi]
+                           :per-tool {:pi {:path "~/projects/lib/.agents/skills/wrap-up"}}}
+          [kit "other"] {:in ["projects/app" "projects/lib"] :acli [:claude]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q 'source missing: ~/projects/lib/.agents/skills/wrap-up — link not changed' "$H/plan.txt" \
+    && ! grep -q '~ skill \[agents: pi\]' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a missing source is planned as a link update"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "missing-source: apply! failed"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "a missing source keeps the plan from converging"; }
+  (run validate -f "$H/agents.edn" || true) > "$H/validate.txt" 2>&1
+  grep -q '! .*source missing: ~/projects/lib/.agents/skills/wrap-up' "$H/validate.txt" \
+    || { cat "$H/validate.txt"; fail "validate does not report the missing source"; }
+)
+
 echo "all agentctl e2e checks passed"
