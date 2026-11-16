@@ -1057,4 +1057,21 @@ for opt in "--only skills/x" "--host h"; do
   [ "$code" = 1 ] && grep -q 'unknown command: bogus' "$SEL/cmd.txt" || { cat "$SEL/cmd.txt"; fail "bogus $opt was not reported as an unknown command"; }
 done
 
+echo "22. a pack that fails to clone fails the run and owns nothing"
+FAILSB="$SB/clonefail"; mkdir -p "$FAILSB"
+cat > "$FAILSB/agents.edn" <<EDN
+{:executors {:pi {:model "m1" :provider "prov"}}
+ :skill-packs {:gone {:uri "file://$FAILSB/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}}
+ :extra-providers {:prov {:url "http://127.0.0.1:9999" :models ["m1"] :tools [:pi]}}}
+EDN
+set +e
+run apply! -f "$FAILSB/agents.edn" -t pi -y > "$FAILSB/apply.txt" 2>&1; code=$?
+set -e
+[ "$code" = 1 ] || { cat "$FAILSB/apply.txt"; fail "a failed clone exited $code, want 1"; }
+grep -q 'git clone exited' "$FAILSB/apply.txt" || { cat "$FAILSB/apply.txt"; fail "the failed clone was not reported with git's exit"; }
+[ ! -e "$SB/.agents/skill-packs/gone" ] || fail "a failed clone left a checkout behind"
+[ ! -e "$SB/.pi/agent/skills/gone-skill" ] || fail "a skill was linked against a pack that failed to clone"
+if grep -q ":gone" "$SB/.config/agentctl/state.edn" 2>/dev/null; then fail "a failed clone was recorded as owned"; fi
+
 echo "all agentctl e2e checks passed"

@@ -329,6 +329,15 @@
               :cmds cmds
               :runs (mapv plan/run runs)
               :diffs [{:key :revision :before local :after remote}]
+              ;; a fetch that fails fails the op: nothing is owned, and
+              ;; no skill is linked against a checkout that is not there
               :exec! (fn []
                        (fs/create-dirs packs-root)
-                       (doseq [c cmds] (apply u/sh c)))})))
+                       (doseq [r runs
+                               :let [{:keys [exit out err]} (apply u/sh (:argv r))]
+                               :when (not (zero? exit))]
+                         (throw (ex-info (str (:program r) " " (str/join " " (:action r))
+                                              " exited " exit ": "
+                                              (or (last (remove str/blank? (str/split-lines (str err))))
+                                                  (not-empty out) "no output"))
+                                         {:exit exit}))))})))
