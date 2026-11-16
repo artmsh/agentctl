@@ -687,4 +687,27 @@ STUB_REFUSE=add apply -k mcps
 grep -qF "Authorization: Bear…34" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the carried header is not shown masked"; }
 grep -q "handmade-token" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the carried header"; }
 
+echo "32. an env var, file or command that yields nothing is missing, not an empty secret"
+export AGENTCTL_TEST_EMPTY=""
+printf '  \n' > "$SB/empty-token"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :fenv :type :http :url "https://mcp.example.com/e" :headers {"x-key" "!env://AGENTCTL_TEST_EMPTY"} :in :all :acli [:claude]}
+        {:id :ffile :command "/bin/echo" :env {"KEY" "!file://$SB/empty-token"} :in :all :acli [:claude]}
+        {:id :fcmd :command "/bin/echo" :env {"KEY" "!cmd://true"} :in :all :acli [:claude]}]}
+EDN
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "an empty ref value read as converged: exit $code"; }
+for why in "env var is empty: AGENTCTL_TEST_EMPTY (headers.x-key)" "file is empty: $SB/empty-token (env.KEY)" "command printed nothing (env.KEY)"; do
+  grep -qF "⚠ secret unresolved: $why" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "not reported: $why"; }
+done
+apply -k mcps
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "apply! with empty ref values exited $code"; }
+for id in fenv ffile fcmd; do
+  [ "$(user_entry $id)" = null ] || { user_entry $id; fail "$id was written with an empty secret"; }
+done
+validate
+[ "$code" = 1 ] || { cat "$SB/validate.txt"; fail "validate let an empty ref value through: exit $code"; }
+grep -qF "✗ fenv.headers.x-key" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "validate does not report the empty env var"; }
+unset AGENTCTL_TEST_EMPTY
+
 echo "all claude mcp e2e checks passed"

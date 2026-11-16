@@ -161,16 +161,24 @@
     (or (get @cache r)
         (let [res (case (:ref/kind r)
                     :literal {:status :ok :value (:ref/value r)}
-                    :env (if-let [v (System/getenv (:ref/var r))]
-                           {:status :ok :value v}
-                           {:status :missing :message (str "env var unset: " (:ref/var r))})
-                    :file (if-let [v (u/slurp-safe (:ref/path r))]
-                            {:status :ok :value (str/trim v)}
-                            {:status :missing :message (str "file not readable: " (:ref/path r))})
+                    ;; an empty value is missing, as an emptied vault field
+                    ;; is: written out, it is a header or env var that
+                    ;; authenticates nothing
+                    :env (let [v (System/getenv (:ref/var r))]
+                           (cond
+                             (nil? v) {:status :missing :message (str "env var unset: " (:ref/var r))}
+                             (str/blank? v) {:status :missing :message (str "env var is empty: " (:ref/var r))}
+                             :else {:status :ok :value v}))
+                    :file (let [v (u/slurp-safe (:ref/path r))]
+                            (cond
+                              (nil? v) {:status :missing :message (str "file not readable: " (:ref/path r))}
+                              (str/blank? v) {:status :missing :message (str "file is empty: " (:ref/path r))}
+                              :else {:status :ok :value (str/trim v)}))
                     :cmd (let [{:keys [exit out err]} (u/sh "sh" "-c" (:ref/cmd r))]
-                           (if (zero? exit)
-                             {:status :ok :value (str/trim out)}
-                             {:status :error :message (str "command failed: " err)}))
+                           (cond
+                             (not (zero? exit)) {:status :error :message (str "command failed: " err)}
+                             (str/blank? out) {:status :missing :message "command printed nothing"}
+                             :else {:status :ok :value (str/trim out)}))
                     :bw (bw-fetch r))]
           (swap! cache assoc r res)
           res))))
