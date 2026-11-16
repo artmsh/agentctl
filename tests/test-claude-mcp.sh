@@ -725,4 +725,31 @@ apply -k mcps
 [ "$(user_entry typo)" = null ] || { user_entry typo; fail "a misspelt field was written"; }
 grep -q "$PLAIN" "$SB/.claude.json" && fail "the login password was written for a misspelt field"
 
+echo "34. import brings settings env and every header back as placeholders, and apply! keeps the env"
+python3 - "$SB" "$SECRET" "$PLAIN" <<'PY'
+import json, sys
+sb, secret, plain = sys.argv[1:]
+f = sb + "/.claude/settings.json"
+d = json.load(open(f))
+d["env"] = {"API_TOKEN": secret, "MODE": "fast"}
+json.dump(d, open(f, "w"), indent=2)
+f = sb + "/.claude.json"
+d = json.load(open(f))
+d["mcpServers"]["hx"] = {"type": "http", "url": "https://mcp.example.com/x", "headers": {"x-docs": plain}}
+json.dump(d, open(f, "w"), indent=2)
+PY
+run import -f "$SB/none.edn" | grep -v '^;;' > "$SB/imported.edn"
+grep -qE "$SECRET|$PLAIN" "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import wrote a secret in plaintext"; }
+grep -qF '"API_TOKEN" "!bw://claude-env/API_TOKEN"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "the settings env secret is not a placeholder"; }
+grep -qF '"MODE" "fast"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain settings env value was not imported"; }
+grep -qF '!bw://hx/x-docs' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a header with a plain-looking value is not a placeholder"; }
+vault '{"claude-env": {"API_TOKEN": "'$SECRET'"}, "hx": {"x-docs": "'$PLAIN'"}}'
+set +e; run apply! -f "$SB/imported.edn" --all -t claude -k settings -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the imported config exited $code"; }
+[ "$(json "$SB/.claude/settings.json" "d.get('env')")" = "{'API_TOKEN': '$SECRET', 'MODE': 'fast'}" ] \
+  || { cat "$SB/apply.txt"; fail "apply! of the imported config changed or pruned the env"; }
+set +e; run apply -f "$SB/imported.edn" --all -t claude -k settings > "$SB/plan.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "the imported settings env is not converged: exit $code"; }
+grep -qE "$SECRET|$PLAIN" "$SB/apply.txt" && fail "apply! printed an imported secret"
+
 echo "all claude mcp e2e checks passed"

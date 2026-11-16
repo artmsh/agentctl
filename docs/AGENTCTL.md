@@ -546,9 +546,15 @@ A bare string *is* the declaration — a command line, or a URL:
 
 Anything beyond that (env, cwd, per-tool selection) needs the map form.
 
+`import` redacts every MCP header value, for every tool, to a `!bw://<server>/<header>`
+placeholder: agentctl writes headers resolved, and the value on disk says
+nothing about whether it was a secret. A whole `$VAR` header is kept. Env
+values, an MCP server's and Claude's settings `env` (`!bw://claude-env/<NAME>`),
+are redacted when they look like a credential.
+
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
-`bearer_token_env_var` to `:bearer-token-env`. Header credentials are redacted
-to `!bw://` references; apply resolves them and writes the native
+`bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
+`!bw://` references; apply resolves them and writes the native
 `http_headers` table. Codex's `env_http_headers` and `http_headers_helper` are
 not yet modelled by this DSL.
 

@@ -36,6 +36,28 @@
                     v)]))
         m))
 
+(defn- env-ref?
+  "A whole `$VAR` reference: it names where a value lives, and is no secret."
+  [v]
+  (and (string? v)
+       (= :env (:ref/kind (try (refs/parse v) (catch Exception _ nil))))))
+
+(defn- redact-headers
+  "Every header value as a bw placeholder. An http server's whole credential
+   rides in a header, under any name — `x-docs` as readily as
+   `Authorization` — and agentctl writes the resolved value, so nothing on
+   disk says which header held a secret: every one is treated as if it did.
+   A whole `$VAR` reference is kept."
+  [scope m]
+  (into {}
+        (map (fn [[k v]]
+               [k (if (env-ref? v)
+                    v
+                    (do (note! (str "redacted " scope "." (u/kw->str k)
+                                    " -> create bitwarden item `" scope "` field `" (u/kw->str k) "`"))
+                        (refs/redact scope k)))]))
+        m))
+
 (defn- invert [key-map] (into {} (map (fn [[k v]] [(u/kw->str v) k])) key-map))
 
 ;; ---------------------------------------------------------------- settings
@@ -45,7 +67,17 @@
    {:claude (let [s (u/read-json claude/settings-file)
                   inv (invert claude/setting-keys)]
               (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
-                                                      (when-not (map? v) [dk v]))))
+                                                      (cond
+                                                        ;; agentctl writes env resolved: a
+                                                        ;; credential comes back as a placeholder,
+                                                        ;; and leaving env out would have the
+                                                        ;; next apply! prune it
+                                                        (= :env dk)
+                                                        (when (and (map? v) (seq v))
+                                                          [dk (redact-map "claude-env"
+                                                                          (into (sorted-map) (map (fn [[ek ev]] [(u/key-str ek) ev])) v))])
+                                                        (map? v) nil
+                                                        :else [dk v]))))
                                s)))
     :codex (let [t (try (toml/read-toml codex/config-file) (catch Exception _ nil))
                  inv (invert codex/setting-keys)]
@@ -127,9 +159,9 @@
       :args (not-empty (vec (or (:args t) (:args entry))))
       :url (or (:url t) (:url entry))
       :env (not-empty (redact-map nm (or (:env t) (:env entry))))
-      ;; an http server's whole credential rides in a header, so it needs the
-      ;; same redaction as :env — left unmodelled it would land in :extra verbatim
-      :headers (not-empty (redact-map nm (or (:headers t) (:http_headers t) (:headers entry))))
+      ;; an http server's whole credential rides in a header — left
+      ;; unmodelled it would land in :extra verbatim
+      :headers (not-empty (redact-headers nm (or (:headers t) (:http_headers t) (:headers entry))))
       ;; Codex exposes this as a variable name, never the token value.
       :bearer-token-env (or (:bearer_token_env_var t) (:bearer_token_env_var entry))
       ;; Codex's env_http_headers and http_headers_helper have no DSL shape or
