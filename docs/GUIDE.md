@@ -989,9 +989,13 @@ The host's `config.toml` (`$CODEX_HOME/config.toml`) is read with the
 inventory, edited in a local copy by the same ops a local run plans, and written
 back whole. The plan names the host's path. Keys and tables the declaration does
 not name stay as they are. The write is refused if the file changed on the host
-since it was read, and the file it replaces goes into the host's backups. A
-setting dropped from a host's declaration is not removed from the host yet. Other
-tools' settings are reported, not written.
+since it was read, and the file it replaces goes into the host's backups. It is
+staged next to the file and renamed over it, so an interrupted write leaves the old
+file whole. As locally, what agentctl wrote there is recorded in the host's state,
+and a setting dropped from the host's declaration is removed from the host; keys it
+never wrote stay. A `config.toml` that is a symlink, dangling or not, is not
+written through: the plan warns once and changes nothing, on a host as locally.
+Other tools' settings are reported, not written.
 
 Locally awl reads its skills out of `agents.edn`, but a host has none, so there
 `:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
@@ -1000,7 +1004,7 @@ for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
 when the host's `codex --version` reports `codex-cli` 0.95.0 or later (a
 pre-release of 0.95.0 counts as older). An older codex gets its own copy in
 `~/.codex/skills`, with a warning, and so does a codex whose version can't be
-read, or that hasn't answered within 5 seconds where the host has `timeout`. Changing the declaration or the codex version moves the copy on the next
+read, or that hasn't answered within 5 seconds. Changing the declaration or the codex version moves the copy on the next
 apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
 since it is often a shell alias, so an awl skill is placed whether or not `awl` is
 on the host's `PATH`. When codex reads both directories and one holds a hand-made

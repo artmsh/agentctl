@@ -901,10 +901,13 @@ provisioned.
 
 Codex settings on a host are planned by the codex adapter's own ops against a local
 copy of the host's `config.toml`, read in the inventory's round trip. Once they have
-run, the copy is written back whole: staged, checksummed and refused if the file's
-SHA-256 is no longer the one read. The replaced file goes into the host's backups.
-Ownership of host settings is not recorded yet, so a dropped setting stays on the
-host.
+run, the copy is written back whole: staged beside the file, checksummed, refused if
+the file's SHA-256 is no longer the one read, then renamed over it. The replaced
+file goes into the host's backups; the local copy is not backed up locally. The
+writes are recorded in the host's state keyed by the host's path, and pruned there
+as `ownership/prune-ops` prunes local ones. A symlinked `config.toml`, dangling or
+not, is reported (`@` in the inventory) and never written through, the rule the
+local codex adapter follows.
 
 A host has no `agents.edn` for awl to read, so `:awl` there places copies, in
 `~/.agents/skills/<name>`. Codex keeps `$CODEX_HOME/skills`, and from 0.95.0 on also
