@@ -51,11 +51,11 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | Entity | claude | codex | pi | omp | llm | antigravity | kimi | dsh |
 |---|---|---|---|---|---|---|---|---|
 | `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` | `config.toml` | — (Cordis patch layers) |
-| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` | — (Cordis patch layers) |
+| `:mcps` | `claude mcp --scope user`, the project's entry in `~/.claude.json`, or `.mcp.json` approved in `.claude/settings.local.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` | — (Cordis patch layers) |
 | `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` | `$DSH_HOME/skills` |
 | `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` | `$DSH_HOME/AGENTS.md` |
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 
 Pi's shipped `docs/usage.md` names `~/.pi/agent/AGENTS.md` as its global
@@ -437,11 +437,19 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:scope` | Where it lands | For |
 | --- | --- | --- |
 | `:local` (default for a project's servers) | `~/.claude.json`, under the project's entry | anything with a credential; anything only you run |
-| `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
+| `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
 codex, pi, omp and antigravity have no project-level MCP config; they report the
 skip as a warning rather than silently installing the server user-wide.
+
+A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
+the project's `.claude/settings.local.json`, the list Claude Code reads, so it
+starts without the approval prompt. Names already there, added by hand or by
+that prompt, are kept, and nothing is removed from the list. Older releases
+wrote the list under the project in `~/.claude.json`; Claude Code moves that
+copy into `settings.local.json` and deletes it on its next run, and agentctl no
+longer plans it.
 
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` ref that resolves at apply time, or a token

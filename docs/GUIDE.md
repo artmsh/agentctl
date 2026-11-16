@@ -161,11 +161,19 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:scope` | Where it lands | For |
 | --- | --- | --- |
 | `:local` (default for a project's servers) | `~/.claude.json`, under the project's entry | anything with a credential; anything only you run |
-| `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
+| `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
 Codex, Pi and OMP have no project-level MCP config; they report the skip as a
 warning rather than silently installing the server user-wide.
+
+A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
+the project's `.claude/settings.local.json`, the list Claude Code reads, so it
+starts without the approval prompt. Names already there, added by hand or by
+that prompt, are kept, and nothing is removed from the list. Older releases
+wrote the list under the project in `~/.claude.json`; Claude Code moves that
+copy into `settings.local.json` and deletes it on its next run, and agentctl no
+longer plans it.
 
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` reference that resolves at apply time, or a

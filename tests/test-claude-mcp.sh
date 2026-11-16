@@ -2,7 +2,10 @@
 # End-to-end: Claude Code MCP servers and settings, and the secrets they
 # carry. A `claude` stub does what the real CLI does with `mcp add`/`mcp
 # remove --scope user` (writes ~/.claude.json, which agentctl then reads
-# back), and a `bw` stub serves a vault that is locked or holds the fields in
+# back) and, on every run, what Claude Code 2.1.325 does with a project's
+# legacy MCP approvals: it moves `projects.<cwd>.enabledMcpjsonServers` out
+# of ~/.claude.json into <cwd>/.claude/settings.local.json and deletes the
+# key. A `bw` stub serves a vault that is locked or holds the fields in
 # $SB/bw-items.json.
 set -euo pipefail
 
@@ -40,6 +43,15 @@ a = sys.argv[1:]
 open(os.path.join(os.environ["HOME"], "claude-calls.log"), "a").write(" ".join(a) + "\n")
 f = os.path.join(os.environ["HOME"], ".claude.json")
 d = json.load(open(f)) if os.path.exists(f) else {}
+here = os.path.realpath(os.getcwd())
+legacy = d.get("projects", {}).get(here, {}).pop("enabledMcpjsonServers", None)
+if legacy is not None:
+    local = os.path.join(here, ".claude", "settings.local.json")
+    s = json.load(open(local)) if os.path.exists(local) else {}
+    cur = s.get("enabledMcpjsonServers", [])
+    s["enabledMcpjsonServers"] = cur + [x for x in legacy if x not in cur]
+    os.makedirs(os.path.dirname(local), exist_ok=True)
+    json.dump(s, open(local, "w"), indent=2)
 if a[:2] == ["mcp", "remove"]:
     d.get("mcpServers", {}).pop(a[-1], None)
 elif a[:2] == ["mcp", "add"]:
@@ -59,8 +71,6 @@ elif a[:2] == ["mcp", "add"]:
         # the real CLI writes an empty env object for a server without one
         e = {"type": "stdio", "command": pos[1], "args": pos[2:], "env": env}
     d.setdefault("mcpServers", {})[pos[0]] = e
-else:
-    sys.exit(0)
 json.dump(d, open(f, "w"), indent=2)
 STUB
 cat > "$SB/bin/bw" <<'STUB'
@@ -319,5 +329,56 @@ for scope in local project; do
   [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "$scope: not converged after http -> stdio"; }
   rm -f "$SB/proj/.mcp.json"
 done
+
+# ---------------------------------------------------------------- approvals
+
+LOCAL="$SB/proj/.claude/settings.local.json"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :docs :cmd "/bin/echo docs" :in "proj" :at :repo :acli [:claude]}
+        {:id :search :cmd "/bin/echo search" :in "proj" :at :repo :acli [:claude]}
+        {:id :notes :cmd "/bin/echo notes" :in "proj" :acli [:claude]}]}
+EDN
+mkdir -p "$SB/proj/.claude"
+printf '{"enabledMcpjsonServers": ["handmade"], "permissions": {"allow": ["Bash(ls)"]}}\n' > "$LOCAL"
+
+echo "14. .mcp.json servers are approved in the project's settings.local.json, beside what is there"
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "approval: expected drift, got exit $code"; }
+grep -q 'mcps/enabledMcpjsonServers' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "-k mcps does not plan the approval"; }
+grep -q 'enabledMcpjsonServers: \["handmade"\] -> \["handmade" "docs" "search"\]' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the plan does not show the approvals being added"; }
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "approval apply! exited $code"; }
+[ "$(json "$LOCAL" "d['enabledMcpjsonServers']")" = "['handmade', 'docs', 'search']" ] \
+  || { cat "$LOCAL"; fail "approvals not merged into settings.local.json"; }
+[ "$(json "$LOCAL" "d['permissions']['allow']")" = "['Bash(ls)']" ] || fail "settings.local.json lost an unrelated key"
+[ "$(json "$SB/.claude.json" "d.get('projects', {}).get('$SB/proj', {}).get('enabledMcpjsonServers')")" = None ] \
+  || fail "approvals were still written to ~/.claude.json"
+plan -k mcps
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "approvals not converged: exit $code"; }
+# the earlier sections' settings are gone from agents.edn: converge the whole
+# config, so the plans below speak for the approvals alone. Twice, because
+# pruning the last setting removes settings.json's $schema and the next run
+# writes it back
+apply; apply
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "full apply! exited $code"; }
+
+echo "15. a Claude run that migrates a legacy approval leaves nothing to apply"
+python3 -c "import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.setdefault('projects', {}).setdefault(sys.argv[2], {})['enabledMcpjsonServers']=['docs', 'legacy']; json.dump(d, open(f, 'w'))" "$SB/.claude.json" "$SB/proj"
+plan
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "a legacy approval in ~/.claude.json is planned: exit $code"; }
+(cd "$SB/proj" && claude mcp list)
+[ "$(json "$SB/.claude.json" "'enabledMcpjsonServers' in d['projects']['$SB/proj']")" = False ] || fail "the stub did not delete the legacy key"
+plan
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "apply is not a no-op after a Claude run: exit $code"; }
+[ "$(json "$LOCAL" "d['enabledMcpjsonServers']")" = "['handmade', 'docs', 'search', 'legacy']" ] \
+  || { cat "$LOCAL"; fail "a migrated approval was lost"; }
+
+echo "16. a server Claude Code dropped from the list is approved again, and nothing else changes"
+python3 -c "import json,sys; f=sys.argv[1]; d=json.load(open(f)); d['enabledMcpjsonServers'].remove('search'); json.dump(d, open(f, 'w'))" "$LOCAL"
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "re-approval exited $code"; }
+[ "$(json "$LOCAL" "d['enabledMcpjsonServers']")" = "['handmade', 'docs', 'legacy', 'search']" ] \
+  || { cat "$LOCAL"; fail "re-approval reordered or dropped entries"; }
 
 echo "all claude mcp e2e checks passed"

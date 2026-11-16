@@ -1952,6 +1952,25 @@
                   :file f :path [:hooks :PreToolUse]
                   :old {:matcher "Write|Edit" :hooks [{:type "command" :command "lock.sh"}]}}))))))
 
+(deftest json-union-op-adds-what-is-missing-and-removes-nothing
+  (let [dir (temp-dir) f (str dir "/settings.local.json")
+        args {:tool :claude :kind :mcps :id :proj/enabledMcpjsonServers
+              :file f :path [:enabledMcpjsonServers] :values ["docs" "search"]}]
+    (testing "a missing file is a create"
+      (is (= :create (:action (plan/json-union-op args)))))
+    (u/write-json! f {:enabledMcpjsonServers ["handmade" "docs"] :permissions {:allow ["Bash(ls)"]}})
+    (let [op (plan/json-union-op args)]
+      (is (= :update (:action op)))
+      (is (= [{:key :enabledMcpjsonServers :before ["handmade" "docs"] :after ["handmade" "docs" "search"]}]
+             (:diffs op)))
+      (testing "the array is re-read when the op runs: an entry added since the plan survives"
+        (u/write-json! f {:enabledMcpjsonServers ["handmade" "docs" "late"] :permissions {:allow ["Bash(ls)"]}})
+        ((:exec! op))
+        (is (= {:enabledMcpjsonServers ["handmade" "docs" "late" "search"] :permissions {:allow ["Bash(ls)"]}}
+               (u/read-json f)))))
+    (testing "everything present is not an op, in any order"
+      (is (nil? (plan/json-union-op (assoc args :values ["search" "docs"])))))))
+
 (deftest a-checked-setting-that-already-agrees-is-one-line
   (let [dir (temp-dir) f (str dir "/settings.json")]
     (spit f "{\"ultracode\": true, \"skipAutoPermissionPrompt\": true}")

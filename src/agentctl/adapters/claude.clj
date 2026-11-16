@@ -622,6 +622,32 @@
           :when op]
       op)))
 
+(defn project-local-settings-file [proj] (str (:path proj) "/.claude/settings.local.json"))
+
+(defn- mcp-approval-op
+  "Approve the project's `.mcp.json` servers, so Claude Code starts them
+   without asking. Only those need approving: a local-scope server is already
+   the user's own. Claude Code honours `enabledMcpjsonServers` in the
+   project's `.claude/settings.local.json`; the same key under the project in
+   `~/.claude.json` is migrated into that file and deleted on the next
+   `claude` run, so written there it came back as drift after every run.
+
+   The list is shared with the user and with Claude Code's own approval
+   prompt, so declared servers are added to it and nothing is removed. It is
+   an MCP op, not a settings one: it belongs with the servers it approves,
+   and stays out of the settings ownership pass, which records keys a
+   declared setting owns."
+  [cfg id proj]
+  (when-let [shared (not-empty (keys (filter (fn [[_ m]] (= :project (:scope m)))
+                                             (common/project-mcps cfg proj tool))))]
+    (plan/json-union-op {:tool tool :kind :mcps :project id
+                         :id (keyword (name id) "enabledMcpjsonServers")
+                         :file (project-local-settings-file proj)
+                         :path [:enabledMcpjsonServers]
+                         :values (mapv u/kw->str (sort shared))
+                         :risk :medium
+                         :summary "approve the project's .mcp.json servers"})))
+
 (defn- project-ops-for [cfg id proj]
   (let [pfile (project-settings-file proj)
         tool-settings (get-in proj [:tools tool])
@@ -662,7 +688,7 @@
                                  :file pfile :path [:permissions bucket] :value rules
                                  :compare-as (when (coll? rules) :set)
                                  :summary (str (u/tilde pfile) " permissions." (u/kw->str bucket))}))))
-     ;; trust and MCP enablement live in the runtime blob
+     ;; trust lives in the runtime blob
      (keep identity
            [(when (some? (:trusted proj))
               (plan/json-set-op {:tool tool :kind :projects :project id
@@ -672,17 +698,7 @@
                                  :value (boolean (:trusted proj))
                                  :risk :medium
                                  :summary "trust project in ~/.claude.json"}))
-            ;; only servers that live in .mcp.json need enabling: a local-scope
-            ;; server is already the user's own and this list never names it
-            (when-let [shared (not-empty (keys (filter (fn [[_ m]] (= :project (:scope m)))
-                                                       (common/project-mcps cfg proj tool))))]
-              (plan/json-set-op {:tool tool :kind :projects :project id
-                                 :id (keyword (str (name id) "/mcp"))
-                                 :file runtime-file
-                                 :path [:projects (keyword (:path proj)) :enabledMcpjsonServers]
-                                 :value (mapv u/kw->str (sort shared))
-                                 :risk :medium
-                                 :summary "enable project MCP servers"}))]))))
+            (mcp-approval-op cfg id proj)]))))
 
 (defn project-skills-dir [proj] (str (:path proj) "/.claude/skills"))
 

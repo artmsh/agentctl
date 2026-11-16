@@ -607,6 +607,34 @@
                                     (conj arr' value))]
                         (u/write-json! file (assoc-in data path arr''))))})))))
 
+(defn json-union-op
+  "Op that makes the JSON array at `path` hold every element of `values`,
+   keeping whatever else is there, in its order. The array is shared — the
+   tool and the user add to it too — so nothing is removed and an element
+   already present is not added twice. Nothing missing is no op at all."
+  [{:keys [tool kind id file path values summary note risk project]}]
+  (let [current (get-in (u/read-json file) path)
+        have (set (map u/norm current))
+        missing (vec (remove #(have (u/norm %)) values))]
+    (when (seq missing)
+      (op {:project project :action (if (nil? current) :create :update)
+           :tool tool :kind kind :id id
+           :target file
+           :path (mapv u/kw->str path)
+           :summary summary
+           :note note
+           :diffs [{:key (last path) :before current :after (into (vec current) missing)}]
+           :risk (or risk :low)
+           ;; re-read at execution time: the tool rewrites this array itself,
+           ;; and several ops may target one file in a single run
+           :exec! (fn []
+                    (u/backup! file)
+                    (let [data (or (u/read-json file) {})
+                          arr (vec (get-in data path))
+                          have (set (map u/norm arr))]
+                      (u/write-json! file (assoc-in data path
+                                                    (into arr (remove #(have (u/norm %)) values))))))}))))
+
 (defn json-array-unset-op
   "Op that removes one caller-owned element (`old`) from a JSON array at
    `path`. Nothing to remove is no op at all — mirrors `json-unset-op`."
