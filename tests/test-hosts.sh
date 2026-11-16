@@ -20,6 +20,7 @@ mkdir -p "$SB/bin"
 # to answer another one, or nothing
 cat > "$SB/bin/codex" <<'STUB'
 #!/bin/sh
+[ "${CODEX_HANG:-}" = spawn ] && { sleep 3123 & sleep 3124; }
 [ -n "${CODEX_HANG:-}" ] && exec sleep 60
 [ "${1:-}" = --version ] && printf '%s\n' "${CODEX_VERSION-codex-cli 0.169.0}"
 exit 0
@@ -279,12 +280,34 @@ grep -q 'gave no version' "$SB/out" || fail "unknown codex version not reported:
 grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "unknown codex not given copies: $(cat "$SB/out")"
 CODEX_VERSION='Error: Node.js v18.19.1 is not supported' expect 2 apply $W
 grep -q 'gave no version' "$SB/out" || fail "a runtime's version taken for codex's: $(cat "$SB/out")"
-if command -v timeout >/dev/null 2>&1; then
-  echo "    nor does one that hangs"
-  t0=$(date +%s)
-  CODEX_HANG=1 expect 2 apply $W
-  [ $(( $(date +%s) - t0 )) -lt 30 ] || fail "a hanging codex hung the inventory"
-  grep -q 'gave no version' "$SB/out" || fail "a hanging codex not reported: $(cat "$SB/out")"
+echo "    nor does one that hangs, on a host with or without timeout(1)"
+# a system PATH: stock macOS has no timeout(1) there
+cat > "$SB/plain-ssh" <<STUB
+#!/bin/sh
+exec env PATH="$SB/bin:/usr/bin:/bin" sh -c "\$2"
+STUB
+chmod +x "$SB/plain-ssh"
+t0=$(date +%s)
+CODEX_HANG=1 AGENTCTL_SSH_CMD="$SB/plain-ssh" expect 2 apply $W
+[ $(( $(date +%s) - t0 )) -lt 30 ] || fail "a hanging codex hung the inventory"
+grep -q 'gave no version' "$SB/out" || fail "a hanging codex not reported: $(cat "$SB/out")"
+echo "    and what a hanging codex started is killed with it, in about 5s"
+t0=$(date +%s)
+CODEX_HANG=spawn AGENTCTL_SSH_CMD="$SB/plain-ssh" expect 2 apply $W
+took=$(( $(date +%s) - t0 ))
+sleep 1
+if pgrep -f 'sleep 312[34]' >/dev/null; then pkill -f 'sleep 312[34]'; fail "the version probe left a stray process"; fi
+[ "$took" -lt 10 ] || fail "the version probe took ${took}s, not about 5"
+if command -v dash >/dev/null 2>&1; then
+  # Debian's /bin/sh: no job control without a terminal
+  cat > "$SB/dash-ssh" <<STUB
+#!/bin/sh
+exec env PATH="$SB/bin:/usr/bin:/bin" dash -c "\$2"
+STUB
+  chmod +x "$SB/dash-ssh"
+  CODEX_HANG=spawn AGENTCTL_SSH_CMD="$SB/dash-ssh" expect 2 apply $W
+  sleep 1
+  if pgrep -f 'sleep 312[34]' >/dev/null; then pkill -f 'sleep 312[34]'; fail "the version probe left a stray process under dash"; fi
 fi
 
 echo "21. a hand-made copy codex reads beside agentctl's is reported, never touched"
@@ -396,14 +419,18 @@ expect 0 apply $S -k skills
 grep -q 'default_permissions' "$SB/out" && fail "-k skills planned settings"
 
 echo "27. apply! writes them and leaves the rest of the file alone; then converged"
+chmod 600 "$GC"
 expect 0 apply! $S -y
+[ "$(ls -l "$GC" | cut -c1-10)" = "-rw-------" ] || fail "the host's config.toml lost its mode: $(ls -l "$GC")"
+ls "$SB/.config/agentctl/backups/"*/ 2>/dev/null | grep -q 'agentctl-host' && fail "the local copy of the host's config.toml was backed up here"
+grep -q 'default_permissions' "$SB/.config/agentctl/hosts/box3.edn" || fail "host settings ownership not recorded"
 grep -q '^default_permissions = "net"' "$GC" || fail "default not written: $(cat "$GC")"
 grep -q '^\[permissions.net\]' "$GC" || fail "profile not written: $(cat "$GC")"
 grep -q '^enabled = true' "$GC" || fail "network not enabled: $(cat "$GC")"
 grep -q '^model = "hand-picked"' "$GC" || fail "undeclared key lost"
 grep -q '^command = "docs-server"' "$GC" || fail "undeclared table lost"
 ls "$G/.config/agentctl/backups/"*/_.codex_config.toml >/dev/null || fail "config.toml not backed up on the host"
-[ -e "$G/.config/agentctl/staging/"* ] 2>/dev/null && fail "staging left behind"
+ls -A "$G/.codex" | grep -q 'agentctl-' && fail "staging left behind"
 converged_s
 expect 0 validate $S
 grep -q 'host matches' "$SB/out" || fail "validate after converging: $(cat "$SB/out")"
@@ -432,7 +459,68 @@ grep -q 'changed on the host since it was read' "$SB/out" || fail "a raced write
 grep -q 'raced' "$GC" || fail "the racing edit was overwritten"
 grep -q '^enabled = false' "$GC" || fail "a refused write still landed"
 
-echo "30. a codex the host lacks skips its settings; other tools' settings are reported"
+echo "30. a setting dropped from a host is pruned there, and only what agentctl wrote"
+# step 29's racing line landed in the profile's table: a key there agentctl
+# never wrote keeps the profile, which is not this step's case
+sed -i.bak '/raced/d' "$GC"
+expect 0 apply! $S -y
+cat > "$SB/set3.edn" <<EDN
+{:hosts {:box3 {:ssh "box" :os :linux :home "$G"
+                :settings [{:acli [:codex] :personality "pragmatic"}]}}}
+EDN
+S3="-f $SB/set3.edn --host box3"
+expect 2 apply $S3
+grep -q 'removed from agents.edn' "$SB/out" || fail "dropped settings not pruned: $(cat "$SB/out")"
+expect 0 apply! $S3 -y
+grep -q '^personality = "pragmatic"' "$GC" || fail "new setting not written: $(cat "$GC")"
+grep -q 'default_permissions' "$GC" && fail "dropped default kept: $(cat "$GC")"
+grep -q 'permissions.net' "$GC" && fail "dropped profile kept: $(cat "$GC")"
+grep -q '^model = "hand-picked"' "$GC" || fail "a key agentctl never wrote was pruned"
+grep -q '^command = "docs-server"' "$GC" || fail "a table agentctl never wrote was pruned"
+expect 0 apply $S3
+grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "not converged after a prune: $(cat "$SB/out")"
+echo "    a key written again keeps its same-line comment"
+sed -i.bak 's/^personality = "pragmatic"$/personality = "pragmatic"  # house tone/' "$GC"
+cat > "$SB/set3b.edn" <<EDN
+{:hosts {:box3 {:ssh "box" :os :linux :home "$G"
+                :settings [{:acli [:codex] :personality "pragmatic" :thinking "high"}]}}}
+EDN
+expect 0 apply! -f "$SB/set3b.edn" --host box3 -y
+grep -q '^model_reasoning_effort = "high"' "$GC" || fail "new key not written: $(cat "$GC")"
+grep -q '^personality = "pragmatic"  # house tone$' "$GC" || fail "a comment on an unchanged key was dropped: $(cat "$GC")"
+echo "    and with the host's last setting gone too"
+cat > "$SB/set4.edn" <<EDN
+{:hosts {:box3 {:ssh "box" :os :linux :home "$G"}}}
+EDN
+expect 2 apply -f "$SB/set4.edn" --host box3
+expect 0 apply! -f "$SB/set4.edn" --host box3 -y
+grep -q 'personality' "$GC" && fail "the last setting kept: $(cat "$GC")"
+grep -q 'default_permissions\|personality' "$SB/.config/agentctl/hosts/box3.edn" && fail "pruned settings still owned"
+expect 0 apply -f "$SB/set4.edn" --host box3
+
+echo "31. a host config.toml that is a symlink is not written through; what it withholds stays pending"
+mkdir -p "$G/dotfiles"; mv "$GC" "$G/dotfiles/config.toml"; ln -s "$G/dotfiles/config.toml" "$GC"
+cp "$G/dotfiles/config.toml" "$SB/gl.before"
+expect 2 apply $S
+grep -q 'is a symlink' "$SB/out" || fail "a linked host config.toml not reported: $(cat "$SB/out")"
+grep -q 'withheld: .*default_permissions' "$SB/out" || fail "the withheld changes are not listed: $(cat "$SB/out")"
+grep -q 'withheld$\|[0-9] withheld' "$SB/out" || fail "the summary does not count them: $(cat "$SB/out")"
+expect 1 apply! $S -y
+cmp -s "$G/dotfiles/config.toml" "$SB/gl.before" || fail "written through the host's config.toml link"
+[ -L "$GC" ] || fail "the host's config.toml link was replaced"
+rm "$GC"; mv "$G/dotfiles/config.toml" "$GC"
+
+echo "    nor is a dangling one: the same warning, on every run"
+mv "$GC" "$SB/gc.keep"; ln -s "$G/nowhere/config.toml" "$GC"
+expect 2 apply $S
+grep -q 'is a symlink' "$SB/out" || fail "a dangling host config.toml link not reported: $(cat "$SB/out")"
+grep -q 'withheld: ' "$SB/out" || fail "the withheld changes are not listed: $(cat "$SB/out")"
+expect 1 apply! $S -y
+grep -q 'appeared on the host' "$SB/out" && fail "a dangling link refused as a new file"
+[ -L "$GC" ] && [ ! -e "$G/nowhere" ] || fail "written through a dangling link"
+rm "$GC"; mv "$SB/gc.keep" "$GC"
+
+echo "32. a codex the host lacks skips its settings; other tools' settings are reported"
 cat > "$SB/set2.edn" <<EDN
 {:hosts {:box3 {:ssh "box" :os :linux :home "$G"
                 :settings [{:id :cx :acli [:codex] :model "x"} {:id :cc :acli [:claude] :model "y"}]}}}

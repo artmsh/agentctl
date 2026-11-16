@@ -12,6 +12,7 @@
             [agentctl.state :as state]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
+            [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as str]))
 
@@ -602,6 +603,39 @@
     op))
 
 ;; ---------------------------------------------------------------- entry
+
+(defn- withheld-line [o]
+  (str "withheld: " (plan/sigil (:action o)) " " (name (:kind o)) "/" (u/kw->str (:id o))
+       (when-let [ks (seq (distinct (keep :key (:diffs o))))]
+         (str " (" (str/join ", " (map u/kw->str ks)) ")"))))
+
+(defn withhold
+  "The ops of `ops` that would change `file` — a config.toml that is a
+   symlink — held back as one warning that lists them. They have not
+   converged: `:withheld` counts them as pending, so a dry run exits 2 and
+   apply! 1, as for a secret that did not resolve. `shown` is the path the
+   plan names."
+  [ops file shown]
+  (let [{hit true keep false} (group-by #(boolean (and (plan/mutating? %) (= file (:target %)))) ops)]
+    (if (empty? hit)
+      ops
+      (concat keep
+              [(plan/op {:tool tool :kind :settings :id :config-link :warn true :target shown
+                         :withheld (count hit)
+                         :summary (str/join "\n    "
+                                            (cons (str (u/tilde shown) " is a symlink: agentctl does not write through it — "
+                                                       (count hit) " change(s) withheld")
+                                                  (map withheld-line hit)))})]))))
+
+(defn link-guard
+  "agentctl edits config.toml key by key, in a file that stays codex's. A
+   symlink there, dangling or not, means the file lives somewhere else,
+   usually a dotfiles checkout: it is not written through, nor replaced by a
+   copy that would leave that checkout behind. The ops of a whole plan —
+   this adapter's, ownership prunes, entity extras — that would change it
+   are withheld (`withhold`)."
+  [ops]
+  (if (fs/sym-link? config-file) (withhold ops config-file config-file) ops))
 
 (defn plan [cfg state]
   (concat (settings-ops cfg state)

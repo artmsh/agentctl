@@ -130,6 +130,10 @@
 
 (defn backup-dir [] (str *backup-root* "/" @run-stamp))
 
+(def ^:dynamic *backup?*
+  "Off for a local copy of a file whose real backup is made elsewhere."
+  true)
+
 (defn backup!
   "Copy `p` into this run's backup directory. Returns the backup path, or nil
    when there is nothing to back up.
@@ -138,7 +142,7 @@
    otherwise overwrite the pre-run state with a half-converged one, which is
    exactly the state the backup exists to undo."
   [p]
-  (when (exists? p)
+  (when (and *backup?* (exists? p))
     (let [src (fs/path (expand (str p)))
           dest (fs/path (backup-dir) (str/replace (tilde (str src)) #"[/~]" "_"))]
       (if (fs/exists? dest {:nofollow-links true})

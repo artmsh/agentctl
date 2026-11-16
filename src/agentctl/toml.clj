@@ -271,11 +271,30 @@
   [s header]
   (and (not (:array? s)) (= (:header s) header)))
 
+(defn- trailing-comment
+  "The whitespace and `# comment` after the value starting at `col` of a
+   one-line `key = value`, or \"\". A `#` inside a string is not one."
+  [^String line col]
+  (let [n (count line)
+        at (loop [j col]
+             (cond
+               (>= j n) nil
+               (= \# (.charAt line j)) j
+               (#{\" \'} (.charAt line j)) (when-let [e (skip-string line j)] (recur e))
+               :else (recur (inc j))))]
+    (if at
+      (subs line (+ col (count (str/trimr (subs line col at)))))
+      "")))
+
 (defn- set-in-segment [seg k v]
   (let [new-line (str (quote-key k) " = " (encode-value v))
         {:keys [lines]} seg]
     (if-let [[s e] (key-span k lines)]
-      (assoc seg :lines (vec (concat (subvec lines 0 s) [new-line] (subvec lines (inc e)))))
+      ;; a same-line comment is the reader's note on the key: it stays
+      (let [new-line (if (= s e)
+                       (str new-line (trailing-comment (nth lines s) (:value-at (parse-key (nth lines s)))))
+                       new-line)]
+        (assoc seg :lines (vec (concat (subvec lines 0 s) [new-line] (subvec lines (inc e))))))
       ;; insert before trailing blank lines so tables stay visually grouped
       (let [tail (count (take-while str/blank? (reverse lines)))
             at (- (count lines) tail)]

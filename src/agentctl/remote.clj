@@ -130,7 +130,11 @@
            (str "Say (\"H`t\"+(E $H))\n"
                 (str/join (for [k files]
                             (str "$f=\"" (ps-file k) "\"\n"
-                                 "if(Test-Path -LiteralPath $f -PathType Leaf){Say (\"F`t" (name k) "`t\"+(E $f)"
+                                 "$a=Attr $f\n"
+                                 "if(($a -ne $null) -and (IsLink $a)){$c=''\n"
+                                 "if(Test-Path -LiteralPath $f -PathType Leaf){$c=[Convert]::ToBase64String([IO.File]::ReadAllBytes($f))}\n"
+                                 "Say (\"F`t" (name k) "`t\"+(E $f)+\"`t@\"+$c)}\n"
+                                 "elseif(Test-Path -LiteralPath $f -PathType Leaf){Say (\"F`t" (name k) "`t\"+(E $f)"
                                  "+\"`t\"+[Convert]::ToBase64String([IO.File]::ReadAllBytes($f)))}"
                                  "else{Say (\"F`t" (name k) "`t\"+(E $f)+\"`t-\")}\n")))
                 (str/join (for [r roots]
@@ -205,17 +209,34 @@
        "printf 'H\\t%s\\n' \"$(e \"$H\")\"\n"
        (str/join (for [k files]
                    (str "f=\"" (sh-file k) "\"\n"
-                        "if [ -f \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t%s\\n' \"$(e \"$f\")\" \"$(base64 < \"$f\" | tr -d '\\n')\"\n"
+                        "if [ -L \"$f\" ] && [ -f \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t@%s\\n' \"$(e \"$f\")\" \"$(base64 < \"$f\" | tr -d '\\n')\"\n"
+                        "elif [ -L \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t@\\n' \"$(e \"$f\")\"\n"
+                        "elif [ -f \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t%s\\n' \"$(e \"$f\")\" \"$(base64 < \"$f\" | tr -d '\\n')\"\n"
                         "else printf 'F\\t" (name k) "\\t%s\\t-\\n' \"$(e \"$f\")\"; fi\n")))
        (str/join (for [r roots]
                    (str "printf 'R\\t" (name r) "\\t%s\\n' \"$(e \"" (sh-root r) "\")\"\n")))
        (str/join (for [t tools]
                    (str "if command -v " t " >/dev/null 2>&1; then printf 'T\\t" t "\\t1\\n'\n"
                         ;; stdin is the rest of this script: a CLI reading it
-                        ;; would eat it. One that hangs, or fails, has no version.
-                        "v=$(if command -v timeout >/dev/null 2>&1; then timeout 5 " t " --version; else " t
-                        " --version; fi </dev/null 2>/dev/null) || v=\n"
-                        "printf 'V\\t" t "\\t%s\\n' \"$(e \"$(printf '%s\\n' \"$v\" | head -n 1)\")\"\n"
+                        ;; would eat it. One that fails, or has not answered in
+                        ;; 5s, has no version. Not `timeout`: stock macOS has
+                        ;; none. The CLI runs in a process group of its own
+                        ;; (setsid, perl's setpgrp, or job control) and the
+                        ;; whole group is killed, so nothing it started is left
+                        ;; behind. The deadline is read off the clock: a
+                        ;; `sleep 0.1` costs a process, and fifty of them are
+                        ;; far more than 5s. Output goes to a file, so a child
+                        ;; cannot hold a pipe open.
+                        "o=$(mktemp)\n"
+                        "if command -v setsid >/dev/null 2>&1; then setsid " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!\n"
+                        "elif command -v perl >/dev/null 2>&1; then perl -e 'setpgrp(0,0); exec @ARGV or exit 127' " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!\n"
+                        "else set -m 2>/dev/null; " t " --version </dev/null >\"$o\" 2>/dev/null & p=$!; set +m 2>/dev/null; fi\n"
+                        "end=$(( $(date +%s) + 5 ))\n"
+                        "while kill -0 \"$p\" 2>/dev/null && [ \"$(date +%s)\" -lt \"$end\" ]; do sleep 0.1; done\n"
+                        "if kill -0 \"$p\" 2>/dev/null; then v=; else wait \"$p\" && v=$(head -n 1 \"$o\") || v=; fi\n"
+                        "kill -9 \"-$p\" 2>/dev/null || kill -9 \"$p\" 2>/dev/null || true\n"
+                        "wait \"$p\" 2>/dev/null || true; rm -f \"$o\"\n"
+                        "printf 'V\\t" t "\\t%s\\n' \"$(e \"$v\")\"\n"
                         "else printf 'T\\t" t "\\t0\\n'; fi\n")))
        (str/join
         (for [r roots id ids
@@ -281,38 +302,45 @@
   (str (sh-prelude host)
        "f=\"" (sh-file k) "\"\n"
        "b=\"$H/.config/agentctl/backups/" stamp "/" (file-parked-as k) "\"\n"
-       "s=\"$H/.config/agentctl/staging/" stamp "-" (name k) "\"\n"
+       ;; staged beside the file: the closing `mv` is then a rename on one
+       ;; filesystem, so a crash leaves the old file or the new, never half
+       "s=\"$(dirname \"$f\")/.$(basename \"$f\").agentctl-" stamp "\"\n"
        "trap 'rm -f \"$s\"' EXIT\n"
+       "[ ! -L \"$f\" ] || { echo \"is a symlink now, not written through: $f\" >&2; exit 1; }\n"
        (if expected
          (str "[ -f \"$f\" ] && [ \"$(sha \"$f\")\" = " (sh-quote expected) " ] || "
               "{ echo \"changed on the host since it was read: $f\" >&2; exit 1; }\n")
          "[ ! -e \"$f\" ] && [ ! -L \"$f\" ] || { echo \"appeared on the host since it was read: $f\" >&2; exit 1; }\n")
-       "mkdir -p \"$(dirname \"$s\")\" \"$(dirname \"$f\")\"\n"
+       "mkdir -p \"$(dirname \"$f\")\"\n"
+       ;; the staged file takes the mode of the one it replaces (a 0600
+       ;; config.toml can hold tokens): `mv` puts this inode in its place
+       "if [ -f \"$f\" ]; then cp -p \"$f\" \"$s\"; fi\n"
        "base64 -d > \"$s\" <<'AGENTCTL_EOF'\n" (mime bs) "\nAGENTCTL_EOF\n"
        "[ \"$(sha \"$s\")\" = " (sh-quote (sha256 bs)) " ] || { echo 'checksum mismatch' >&2; exit 1; }\n"
        ;; the first copy a run backs up is the one it found
        "if [ -f \"$f\" ] && [ ! -e \"$b\" ]; then mkdir -p \"$(dirname \"$b\")\"; cp -p \"$f\" \"$b\"; fi\n"
-       ;; a link is written through, so the file it points at stays the one
-       "if [ -L \"$f\" ]; then cat \"$s\" > \"$f\"; else mv \"$s\" \"$f\"; fi\n"
+       "mv \"$s\" \"$f\"\n"
        "echo OK\n"))
 
 (defn- ps-write-file [host stamp k ^bytes bs expected]
   (ps-wrap host
            (str "$f=\"" (ps-file k) "\"\n"
                 "$b=\"$H\\.config\\agentctl\\backups\\" stamp "\\" (file-parked-as k) "\"\n"
-                "$s=\"$H\\.config\\agentctl\\staging\\" stamp "-" (name k) "\"\n"
+                "$s=[IO.Path]::Combine([IO.Path]::GetDirectoryName($f),'.'+[IO.Path]::GetFileName($f)+'.agentctl-" stamp "')\n"
+                "$a=Attr $f\n"
+                "if(($a -ne $null) -and (IsLink $a)){throw \"is a symlink now, not written through: $f\"}\n"
                 (if expected
                   (str "if(-not (Test-Path -LiteralPath $f -PathType Leaf) -or (Sha $f) -ne '" expected "'){"
                        "throw \"changed on the host since it was read: $f\"}\n")
                   "if((Attr $f) -ne $null){throw \"appeared on the host since it was read: $f\"}\n")
-                "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($s))\n"
+                "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($f))\n"
                 "try{\n"
                 "[IO.File]::WriteAllBytes($s,[Convert]::FromBase64String('" (b64 bs) "'))\n"
                 "if((Sha $s) -ne '" (sha256 bs) "'){throw 'checksum mismatch'}\n"
                 "if(((Attr $f) -ne $null) -and ((Attr $b) -eq $null)){"
                 "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($b));[IO.File]::Copy($f,$b)}\n"
-                "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($f))\n"
-                "[IO.File]::Copy($s,$f,$true)\n"
+                ;; Replace and Move are renames in one directory; Copy is not
+                "if((Attr $f) -ne $null){[IO.File]::Replace($s,$f,$null)}else{[IO.File]::Move($s,$f)}\n"
                 "}finally{Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue}\n")))
 
 (defn write-file!
@@ -357,9 +385,15 @@
          "S" (assoc-in acc [:entries (keyword a) b :state] (get state-of c :absent))
          "M" (assoc-in acc [:entries (keyword a) b :files (unb64-str c)] d)
          ;; `-` is no file; an empty one loses its field to the line trim
-         "F" (assoc-in acc [:host-files (keyword a)]
-                       {:path (unb64-str b)
-                        :bytes (when-not (= "-" c) (.decode (Base64/getDecoder) (str c)))})
+         ;; `@` marks a symlink, followed by what it points at (nothing when
+         ;; it dangles): read to plan with, never written through
+         "F" (let [c (str c)
+                   link? (str/starts-with? c "@")
+                   c (if link? (subs c 1) c)]
+               (assoc-in acc [:host-files (keyword a)]
+                         (cond-> {:path (unb64-str b)
+                                  :bytes (when-not (or (= "-" c) (and link? (= "" c))) (.decode (Base64/getDecoder) c))}
+                           link? (assoc :link? true))))
          acc)))
    {:tools #{} :roots {} :versions {} :entries {} :host-files {}}
    lines))
@@ -370,7 +404,7 @@
    root. `:files` maps each file below a skill, `/`-separated, to the SHA-256 of
    its bytes; `:versions` holds the first line of each present tool's
    `--version`. `files` names whole files to read as well (`:host-files {k
-   {:path :bytes}}`, `:bytes` nil when there is none). One round trip however
+   {:path :bytes :link?}}`, `:bytes` nil when there is none or it is a symlink). One round trip however
    many skills: PowerShell takes a second to start."
   ([host tools ids] (inventory host tools ids nil))
   ([host tools ids files]

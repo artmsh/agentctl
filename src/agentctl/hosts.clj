@@ -14,6 +14,7 @@
             [agentctl.adapters.common :as common]
             [agentctl.config :as config]
             [agentctl.core :as core]
+            [agentctl.ownership :as ownership]
             [agentctl.plan :as plan]
             [agentctl.remote :as remote]
             [agentctl.sources :as sources]
@@ -136,15 +137,44 @@
     (fs/delete-on-exit f)
     f))
 
+(defn- owned-cfg
+  "The host's config as ownership reads it. A host's declarations are always
+   in the entity shape, so they answer for what was written there even when
+   nothing is declared any more: that is what prunes the last setting."
+  [hcfg]
+  (assoc hcfg :entity-dsl? true))
+
+(defn- writes-at
+  "The host state with the writes recorded at `from` read as made at `to`:
+   recorded at the host's path, planned against the local copy."
+  [st from to]
+  (update st :writes
+          #(into {} (for [[k w] %]
+                      (if (= from (:target w))
+                        [(assoc k 1 to) (assoc w :target to)]
+                        [k w])))))
+
 (defn- settings-ops
-  "Codex's settings ops, planned against a local copy of the host's
-   config.toml and shown at the host's path. They edit the copy; `push!`
-   sends it back once they have run."
+  "Codex's settings ops, and the prunes of what the host no longer declares,
+   planned against a local copy of the host's config.toml and shown at the
+   host's path. They edit the copy — with no local backup of it: the host
+   write backs up the host's file — and `push!` sends it back once they
+   have run."
   [host hcfg st remote-file local]
-  (for [o (codex/settings-ops hcfg st local)]
-    (cond-> (assoc o :host (name (:id host)))
-      (= local (:target o)) (assoc :target (:path remote-file))
-      (plan/mutating? o) (assoc :host-file :codex-config))))
+  (let [st (writes-at st (:path remote-file) local)]
+    (for [o (concat (codex/settings-ops hcfg st local)
+                    (filter #(and (= :codex (:tool %)) (= local (:target %)))
+                            (ownership/prune-ops (owned-cfg hcfg) st)))]
+      (cond-> (assoc o :host (name (:id host)))
+        (= local (:target o)) (assoc :target (:path remote-file))
+        (:exec! o) (update :exec! (fn [f] (fn [] (binding [u/*backup?* false] (f)))))
+        (plan/mutating? o) (assoc :host-file :codex-config)))))
+
+(defn- settings-written?
+  "Does the host state hold codex settings writes, which a host that no
+   longer declares any still has to prune?"
+  [st]
+  (boolean (some #(= :codex (:tool %)) (vals (:writes st)))))
 
 (defn- explicit-settings-tools
   "Tools a host's settings row names. A row naming none is read as codex's:
@@ -234,8 +264,9 @@
         ;; nowhere, and still has that skill on the host to prune
         codex-settings (common/settings-for hcfg :codex)
         declared (cond-> (into (declared-tools hcfg) (filter #(seq (state/managed-ids st % :skills)) remote/roots))
-                   (seq codex-settings) (conj :codex))
-        settings? (and (kind? :settings) (selected? :codex) (boolean (seq codex-settings)))
+                   (or (seq codex-settings) (settings-written? st)) (conj :codex))
+        settings? (and (kind? :settings) (selected? :codex)
+                       (or (boolean (seq codex-settings)) (settings-written? st)))
         wanted (filter selected? declared)
         probe (filter probed declared)
         managing? (and (kind? :skills) (boolean (some supported-tools wanted)))
@@ -285,6 +316,7 @@
                       (update :exec! (fn [f] (fn [] (f) (swap! written conj [root id]))))))
         pending (set (for [o place-ops :when (plan/mutating? o)] [(:tool o) (:id o)]))
         remote-config (get-in inv [:host-files :codex-config])
+        linked? (:link? remote-config)
         local-config (when (and settings? ((:tools inv) :codex)) (local-copy remote-config))]
     {:inventory inv
      :skipped (vec (filter selected? (remove (:tools inv) probe)))
@@ -292,7 +324,8 @@
                              :when (and (ready? p) (placeable? host source))]
                          [[root id] {:source source :target (target-in host inv root id)}]))
      :gone (set (remove present-at prunable))
-     :push (when local-config
+     :owned-cfg (when local-config (owned-cfg hcfg))
+     :push (when (and local-config (not linked?))
              {:file :codex-config :local local-config
               :expected (some-> (:bytes remote-config) remote/sha256)})
      :ops
@@ -303,7 +336,12 @@
              :when (and (kind? :settings) (selected? t))]
          (warn-op t :settings (keyword "host" (name t))
                   (str (name t) " settings are not provisioned on hosts yet — only codex's are")))
-       (when local-config (settings-ops host hcfg st remote-config local-config))
+       ;; planned against what the link points at, as locally, and then
+       ;; withheld: a symlink is not written through
+       (when local-config
+         (cond-> (settings-ops host hcfg st remote-config local-config)
+           linked? (-> (codex/withhold (:path remote-config) (:path remote-config))
+                       (->> (map #(assoc % :host (name (:id host))))))))
        (for [k (remove supported-kinds kinds)]
          (warn-op :agentctl k (keyword "host" (name k))
                   (str (name k) " are not provisioned on hosts yet — only skills are")))
@@ -362,10 +400,16 @@
 (defn sync-host-state
   "Own what is now converged, forget what is now gone. A failed write stays
    unrecorded: a later prune must never delete what it never managed to create."
-  [st {:keys [desired gone]} done failed]
+  [st {:keys [desired gone owned-cfg ops ran]} done failed]
   (let [bad (set (mapcat core/op-keys failed))
-        removed (for [o done :when (= :delete (:action o))] [(:tool o) (:id o)])]
+        removed (for [o done :when (and (= :delete (:action o)) (= :skills (:kind o)))]
+                  [(:tool o) (:id o)])
+        triples (fn [os] (set (map (juxt :tool :kind :id) os)))]
     (as-> st $
+      ;; as locally: what was written, keyed by the host's path
+      (if owned-cfg
+        (ownership/record $ (assoc owned-cfg :planned-ops (or ran ops)) (triples failed) (triples done))
+        $)
       (reduce (fn [s [[root id] {:keys [source target]}]]
                 (if (bad [root :skills id])
                   s
@@ -404,7 +448,7 @@
                          [:hosts (:id host)])
             again (plan-host host st opts)
             {d2 :done f2 :failed} (push! host again (core/execute! (:ops again)))]
-        {:plan again :done (concat done d2) :failed (concat failed f2)}))))
+        {:plan (assoc again :ran (concat ops (:ops again))) :done (concat done d2) :failed (concat failed f2)}))))
 
 ;; ---------------------------------------------------------------- validate
 
@@ -415,7 +459,7 @@
   (let [where [:hosts (:id host)]]
     (try
       (let [{:keys [ops skipped inventory]} (plan-host host st opts)
-            changes (filter plan/mutating? ops)]
+            changes (concat (filter plan/mutating? ops) (filter :withheld ops))]
         (concat
          [[:ok where (str "reachable over ssh — " (:ssh host) ", " (name (:os host))
                           ", home " (:home inventory))]]

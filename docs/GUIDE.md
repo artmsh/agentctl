@@ -178,6 +178,10 @@ use `validate --deep` to fetch the current schema.
 Codex keeps its TUI settings in nested `[tui.*]` tables of
 `~/.codex/config.toml`, next to state it writes for itself. Each declared
 setting below is written key by key into its own table, so that state survives.
+A `config.toml` that is a symlink, into a dotfiles checkout say, is left alone:
+agentctl does not write through it. The plan says so in one warning that lists
+each change withheld, and counts them as pending: `apply` exits 2 and `apply!` 1
+until the link is replaced or the declaration matches the file.
 
 A model switch two keys away: bind the presets browser and put `/model` in slot 0.
 
@@ -999,9 +1003,13 @@ The host's `config.toml` (`$CODEX_HOME/config.toml`) is read with the
 inventory, edited in a local copy by the same ops a local run plans, and written
 back whole. The plan names the host's path. Keys and tables the declaration does
 not name stay as they are. The write is refused if the file changed on the host
-since it was read, and the file it replaces goes into the host's backups. A
-setting dropped from a host's declaration is not removed from the host yet. Other
-tools' settings are reported, not written.
+since it was read, and the file it replaces goes into the host's backups. It is
+staged next to the file and renamed over it, so an interrupted write leaves the old
+file whole. As locally, what agentctl wrote there is recorded in the host's state,
+and a setting dropped from the host's declaration is removed from the host; keys it
+never wrote stay. A `config.toml` that is a symlink, dangling or not, is not
+written through: its changes are withheld and listed, on a host as locally.
+Other tools' settings are reported, not written.
 
 Locally awl reads its skills out of `agents.edn`, but a host has none, so there
 `:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
@@ -1010,7 +1018,7 @@ for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
 when the host's `codex --version` reports `codex-cli` 0.95.0 or later (a
 pre-release of 0.95.0 counts as older). An older codex gets its own copy in
 `~/.codex/skills`, with a warning, and so does a codex whose version can't be
-read, or that hasn't answered within 5 seconds where the host has `timeout`. Changing the declaration or the codex version moves the copy on the next
+read, or that hasn't answered within 5 seconds. Changing the declaration or the codex version moves the copy on the next
 apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
 since it is often a shell alias, so an awl skill is placed whether or not `awl` is
 on the host's `PATH`. When codex reads both directories and one holds a hand-made

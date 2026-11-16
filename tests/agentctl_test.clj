@@ -55,6 +55,15 @@
       (is (str/includes? out "opaque = \"do-not-touch\""))
       (is (str/includes? out "[projects.\"/Users/example/x\"]"))))
 
+  (testing "a key keeps its same-line comment when the table is written again"
+    (let [text "a = 1  # one\nb = 2\ns = \"x # not a comment\"\n[t]\nk = 'v' # kept\n"]
+      (is (= "a = 1  # one\nb = 3\ns = \"x # not a comment\"\n[t]\nk = 'v' # kept\n"
+             (toml/set-keys text [] [[:a 1] [:b 3] [:s "x # not a comment"]])))
+      (testing "an unchanged value written in another form keeps it too"
+        (is (str/ends-with? (toml/set-keys text ["t"] [[:k "v"]]) "k = \"v\" # kept\n")))
+      (testing "a changed value keeps the line's comment"
+        (is (str/starts-with? (toml/set-keys text [] [[:a 2]]) "a = 2  # one\n")))))
+
   (testing "a new table is appended, quoted where required"
     (let [out (toml/set-key sample-toml ["projects" "/Users/example/y"] :trust_level "trusted")]
       (is (str/includes? out "[projects.\"/Users/example/y\"]"))
@@ -4113,12 +4122,19 @@
         inv (remote/parse-inventory
              [(str "F\tcodex-config\t" (e "/h/.codex/config.toml") "\t" (e "model = \"x\"\n"))
               (str "F\tempty\t" (e "/h/e"))
-              (str "F\tnone\t" (e "/h/n") "\t-") "OK"])]
+              (str "F\tnone\t" (e "/h/n") "\t-")
+              (str "F\tlinked\t" (e "/h/l") "\t@")
+              (str "F\tthrough\t" (e "/h/t") "\t@" (e "x = 1\n")) "OK"])]
     (is (= "model = \"x\"\n" (String. ^bytes (get-in inv [:host-files :codex-config :bytes]) "UTF-8")))
     (is (= "/h/.codex/config.toml" (get-in inv [:host-files :codex-config :path])))
     (testing "an empty file is not an absent one"
       (is (= 0 (count (get-in inv [:host-files :empty :bytes])))))
-    (is (nil? (get-in inv [:host-files :none :bytes]))))
+    (is (nil? (get-in inv [:host-files :none :bytes])))
+    (testing "a symlink is reported, its content not read"
+      (is (= {:path "/h/l" :bytes nil :link? true} (get-in inv [:host-files :linked])))
+      (testing "and what it points at, read to plan with"
+        (is (get-in inv [:host-files :through :link?]))
+        (is (= "x = 1\n" (String. ^bytes (get-in inv [:host-files :through :bytes]) "UTF-8"))))))
   (let [script (atom nil)
         ascii? #(every? (fn [c] (< (int c) 128)) %)]
     (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
@@ -4130,6 +4146,14 @@
           (is (str/includes? @script "abc"))
           (is (str/includes? @script "_.codex_config.toml"))
           (is (str/includes? @script "changed on the host since it was read"))
+          (testing "staged beside the file and renamed over it, never copied in place"
+            (is (not (str/includes? @script "staging")))
+            (is (str/includes? @script ".agentctl-"))
+            (is (not (str/includes? @script "Copy($s,$f")))
+            (when (= os :linux) (is (str/includes? @script "cp -p \"$f\" \"$s\""))))
+          (testing "a link made since the read is refused, never written through"
+            (is (str/includes? @script "is a symlink now, not written through"))
+            (is (not (str/includes? @script "cat \"$s\" >"))))
           (remote/write-file! host :codex-config (.getBytes "") nil)
           (is (str/includes? @script "appeared on the host since it was read"))
           (remote/inventory host [:codex] [] [:codex-config])

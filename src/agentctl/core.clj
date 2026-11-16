@@ -642,6 +642,7 @@
                 (when (selected :claude) (claude-agents/plan-ops cfg st)))
           gates (filter :refuse-if-settings-change all)]
       (-> (remove :refuse-if-settings-change all)
+        codex/link-guard
         (keep-kinds opts)
         (keep-projects cfg opts)
         (keep-only cfg opts)
