@@ -48,7 +48,15 @@
     "  -f, --file PATH      Config file (default ~/.config/agents.edn)"
     "  -t, --tool TOOL      Restrict to a tool (repeatable): claude codex pi omp llm antigravity kimi dsh"
     "  -k, --kind KIND      Restrict to a resource kind (repeatable):"]
-   (wrap-words "                       " 92 (map name core/kinds))
+   ;; the DSL's kinds, then the old format's own, each named against the DSL
+   ;; kind it stands in for — never a list of its own beside `core/kinds-for`
+   (let [dsl (core/kinds-for {:entity-dsl? true})
+         old (core/kinds-for {})]
+     (concat
+      (wrap-words "                       " 92 (map name dsl))
+      [(str "                       legacy (old-format configs only, in place of "
+            (str/join ", " (map name (remove (set old) dsl))) "): "
+            (str/join " " (map name (remove (set dsl) old))))]))
    ["  -p, --project PATH   Restrict to a HOME-relative path or tree (repeatable); selects"
     "                       everything that project owns, whatever its kind"
     "      --only KIND/ID   apply/apply!: plan one entity wherever it is placed (repeatable),"
@@ -232,6 +240,10 @@
   (let [cfg (load! opts)
         st (state/load-state)
         findings (check-config! cfg opts)]
+    ;; a kind is only checked against every kind before the config is read;
+    ;; one this config's format never plans would narrow the run to nothing
+    (when-let [[flag v msg] (first (core/dead-selectors cfg opts))]
+      (throw (ex-info (str flag " " v ": " msg) {})))
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole

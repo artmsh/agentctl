@@ -102,9 +102,15 @@ resources dropped from the config; only `--only` is a single-entity change.
 
 `-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`
 lists them — or the run exits 1, as do an `--only` whose kind `-k` leaves out
-and any option agentctl does not know. An `--only` or `-p` that nothing
-declares or owns is reported with `⚠` (under `--json`, in `warnings`), because
-a run narrowed to a typo plans nothing and would otherwise read as converged.
+and any option agentctl does not know. The kind must also be one the loaded
+config's format plans: an entity-DSL config files a project's trust,
+permissions and settings under `trust`, `permissions` and `settings`, so
+`-k projects` there exits 1; an old-format config plans all three as
+`projects`, so `-k trust` there exits 1. The message lists the kinds the
+format has, `--help` marks `projects` as legacy, and the GUI refuses the same
+kinds for the buffer it plans. An `--only` or `-p` that nothing declares or
+owns is reported with `⚠` (under `--json`, in `warnings`), because a run
+narrowed to a typo plans nothing and would otherwise read as converged.
 
 ## Claude session retention
 

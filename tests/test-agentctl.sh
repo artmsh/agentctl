@@ -1171,4 +1171,50 @@ set -e
 [ "$code" = 2 ] && grep -q '⚠ cli-code — :cli-code is the old name' "$JO/warn.txt" \
   || { cat "$JO/warn.txt"; fail "the text plan stopped printing config warnings"; }
 
+echo "25. -k refuses a kind the config's format never plans"
+FK="$SB/format-kinds"
+mkdir -p "$FK/proj"
+fk() { (cd "$FK" && AGENTCTL_HOME="$FK" run "$@"); }
+# the same trusted project, once per format: the DSL plans its trust as
+# `trust`, the old format as `projects`
+cat > "$FK/dsl.edn" <<EDN
+{:trust [{:in "$FK/proj" :acli [:codex]}]}
+EDN
+cat > "$FK/old.edn" <<EDN
+{:projects {:p {:path "$FK/proj" :trusted true :executors #{:codex}}}}
+EDN
+# fk_code <want-exit> <out-file> <args…>
+fk_code() {
+  local want=$1 out=$2; shift 2
+  set +e
+  fk "$@" > "$out" 2>&1; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* exited $code, wanted $want"; }
+}
+for cmd in apply apply!; do
+  fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: extensions, ' "$FK/dsl-$cmd.txt" \
+    || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
+  grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
+  fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y
+  grep -q '^error: -k trust: an old-format config plans nothing as trust; it files those ops under projects (kinds for this config: .*projects' "$FK/old-$cmd.txt" \
+    || { cat "$FK/old-$cmd.txt"; fail "$cmd -k trust on an old-format config did not name its kinds"; }
+done
+[ -e "$FK/.codex/config.toml" ] && fail "a refused kind wrote the codex config"
+# the counterpart in each format plans the trust
+fk_code 2 "$FK/dsl-trust.txt" apply -f "$FK/dsl.edn" --all -t codex -k trust
+grep -q 'trust' "$FK/dsl-trust.txt" || { cat "$FK/dsl-trust.txt"; fail "-k trust planned nothing on a DSL config"; }
+fk_code 2 "$FK/old-projects.txt" apply -f "$FK/old.edn" --all -t codex -k projects
+grep -q 'projects' "$FK/old-projects.txt" || { cat "$FK/old-projects.txt"; fail "-k projects planned nothing on an old-format config"; }
+# --only's kind is held to the same rule, and --json carries the refusal
+fk_code 1 "$FK/only.txt" apply -f "$FK/dsl.edn" --only projects/p
+grep -q '^error: --only projects/p: an entity-DSL config plans nothing as projects' "$FK/only.txt" \
+  || { cat "$FK/only.txt"; fail "--only projects/p on a DSL config was not refused"; }
+fk_code 1 "$FK/dead.json" apply -f "$FK/old.edn" -k trust --json
+python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.argv[1]))["error"] else 1)' "$FK/dead.json" \
+  || { cat "$FK/dead.json"; fail "-k trust --json lost the refusal"; }
+# --help marks the old format's own kind
+run --help | grep -q 'legacy (old-format configs only, in place of trust): projects$' \
+  || { run --help; fail "--help does not mark projects as legacy"; }
+
 echo "all agentctl e2e checks passed"

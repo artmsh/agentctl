@@ -63,11 +63,22 @@
     (let [cfg (config/parse-config (buffer-text text) path)
           ;; the GUI plans this machine, so this machine's findings too
           findings (concat (config/structural-findings cfg) (statusline/findings cfg opts))
-          errors (filter #(= :error (:level %)) findings)]
-      (if (seq errors)
+          errors (filter #(= :error (:level %)) findings)
+          ;; the buffer decides the format, and it can change with any edit:
+          ;; a kind it never plans is refused here, not in `opts-from-json`
+          [_ dead msg] (first (core/dead-selectors cfg opts))]
+      (cond
+        (seq errors)
         {:ok false
          :error "config errors — refusing to plan"
          :findings (mapv finding->data findings)}
+
+        dead
+        {:ok false
+         :error (str "kind " dead ": " msg)
+         :findings (mapv finding->data findings)}
+
+        :else
         (let [st (state/load-state)
               ops (core/build-plan cfg st opts)
               changes (filter plan/mutating? ops)]

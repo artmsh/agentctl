@@ -45,13 +45,63 @@
    tool. An old-format config plans a project's trust and settings as
    `:projects`, and extensions have no DSL section. `-k` and
    `--only` are checked against this, because a kind no op carries selects
-   nothing, and an empty plan reads exactly like a converged machine."
+   nothing, and an empty plan reads exactly like a converged machine — and,
+   once a config is loaded, against `kinds-for` its format."
   (vec (sort (conj (into (set scope/kinds) (mapcat val config/capabilities)) statusline/kind))))
 
+(def dsl-refiled
+  "The kinds the two config formats name differently. Adapters plan a
+   project's trust, permissions and settings as `:projects` ops in either
+   format, the old format's project registry being where all three are
+   declared. The entity DSL has no `:projects` section, and `build-plan`
+   refiles each such op under the section that declared it (`dsl-section`).
+   So `:projects` carries nothing in the DSL, and a target no adapter plans
+   under its own name — `:trust` — carries nothing in the old format."
+  {:projects #{:trust :permissions :settings}})
+
+(defn- dsl-section
+  "The DSL section a `:projects` op is refiled under — one of `dsl-refiled`'s."
+  [o]
+  (cond
+    (str/includes? (name (:id o)) "permissions.") :permissions
+    (or (= "trust" (name (:id o))) (= (:id o) (:project o))) :trust
+    :else :settings))
+
+(defn kinds-for
+  "The kinds an op can carry under `cfg`'s format: `kinds` less those only the
+   other format plans (see `dsl-refiled`)."
+  [cfg]
+  (let [adapter-kinds (set (mapcat val config/capabilities))
+        dead (if (:entity-dsl? cfg)
+               (set (keys dsl-refiled))
+               (set (remove adapter-kinds (mapcat val dsl-refiled))))]
+    (vec (remove dead kinds))))
+
+(defn- format-name [cfg] (if (:entity-dsl? cfg) "an entity-DSL config" "an old-format config"))
+
 (defn kind-problem
-  "Why `k` is no kind to select."
-  [k]
-  (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
+  "Why `k` is no kind to select — with `cfg`, also a kind `cfg`'s format
+   plans nothing as."
+  ([k]
+   (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
+  ([cfg k]
+   (when (and (some #{k} kinds) (not (some #{k} (kinds-for cfg))))
+     (let [instead (map name (sort (if (:entity-dsl? cfg)
+                                     (get dsl-refiled k)
+                                     (for [[from to] dsl-refiled :when (contains? to k)] from))))]
+       (str (format-name cfg) " plans nothing as " (name k) "; it files those ops under "
+            (if (next instead) (str (str/join ", " (butlast instead)) " or " (last instead)) (first instead))
+            " (kinds for this config: " (str/join ", " (map name (kinds-for cfg))) ")")))))
+
+(defn dead-selectors
+  "`[flag value message]` for each `-k` kind, and each `--only` kind, that is
+   a kind but one `cfg`'s format plans nothing as: `-k projects` on an
+   entity-DSL config, `-k trust` on an old-format one. Such a run plans
+   nothing and exits 0 — exactly what a converged machine looks like."
+  [cfg {:keys [kinds only]}]
+  (concat
+   (for [k kinds :let [p (kind-problem cfg k)] :when p] ["-k" (name k) p])
+   (for [[k id] only :let [p (kind-problem cfg k)] :when p] ["--only" (str (name k) "/" id) p])))
 
 (defn unknown-selectors
   "`[flag value message]` for each `:tools` / `:kinds` value that selects
@@ -469,12 +519,8 @@
                    (map (fn [o]
                           (cond-> o
                             (:project o) (assoc :project-path (get-in cfg [:projects (:project o) :path]))
-                            (= :projects (:kind o))
-                            (assoc :kind (cond
-                                           (str/includes? (name (:id o)) "permissions.") :permissions
-                                           (or (= "trust" (name (:id o)))
-                                               (= (:id o) (:project o))) :trust
-                                           :else :settings)))) tool-ops) tool-ops)]
+                            (= :projects (:kind o)) (assoc :kind (dsl-section o)))) tool-ops)
+                   tool-ops)]
     (-> (concat (sources/pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
