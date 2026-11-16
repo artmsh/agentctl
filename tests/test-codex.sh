@@ -205,4 +205,17 @@ python3 -c 'import json,sys; g=json.load(open(sys.argv[1]))["hooks"]["SessionSta
 c=$(code_of run apply -f "$SB/f.edn" --all -t codex)
 [ "$c" = 0 ] || { cat "$SB/out.txt"; fail "not converged ($c)"; }
 
+echo "8. a hooks.json that does not parse is refused, not replaced"
+printf '%s\n' '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "vendor-stop"}]},]}}' > "$HOOKS"
+cp "$HOOKS" "$SB/before.json"
+cat > "$SB/g.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+ :hooks [{:id :note :event :SessionStart :command "note" :acli [:codex] :in :all}]}
+EDN
+c=$(code_of run apply -f "$SB/g.edn" --all -t codex)
+grep -q 'hooks.json is not valid JSON' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the plan does not say hooks.json is broken"; }
+c=$(code_of run apply! -f "$SB/g.edn" --all -t codex -y)
+[ "$c" = 1 ] || { cat "$SB/out.txt"; fail "apply! on a broken hooks.json exited $c, not 1"; }
+cmp -s "$HOOKS" "$SB/before.json" || fail "a hooks.json that does not parse was rewritten"
+
 echo "all codex e2e checks passed"

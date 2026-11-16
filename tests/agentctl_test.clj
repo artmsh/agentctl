@@ -1444,6 +1444,32 @@
         (is (nil? (plan/json-array-merge-op {:tool :claude :kind :hooks :id :x :file f :path [:hooks :Stop]
                                             :value {:hooks [{:type "command" :command "x"}]}})))))))
 
+(deftest codex-hooks-refuse-a-hooks-json-that-does-not-parse
+  ;; read as nil, an unparseable hooks.json was replaced by one holding only
+  ;; agentctl's hook: every vendor hook in it deleted
+  (let [dir (temp-dir) hooks (str dir "/hooks.json") conf (str dir "/config.toml")
+        broken "{\"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"vendor-stop\"}]},]}}\n"
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+             :hooks [{:id :note :event :SessionStart :command "note" :acli [:codex] :in :all}]}]
+    (u/write-text! hooks broken)
+    (u/write-text! conf "model = \"m-a\"\n")
+    (with-redefs [codex/hooks-file hooks codex/config-file conf]
+      (let [ops (filter #(= :hooks (:kind %)) (codex-drift raw state/empty-state))]
+        (is (= 1 (count ops)))
+        (is (:warn (first ops)))
+        (is (re-find #"hooks.json is not valid JSON" (:summary (first ops))))
+        (let [{:keys [failed]} (core/execute! ops)]
+          (is (= 1 (count failed)))
+          (is (re-find #"not valid JSON" (:error (first failed))))))
+      (is (= broken (slurp hooks)) "byte for byte")
+      (testing "the prune of a hook it wrote is refused the same way"
+        (let [st (state/record state/empty-state :codex :hooks :note
+                                       {:path [:hooks :SessionStart] :value (codex/hook-group (first (:hooks raw)))})
+              ops (filter #(= :hooks (:kind %)) (codex-drift (update raw :hooks empty) st))]
+          (is (= [:update] (map :action ops)))
+          (is (seq (:failed (core/execute! ops))))
+          (is (= broken (slurp hooks))))))))
+
 (deftest codex-hooks-validate-events-and-stay-opt-in
   (testing "validate accepts codex hooks and rejects an event codex never fires"
     (is (empty? (config/structural-findings

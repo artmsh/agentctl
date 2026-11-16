@@ -508,7 +508,10 @@ The comparison ignores keys whose value is null, because installers write
 `"matcher": null` where agentctl omits the key. Declaring a vendor's exact hook
 therefore adopts that group instead of appending a duplicate, and dropping the
 declaration later removes it. The plan reports a converged hook as unchanged
-(`--show-noop`).
+(`--show-noop`). A hooks file that does not parse (one trailing comma is
+enough) is never rewritten. The plan says so, `apply!` fails that op, and the
+state keeps the element it last wrote. This holds for Claude's settings.json
+hooks as well.
 
 Codex will not run a hook until it is reviewed: it keeps a trust hash per hook
 in `config.toml`, under `[hooks.state."<hooks.json path>:<event>:<group>:<index>"]`.
