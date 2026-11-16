@@ -15,6 +15,7 @@
             [agentctl.refs :as refs]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [babashka.fs :as fs]
             [cheshire.core :as json]
@@ -421,6 +422,7 @@
                      (catch Exception e {:error (ex-message e)}))
         drift (if (:error planned) [planned] (filter plan/mutating? (:ops planned)))
         findings (concat (map #(assoc % :level (:level %)) (config/structural-findings cfg))
+                         (statusline/findings cfg opts)
                          (check-clis cfg)
                          (check-packs cfg deep?)
                          (check-skills cfg)

@@ -39,6 +39,8 @@ segment.
   `~/.config/agentctl/backups/<stamp>/`, and removes only resources recorded in
   `~/.config/agentctl/state.edn`, plus project skill links that a global skill declaration
   supersedes ([project skills](docs/GUIDE.md#project-skills)).
+- `:statusline` writes the one JSON file the `agent-statusline` renderer reads for every
+  agent's status line, and that renderer's own `--check` validates it before anything is written.
 - TOML is edited segment by segment and JSON and YAML by key path, and MCP servers go through
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
@@ -123,6 +125,9 @@ command the run will execute ([reading a plan](docs/GUIDE.md#reading-a-plan)).
 
 `-t TOOL`, `-k KIND` and `-p PATH` narrow a run, and inside a declared project `apply` already
 plans only that project unless you pass `--all` ([how the working directory scopes a run](docs/GUIDE.md#where-you-run-it-is-a-scope)).
+`--only KIND/ID` (say `--only skills/review`) plans one entity wherever it is placed, and `--user`
+plans user scope alone; a narrowed run never prunes what lies outside it
+([applying one entity](docs/GUIDE.md#applying-one-entity)).
 `--host NAME` runs `apply`, `apply!`, `validate` or `state` against a machine declared under
 `:hosts`, over SSH, while `AGENTCTL_HOME` points every managed path, and the CLIs agentctl
 drives, at a scratch tree for testing. `agentctl gui` serves the screen above on 127.0.0.1
@@ -157,7 +162,7 @@ bb test
 Ran 170 tests containing 1014 assertions.
 0 failures, 0 errors.
 …
-all plugin e2e checks passed
+all statusline e2e checks passed
 ```
 
 `tests/run.sh` stubs every agent CLI and points `AGENTCTL_HOME` at a temp dir, so the suite does
@@ -167,7 +172,8 @@ regenerates the screenshot.
 ## Documentation
 
 - [docs/GUIDE.md](docs/GUIDE.md): working-directory scope, GUI, MCP scope, Kimi, DeepSeek
-  Harness, hooks, extensions, Claude plugins, project skills, remote hosts, reading a plan.
+  Harness, hooks, extensions, shared status line, Claude plugins, project skills, remote
+  hosts, reading a plan.
 - [docs/AGENTCTL.md](docs/AGENTCTL.md): design rules and every DSL key, including the legacy map
   form that [examples/agents.edn](examples/agents.edn) uses.
 - [docs/SCOPE-DSL.md](docs/SCOPE-DSL.md): the entity-first DSL and its `:in` selector.

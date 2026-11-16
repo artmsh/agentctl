@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# Stand-in for `agent-statusline --check --config PATH`: exit 0 when valid, 1
+# with `agent-statusline: <Diagnostic>` on stderr when not. It rejects the
+# inputs the tests feed it, with the real renderer's diagnostic names; it is
+# not a second implementation of the renderer's rules. Every call is logged
+# to $STUB_LOG, if set, with whether anything arrived on stdin.
+import json, os, sys
+
+a = sys.argv[1:]
+log = os.environ.get("STUB_LOG")
+if log:
+    got_stdin = bool(sys.stdin.read()) if not sys.stdin.isatty() else False
+    open(log, "a").write(" ".join(a) + (" STDIN" if got_stdin else "") + "\n")
+
+def die(name):
+    sys.stderr.write("agent-statusline: %s\n" % name)
+    sys.exit(1)
+
+if "--check" not in a or "--config" not in a:
+    die("UnknownArgument")
+try:
+    cfg = json.load(open(a[a.index("--config") + 1]), object_pairs_hook=lambda kv: (
+        die("DuplicateField") if len({k for k, _ in kv}) != len(kv) else dict(kv)))
+except (OSError, ValueError):
+    die("UnexpectedToken")
+
+OPTS = {"segments", "separator", "color", "context_style", "short_model",
+        "show_pacing", "warning_percent", "critical_percent"}
+SEGMENTS = {"agent", "model", "limits", "context", "directory", "branch", "cost"}
+ENUMS = {"color": {"auto", "always", "never"}, "context_style": {"compact", "full", "percent"}}
+
+def options(o, nullable):
+    if not isinstance(o, dict):
+        die("UnexpectedToken")
+    for k, v in o.items():
+        if k not in OPTS:
+            die("UnknownField")
+        if v is None:
+            if nullable:
+                continue
+            die("UnexpectedToken")
+        if k == "segments":
+            if any(s not in SEGMENTS for s in v):
+                die("InvalidEnumTag")
+            if len(set(v)) != len(v):
+                die("DuplicateSegment")
+        if k in ENUMS and v not in ENUMS[k]:
+            die("InvalidEnumTag")
+        if k == "separator" and any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for c in v):
+            die("InvalidSeparator")
+        if k.endswith("_percent") and not (0 <= v <= 100):
+            die("InvalidThresholds")
+
+if not isinstance(cfg, dict) or set(cfg) - {"defaults", "agents"}:
+    die("UnknownField")
+defaults = cfg.get("defaults", {})
+options(defaults, False)
+agents = cfg.get("agents", {})
+if not isinstance(agents, dict):
+    die("UnexpectedToken")
+if set(agents) - {"cc", "codex", "awl", "pi"}:
+    die("UnknownField")
+merged = [defaults]
+for o in agents.values():
+    options(o, True)
+    merged.append({**defaults, **{k: v for k, v in o.items() if v is not None}})
+for m in merged:
+    if m.get("warning_percent", 50) > m.get("critical_percent", 80):
+        die("InvalidThresholds")

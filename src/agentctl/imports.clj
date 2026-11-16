@@ -15,6 +15,7 @@
             [agentctl.adapters.pi :as pi]
             [agentctl.refs :as refs]
             [agentctl.scope :as scope]
+            [agentctl.statusline :as statusline]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
             [babashka.fs :as fs]
@@ -472,7 +473,10 @@
                      :skill-packs (not-empty packs)
                      :extra-providers (not-empty (scan-providers))
                      :memory (not-empty (scan-memory))
-                     :projects (not-empty (scan-projects))})]
+                     :projects (not-empty (scan-projects))
+                     ;; read back, or an import that loses it makes the next
+                     ;; apply! delete the file agentctl owns
+                     :statusline (statusline/scan)})]
     {:config (if (scope/dsl? existing)
                (merge-with (fn [a b]
                              (if (and (vector? a) (vector? b))

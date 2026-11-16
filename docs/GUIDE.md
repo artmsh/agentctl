@@ -14,9 +14,9 @@ under `$HOME/projects` on each apply. Most sections are vectors; for example:
 {:settings [{:model "sonnet" :tools [:claude] :in :all}]
  :mcps [{:id :tracker :cmd "tracker-mcp -t stdio" :in "projects"}]
  :trust [{:in ["Brain" "projects" "!projects/vendor"]}]
- :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/clz"}}
+ :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/web"}}
  :skills {[superpowers "brainstorming"] {:in :all}
-          [:gh "cyxzdev/Uncodixfy"] {:in "projects/core-vector" :acli [:codex]}}}
+          [:gh "cyxzdev/Uncodixfy"] {:in "projects/app" :acli [:codex]}}}
 ```
 
 `:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
@@ -101,6 +101,40 @@ Two things follow from this that are worth saying out loud: inside a project,
 `apply` exits 0 when only the rest of the machine has drifted, and from the
 workspace root the global settings, MCP servers and providers are not planned
 at all. `--all` is how you ask about the machine.
+
+## Applying one entity
+
+agentctl owns what it wrote, and an unscoped run removes whatever it owns that
+the config no longer declares. A manifest holding only the one entity you want
+to add is therefore not a narrow change: run unscoped, it plans the removal of
+everything else agentctl owns. Narrow the run instead, against the full config:
+
+```sh
+agentctl apply  --only skills/review       # the skill, user-wide and in every project it is placed in
+agentctl apply! --only skills/review --only mcps/search
+agentctl apply  --user                     # user scope only: no project is planned
+agentctl apply  --user -k skills           # selectors combine
+```
+
+`--only KIND/ID` keeps the ops of one entity. The id is the entity's own, so a
+project's copy matches as well as the user-wide one; a declared skill brings the
+op that fetches its pack, so a skill from a pack not on disk yet is cloned and
+linked in one run. A skill no longer declared is only removed, and fetches
+nothing. `--user` keeps every op that lands outside a project, the packs cloned
+for user-wide skills included, and does not combine with `-p`. Both outrank the
+working directory, as `--all` and `-p` do. `-k skills` keeps the pack fetches
+too, for the same reason.
+
+A narrowed run (`-t`, `-k`, `-p`, `--only`, `--user`, or the working
+directory) forgets ownership only of what it removed itself, so nothing outside
+the selection is pruned or orphaned. `--user` still removes user-scope
+resources dropped from the config; only `--only` is a single-entity change.
+
+`-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`
+lists them — or the run exits 1, as do an `--only` whose kind `-k` leaves out
+and any option agentctl does not know. An `--only` or `-p` that nothing
+declares or owns is reported with `⚠` (under `--json`, in `warnings`), because
+a run narrowed to a typo plans nothing and would otherwise read as converged.
 
 ## Claude session retention
 
@@ -294,7 +328,19 @@ instead of being silently dropped.
 
 ## Hooks
 
-Claude Code hooks, global scope, declared under `:executors :claude :hooks`:
+Claude Code hooks. In the entity DSL a hook is a `:hooks` row placed like any other entity:
+`:in :all` writes `~/.claude/settings.json`, and a project selector writes that
+repository's `.claude/settings.json`:
+
+```clojure
+:hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
+         :command "$HOME/.claude/hooks/memory-file-lock.sh acquire" :timeout 25 :in :all}
+        {:id :session-start :event :SessionStart :command "./scripts/session-start.sh"
+         :in "projects/sample"}]
+```
+
+The old format declares user-scope hooks under `:executors :claude :hooks`; a
+hook under a project's `:executors :claude` there is reported, not written:
 
 ```clojure
 :executors
@@ -363,6 +409,107 @@ moves, `apply` plans a fetch, a hard reset and a rebuild, so local edits in
 the `defaultTools` entries it brought; the checkout stays as a cache.
 Extensions are user-wide, and `:in` does not apply to them.
 
+## Shared status line
+
+An external renderer, `agent-statusline`, draws the status line of several agents from one
+JSON file: `defaults` for every agent, plus overrides under `agents.cc`, `agents.codex`,
+`agents.awl` and `agents.pi`. `:statusline` declares that file, and agentctl writes it whole:
+
+```clojure
+{:statusline {:defaults {:segments [:model :limits :context :directory :branch]
+                         :separator " · "
+                         :color :auto
+                         :context-style :compact
+                         :short-model true
+                         :show-pacing true
+                         :warning-percent 50
+                         :critical-percent 80}
+              :agents {:pi {:segments [:model :context :directory :branch :cost]}
+                       :codex {:context-style :percent}
+                       :cc {:color nil}}
+              :bin "~/.local/bin/agent-statusline"}}
+```
+
+The EDN is the renderer's JSON with kebab-case keys, which agentctl turns back into the
+renderer's snake_case (`:context-style` is `context_style`). Keyword values are written as
+strings, a namespaced keyword in full (`:x/auto` is `"x/auto"`), and `nil` is JSON `null`,
+which in an agent's override means "inherit the default"; the plan shows it as `∅`. The
+translation knows no option or value. A key agentctl has never heard of is written as
+given, and the renderer judges it, so new renderer options need no agentctl release. Two
+spellings that land on one JSON key (`:context-style` and `:context_style`) are a config
+error. `:bin` is agentctl's own and is not written. Each override lands under its own agent
+only.
+
+**Validation** is the renderer's. `validate` and `apply` write the candidate JSON to a
+temporary file and run `agent-statusline --check --config <tmp>`, which reads no stdin and
+runs no git. Exit 1 is a config error naming the renderer's diagnostic, such as
+`InvalidEnumTag`, `DuplicateSegment` or `InvalidThresholds`, and `apply` refuses to plan
+anything until it is fixed. A run that cannot write the file (narrowed by `-t` or `-k` to
+other things, or to projects) gets the same finding as a warning instead. The binary is
+`:bin`, else `AGENT_STATUSLINE_BIN`, else `agent-statusline` on `PATH`, else the
+`agent-statusline` a declared Claude `:status-line` command runs by path. A binary
+implements `--check` only if it accepts `{}` and rejects a document with an unknown key
+with exit 1. When none is found, or the one found fails either probe (one that predates
+`--check` rejects everything, and something like `true` accepts everything), or it times out
+after 10 s, `validate` reports `unknown`, and the planned write carries a "not validated"
+note. None of these counts as a pass.
+
+**Where.** The renderer reads `--config`, else `AGENT_STATUSLINE_CONFIG`, else
+`$XDG_CONFIG_HOME/agent-statusline/config.json`, else `~/.config/agent-statusline/config.json`.
+agentctl writes the last two, which are the files the renderer finds without being told:
+`$XDG_CONFIG_HOME` when it is set to an absolute path, `~/.config` otherwise, with `.` and
+`..` resolved. Under `AGENTCTL_HOME`, an `XDG_CONFIG_HOME` outside that directory, compared
+after resolving `..` and symlinked directories, is ignored, so a scratch run never writes
+the real home. When the renderer, run in the current environment, would read another file
+(`AGENT_STATUSLINE_CONFIG` is set, or `XDG_CONFIG_HOME` is empty or relative), `validate`
+warns and names both paths. An empty `AGENT_STATUSLINE_CONFIG` gets its own warning,
+because the renderer then fails to read any file.
+
+**Ownership.** `apply!` backs the file up before each write and records the path it wrote
+in `state.edn`; ownership is of that path. Removing `:statusline` deletes the file only if
+agentctl owns it, at the recorded path. When the target moves (`XDG_CONFIG_HOME` changed),
+the file at the old path is removed and the one at the new path is treated as anyone's:
+replacing a file there is flagged and backed up first. A hand-made file is never deleted. A
+file whose settings already match but whose layout differs is rewritten, because agentctl
+owns the bytes. agentctl never writes through a symlink: a `config.json` that links into,
+say, a dotfiles checkout is backed up as the content it resolves to and replaced by a
+regular file, which the plan notes, and the linked file is left as it was. A symlink found
+at an owned path on removal is left in place. `import` reads an existing file back into
+`:statusline`, so `import! --replace` does not drop the declaration and with it the file.
+
+The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it,
+whatever `-t` says.
+A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
+well, as it does every user-wide resource; `--all` includes it. Codex does not read this
+file: its status line is a native setting, and the `codex` override only feeds the
+renderer's `--codex-config` preset. A host is not provisioned with the file, so
+`apply --host` and `validate --host` neither run the local renderer nor report on it.
+Only a malformed `:statusline` (not a map, or two spellings of one key) stops them,
+as any config error does.
+
+### awl
+
+awl needs nothing from agentctl beyond this file. It links the renderer in process when it
+is built with `-Dstatusline=<renderer source>` and then loads the same file once at startup,
+so an `:awl` override is delivered by writing the file, and agentctl plans no op of its
+own for awl. Whether awl uses the file is fixed when awl is built, which agentctl cannot
+provision. awl has no flag that reports the build option, and `--help` reads the same with
+and without it, so agentctl never runs awl to find out. Instead it reads the `awl` binary
+on `PATH` for a string that only the renderer's config loader puts there. The result is a
+finding under `STATUSLINE`, given whenever `:agents` has an `:awl` key:
+
+| awl on `PATH` | Finding |
+| --- | --- |
+| a native binary with the renderer linked in | `ok`: it reads the file at startup |
+| a native binary without it | `warn`: it keeps its own status row; rebuild with `-Dstatusline` |
+| absent, or a wrapper script | `warn`: whether it reads the file is unknown |
+
+`apply` prints these warnings on every run, including a converged one. Once the file is
+written, "no changes" is true of the file, and the warning beside it says that awl may
+still not use it. Restart awl after a change, because it reads the file only at startup.
+`:awl` under `:statusline :agents` is a renderer agent key, not an `:acli` value, so it
+plans nothing for awl's skills.
+
 ## Claude plugins
 
 A Claude Code plugin bundles skills, subagents and hooks, and is installed
@@ -372,7 +519,7 @@ from a marketplace. `:plugins` is keyed by `[:gh "owner/repo" "plugin"]` or
 
 ```clojure
 {:plugins {[:gh "Egonex-AI/Understand-Anything" "understand-anything"]
-           {:in "projects/barge" :at :repo :acli [:claude]}}}
+           {:in "projects/api" :at :repo :acli [:claude]}}}
 ```
 
 `apply!` runs `claude plugin marketplace add` and `claude plugin install

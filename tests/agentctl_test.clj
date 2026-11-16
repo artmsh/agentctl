@@ -14,6 +14,7 @@
             [agentctl.gui :as gui]
             [agentctl.hosts :as hosts]
             [agentctl.imports :as imports]
+            [agentctl.main :as main]
             [agentctl.plan :as plan]
             [agentctl.refs :as refs]
             [agentctl.remote :as remote]
@@ -1497,6 +1498,27 @@
                     (is (= ["reminder.sh"]
                            (map :command (mapcat :hooks (get-in after [:hooks :SessionStart])))))))))))))))
 
+(deftest a-converged-project-hook-is-reported-like-a-user-one
+  ;; the user-scope pass above renders `= hooks/{lock reminder}`; a hook placed
+  ;; in a project has to confirm itself the same way, or a hooks change there
+  ;; can only be checked by reading settings.json by hand
+  (let [root (temp-dir) repo (str root "/repo")]
+    (fs/create-dirs (str repo "/.git"))
+    (with-redefs [claude/settings-file (str root "/settings.json") claude/runtime-file (str root "/runtime.json")]
+      (let [raw {:hooks [{:id :start :event :SessionStart :command "echo ready" :in repo}]}
+            cfg (config/normalize raw "test")
+            opts {:tools #{:claude} :kinds #{:hooks}}
+            ops (core/build-plan cfg state/empty-state opts)
+            _ (is (empty? (:failed (core/execute! ops))))
+            st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+            again (core/build-plan cfg st opts)
+            id (keyword (name (scope/target-id repo)) "start")]
+        (is (= [[:create id]] (map (juxt :action :id) ops)))
+        (is (= [[:noop id]] (map (juxt :action :id) again)))
+        (is (re-find #"(?m)^= \S*/repo hooks/start$"
+                     (binding [plan/*color* false] (plan/render-plan again {:show-noop true}))))
+        (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged" (plan/summary-line again)))))))
+
 (deftest a-scoped-run-that-plans-nothing-for-a-hook-does-not-forget-its-live-value
   ;; `-t`/`-k`/`-p` can filter a hook's op out of the plan entirely while the
   ;; id stays declared in cfg, so `inventory` still calls it owned. Passing
@@ -1533,7 +1555,54 @@
   (is (false? (core/scoped? {})))
   (is (true? (core/scoped? {:tools [:claude]})))
   (is (true? (core/scoped? {:kinds [:hooks]})))
-  (is (true? (core/scoped? {:projects #{"p"}}))))
+  (is (true? (core/scoped? {:projects #{"p"}})))
+  (is (true? (core/scoped? {:only [[:skills "review"]]})))
+  (is (true? (core/scoped? {:user true}))))
+
+(deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
+  ;; `-k` is checked against `core/kinds`; a kind missing from it would be
+  ;; refused, and one missing from --help is a kind nobody knows to ask for
+  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
+           :providers :memory :trust :extensions :projects :statusline}
+         (set core/kinds)))
+  (is (= (set (map name core/kinds))
+         (->> (str/split-lines main/usage)
+              (drop-while #(not (str/includes? % "--kind KIND")))
+              rest
+              (take-while #(str/starts-with? % (apply str (repeat 23 " "))))
+              (mapcat #(str/split (str/trim %) #"\s+"))
+              set)))
+  (is (= {:only ["skills/review" "mcps/search"] :user true}
+         (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
+                      [:only :user]))))
+
+(deftest only-and-user-select-across-scopes-without-the-rest
+  (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")]
+    (fs/create-dirs (str repo "/.git"))
+    (doseq [s ["review" "lint"]]
+      (fs/create-dirs (str pack "/skills/" s))
+      (spit (str pack "/skills/" s "/SKILL.md") (str "---\nname: " s "\ndescription: d\n---\n")))
+    (let [cfg (config/normalize
+               {:skill-packs {[:uri (str "file://" pack)] {:alias 'p :dir "skills"}}
+                :skills {['p "review"] {:in :all :acli [:claude]}
+                         ['p "lint"] {:in repo :acli [:claude]}}
+                :mcps [{:id :search :cmd "search-mcp" :in :all :acli [:claude]}
+                       {:id :search :cmd "search-mcp" :in repo :acli [:codex]}]}
+               "test")
+          plan (fn [opts] (core/build-plan cfg state/empty-state (merge {:tools #{:claude :codex}} opts)))
+          sel (fn [ops] (set (map (juxt :kind (comp u/kw->str :id) (comp boolean :project)) ops)))]
+      (testing "--only keeps one entity in user scope and in a project, and nothing else"
+        (is (= #{[:mcps "search" false] [:mcps "search" true]}
+               (sel (plan {:only [[:mcps "search"]]}))))
+        (is (= #{[:skills "lint" true]} (sel (plan {:only [[:skills "lint"]]})))))
+      (testing "--user keeps no op that lands in a project"
+        (let [ops (plan {:user true})]
+          (is (seq ops))
+          (is (not-any? #(or (:project %) (:project-path %)) ops))
+          (is (contains? (sel ops) [:skills "review" false]))))
+      (testing "an --only id nothing declares is reported, one that is declared is not"
+        (is (= ["skills/nope"]
+               (core/unmatched-only cfg state/empty-state {:only [[:skills "nope"] [:skills "lint"]]})))))))
 
 (defn- scope-cfg
   "A workspace with two projects and one nested inside the first, so a cwd can
@@ -2231,6 +2300,29 @@
       (is (false? (:show-noop o)))
       (is (= "x" (:file o)) "base opts survive"))))
 
+(deftest gui-refuses-a-filter-that-selects-nothing
+  ;; the CLI exits 1 on `-k bogus`; the GUI answers the same request with a 400
+  ;; naming what is valid, never with a plan of nothing that reads as converged
+  (let [ctx {:tok "t" :path "/tmp/agentctl-gui/agents.edn" :base-opts {} :lock (Object.)}
+        body (fn [m] (java.io.ByteArrayInputStream. (.getBytes (json/generate-string m))))
+        post (fn [uri m] (gui/handler ctx {:request-method :post :uri uri
+                                           :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                           :body (body m)}))]
+    (doseq [uri ["/api/plan" "/api/edit" "/api/apply"]]
+      (let [res (post uri {:text "{}" :kinds ["bogus"] :ops [] :confirm true})
+            data (json/parse-string (:body res) true)]
+        (is (= 400 (:status res)) uri)
+        (is (false? (:ok data)) uri)
+        (is (str/includes? (:error data) "unknown kind :bogus") uri)
+        (is (str/includes? (:error data) "plugins") uri)))
+    (let [res (post "/api/plan" {:text "{}" :tools ["nope"]})
+          data (json/parse-string (:body res) true)]
+      (is (= 400 (:status res)))
+      (is (str/includes? (:error data) "unknown tool :nope"))
+      (is (str/includes? (:error data) "claude")))
+    (testing "valid filters still plan"
+      (is (= 200 (:status (post "/api/plan" {:text "{}" :tools ["pi"] :kinds ["mcps"]})))))))
+
 (deftest gui-plans-from-a-buffer-that-was-never-saved
   (let [dir (temp-dir)
         path (str dir "/agents.edn")
@@ -2239,6 +2331,36 @@
     (is (not (u/exists? path)) "planning writes nothing, not even the config")
     (is (string? (:summary p)))
     (is (nil? (:diffs p)) "ops are rendered, never serialized")))
+
+(deftest gui-pills-count-ops-not-plan-lines
+  ;; a new settings.json renders one `+` line per field under its op, and a
+  ;; command renders a `!` line; the pills are ops, as the summary counts them
+  (let [dir (temp-dir)
+        notes (str dir "/AGENTS.md")
+        text (str "{:executors {:claude {:model \"sonnet\" :thinking \"high\"}}\n"
+                  " :mcps {:search {:cmd \"search-mcp --stdio\" :tools [:claude]}}\n"
+                  " :memory {:shared {:from \"" notes "\" :mode :symlink :tools [:claude]}}}\n")]
+    (spit notes "# notes\n")
+    (with-redefs [claude/settings-file (str dir "/settings.json")
+                  claude/runtime-file (str dir "/claude.json")
+                  claude/memory-file (str dir "/CLAUDE.md")
+                  state/load-state (constantly state/empty-state)]
+      (doseq [verbose [false true]]
+        (let [opts {:tools #{:claude} :kinds #{} :projects #{} :verbose verbose}
+              p (gui/plan-for-text text (str dir "/agents.edn") opts)
+              ops (core/build-plan (config/parse-config text (str dir "/agents.edn")) state/empty-state opts)
+              lines (fn [c] (count (filter #(str/starts-with? (str/triml %) c) (str/split-lines (:plan p)))))
+              [_ adds changes removes] (re-find #"^(\d+) to add, (\d+) to change, (\d+) to remove" (:summary p))]
+          (is (true? (:ok p)))
+          (is (= {:create (parse-long adds) :update (parse-long changes) :delete (parse-long removes)}
+                 (select-keys (:counts p) [:create :update :delete]))
+              "the pills say what the summary line says")
+          (is (> (lines "+") (get-in p [:counts :create]))
+              "the plan has nested field lines a line count would take for creates")
+          (is (= (count (filter #(and (plan/mutating? %) (seq (:cmds %))) ops))
+                 (get-in p [:counts :cmds]))
+              "one per op that runs a command")
+          (is (pos? (get-in p [:counts :cmds]))))))))
 
 (deftest gui-answers-a-half-typed-file-with-a-message
   (testing "the live pane means most keystrokes see invalid edn — that is a payload, not a 500"
@@ -2771,30 +2893,30 @@
     (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for)) "converged")))
 
 (deftest keyed-skills-and-packs
-  (let [root (temp-dir) local (str root "/agents-setup") core (str root "/core-vector")
-        clz (str root "/clz")]
+  (let [root (temp-dir) local (str root "/team-skills") core (str root "/app")
+        web (str root "/web")]
     (fs/create-dirs (str local "/skills/wrap-up"))
     (spit (str local "/skills/wrap-up/SKILL.md") "wrap")
-    (doseq [r [core clz]] (fs/create-dirs (str r "/.git")))
-    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias agents-setup}\n"
-                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" clz "\"]}}\n"
-                    " :skills {[agents-setup \"wrap-up\"] {:in :all}\n"
+    (doseq [r [core web]] (fs/create-dirs (str r "/.git")))
+    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias team-skills}\n"
+                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" web "\"]}}\n"
+                    " :skills {[team-skills \"wrap-up\"] {:in :all}\n"
                     "          [:gh \"cyxzdev/Uncodixfy\"] {:in [\"" core "\"] :acli [:codex :cc]}}}")
           cfg (config/parse-config text "test")
           pid (scope/target-id core)]
       (is (:entity-dsl? cfg))
-      (is (= :file (get-in cfg [:skill-packs :agents-setup :type])))
-      (is (= local (get-in cfg [:skill-packs :agents-setup :root])))
+      (is (= :file (get-in cfg [:skill-packs :team-skills :type])))
+      (is (= local (get-in cfg [:skill-packs :team-skills :root])))
       (is (= "https://github.com/obra/superpowers" (get-in cfg [:skill-packs :superpowers :uri])))
       (is (= :git (get-in cfg [:skill-packs :Uncodixfy :type])) "a repo-skill fetches as an implicit pack")
-      (is (= {:from :agents-setup :scope :global}
+      (is (= {:from :team-skills :scope :global}
              (select-keys (get-in cfg [:skills :wrap-up]) [:from :scope])))
       (is (= (str local "/skills/wrap-up") (sources/skill-source cfg (get-in cfg [:skills :wrap-up]))))
       (is (= #{:codex :claude} (get-in cfg [:skills :Uncodixfy :tools])) ":acli maps :cc onto :claude")
       (is (some #{:Uncodixfy} (get-in cfg [:projects pid :skills])))
-      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id clz) :skills])))
+      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id web) :skills])))
       (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
-      (is (= "agents-setup" (get-in cfg [:skill-packs :agents-setup :alias])) "kept for the plan's [alias]")))
+      (is (= "team-skills" (get-in cfg [:skill-packs :team-skills :alias])) "kept for the plan's [alias]")))
   (testing "the key names the skill directory, so an :alias renames without moving it"
     (let [root (temp-dir) local (str root "/pack")]
       (fs/create-dirs (str local "/skills/wrap-up"))

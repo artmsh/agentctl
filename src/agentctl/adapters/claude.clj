@@ -538,9 +538,10 @@
         tool-settings (get-in proj [:tools tool])
         [kvs unsupported] (common/map-settings tool-settings setting-keys)]
     (concat
-     ;; hooks have no project scope in the DSL today — `:hooks` under a
+     ;; the old format gives hooks no project scope — `:hooks` under a
      ;; project's `:executors :claude` would otherwise vanish with no trace;
-     ;; say so instead of silently dropping it
+     ;; say so instead of silently dropping it. The entity DSL places a hook
+     ;; in a project with `:in` (see `core/project-hook-ops`)
      (for [k unsupported :when (not (and (:entity-dsl? cfg) (= :hooks k)))]
        (plan/op {:action :noop :warn true :tool tool :kind :projects :project id
                  :id (keyword (name id) (name k))
