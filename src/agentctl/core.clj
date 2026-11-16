@@ -391,7 +391,10 @@
     (-> (concat (sources/pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
-                (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) ((:drop dups) (:target %)))
+                ;; a collision report names the copy as well, but says what pi
+                ;; loads there, which holds whether the copy is kept or removed
+                (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) (not (:collision %))
+                                                             ((:drop dups) (:target %)))
                                                        tool-ops))
                 ;; after the user-wide installs they check for
                 (:ops dups)

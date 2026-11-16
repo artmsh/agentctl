@@ -226,7 +226,9 @@
   (let [user (into {} (for [[sid s] (user-skills cfg) :when (:source s)
                             :let [src (u/abs-path (:source s))]]
                         [(sources/skill-name src) {:sid sid :md (md src)}]))
-        warn (fn [m] (plan/op (merge {:action :noop :warn true :conflict true :tool tool :kind :skills} m)))]
+        ;; `:collision` keeps it apart from the copy reports `:drop` replaces
+        warn (fn [m] (plan/op (merge {:action :noop :warn true :conflict true :collision true
+                                      :tool tool :kind :skills} m)))]
     (concat
      (for [[pid proj] (:projects cfg)
            :when (and (contains? (:for-tools proj) tool) (trusted? proj))

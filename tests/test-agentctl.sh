@@ -882,6 +882,10 @@ done
 # The steps below each get a home of their own: what the steps above own would
 # otherwise turn into prunes and change the exit codes asserted here.
 fresh_home() { local h="$SB/homes/$1"; rm -rf "$h"; mkdir -p "$h"; printf '%s' "$h"; }
+# mkskill DIR [NAME [BODY]]: a skill directory whose SKILL.md says NAME
+mkskill() { mkdir -p "$1"; printf -- "---\nname: ${2:-$(basename "$1")}\ndescription: ${3:-d}.\n---\n\nbody ${3:-d}\n" > "$1/SKILL.md"; }
+# commit everything in repo DIR
+commit_all() { git -C "$1" add -A && git -C "$1" -c user.email=t@e -c user.name=t commit -qm "${2:-c}"; }
 
 echo "21. a stale lock entry beside a dangling project link is cleaned up, not a crash"
 (
@@ -1055,6 +1059,28 @@ EDN
   (run validate -f "$H/agents.edn" -t pi -k skills || true) > "$H/validate.txt" 2>&1
   grep -q '! ~/projects/proj/.agents/skills/wrap-up .*pi loads' "$H/validate.txt" \
     || { cat "$H/validate.txt"; fail "validate does not repeat the collision once converged"; }
+)
+
+echo "26. pi's collision with a kept copy the skills CLI installed is still reported"
+(
+  H=$(fresh_home pi-kept-collision); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q; commit_all "$P"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex :pi]}}
+ :trust [{:in "projects/game" :acli [:pi]}]}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/game/.agents/skills/wrap-up kept — it is tracked by git' "$H/plan.txt" \
+    && grep -q 'pi loads ~/projects/game/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the kept copy's collision report is missing"; }
 )
 
 echo "all agentctl e2e checks passed"
