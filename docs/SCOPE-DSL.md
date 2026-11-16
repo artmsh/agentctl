@@ -207,7 +207,8 @@ Codex's nested TUI settings ride in the same stanza and are user-wide only
 
 ```edn
 {:settings {:keymap {:chat {:open_presets "alt-t"}}
-            :presets {0 {:input "/model" :label "model picker"}}}
+            :presets {0 {:input "/model" :label "model picker"}}
+            :status-line [:model-with-reasoning :context-used :git-branch]}
  :tools [:codex] :in :all}
 ```
 

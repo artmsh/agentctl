@@ -103,6 +103,19 @@ preset is `{:input "…" :label "…"}` in slots 0-9; `:input` is required and r
 as typed. `validate` rejects other slots and fields. Removing a slot removes
 only a table agentctl wrote; presets saved from the Codex browser stay.
 
+Codex has no external status command; its footer is a list of built-in items:
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :status-line [:model-with-reasoning :five-hour-limit :weekly-limit
+                           :used-tokens :context-used :current-dir :git-branch]}]}
+```
+
+This writes `[tui] status_line` and nothing else in `[tui]`. Codex loads an
+unknown item silently and drops it at startup, so `validate` reports one by name
+and lists the items codex-cli 0.169.0 renders. A map value is Claude Code's
+command status line; codex reports it as unsupported rather than as an error.
+
 ## GUI
 
 ```sh

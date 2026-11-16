@@ -107,6 +107,7 @@
         names (fn [m] (if (map? m) (set (map u/key-str (keys m))) #{}))]
     (cond
       (empty? path) (set (keep setting-keys (keys settings)))
+      (= ["tui"] path) (if (schema/status-line? (:status-line settings)) #{"status_line"} #{})
       (and (= 3 (count path)) (= ["tui" "keymap"] (subvec path 0 2)))
       (names (by-name (:keymap settings) (nth path 2)))
       (and (= 3 (count path)) (= ["tui" "presets"] (subvec path 0 2)))
@@ -137,15 +138,29 @@
         :when op]
     op))
 
+(defn- status-line-op
+  "The native footer: `[tui] status_line`, an item list. One key of `[tui]`,
+   set by surgery — the table also holds Codex's own state."
+  [items]
+  (plan/toml-set-op {:tool tool :kind :settings :id :status-line
+                     :file config-file :table ["tui"]
+                     :kvs {"status_line" (mapv u/key-str items)}
+                     :summary "codex footer items"}))
+
 (def nested-settings
   "Declared settings with an op of their own rather than a root key."
-  [:keymap :presets])
+  [:keymap :presets :status-line])
 
 (defn settings-ops [cfg]
   (let [settings (common/settings-for cfg tool)
         _ (when-let [e (schema/errors settings [:executors :codex])]
             (throw (ex-info (str "codex settings: " e) {:path [:executors :codex]})))
-        [kvs unsupported] (common/map-settings (apply dissoc settings nested-settings) setting-keys)
+        ;; Claude's status line is a command object; in a unified settings
+        ;; row it reaches codex too, and stays an unsupported setting here
+        footer? (schema/status-line? (:status-line settings))
+        [kvs unsupported] (common/map-settings (apply dissoc settings (cond->> nested-settings
+                                                                        (not footer?) (remove #{:status-line})))
+                                               setting-keys)
         bindings (when (contains? settings :keymap) (keymap-ops (:keymap settings)))]
     (concat
      (keep identity
@@ -154,6 +169,7 @@
                                :summary "global codex settings"})])
      bindings
      (preset-ops (:presets settings))
+     (when footer? (keep identity [(status-line-op (:status-line settings))]))
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")

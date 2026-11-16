@@ -55,6 +55,8 @@
                             t)
                 (seq (get-in t ["tui" "keymap"]))
                 (assoc :keymap (get-in t ["tui" "keymap"]))
+                (sequential? (get-in t ["tui" "status_line"]))
+                (assoc :status-line (mapv keyword (get-in t ["tui" "status_line"])))
                 ;; slots are digits; EDN reads best with them as numbers
                 (seq (get-in t ["tui" "presets"]))
                 (assoc :presets (into (sorted-map-by #(compare (str %1) (str %2)))

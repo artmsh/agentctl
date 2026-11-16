@@ -1060,6 +1060,47 @@
                 (config/structural-findings
                  (config/normalize {:executors {:codex {:presets {"3" {:input "x"} :4 {:input "y" :label ""}}}}} nil)))))
 
+(deftest codex-status-line-replaces-a-multi-line-footer-and-round-trips
+  (let [f (str (temp-dir) "/config.toml")
+        items [:model-with-reasoning :five-hour-limit :weekly-limit :used-tokens
+               :context-used :current-dir :git-branch]
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :status-line items}]}]
+    ;; the layout Codex itself writes: one item per line
+    (u/write-text! f (str "[tui]\ntheme = \"x\"\nstatus_line = [\n    \"model\",\n    \"context-used\",\n]\n"
+                          "status_line_use_colors = true\n\n[tui.model_availability_nux]\n\"m-a\" = 4\n"))
+    (with-redefs [codex/config-file f]
+      (testing "`apply -t codex -k settings` plans the one key"
+        (let [ops (filter plan/mutating? (core/build-plan (config/normalize raw "test") state/empty-state
+                                                         {:tools #{:codex} :kinds #{:settings}}))]
+          (is (= [[:status-line ["tui"]]] (map (juxt :id :path) ops)))
+          (is (str/includes? (plan/render-plan ops {}) "status_line"))))
+      (let [{st1 :st} (converge-codex raw state/empty-state)
+            t (toml/read-toml f)]
+        (is (= (mapv name items) (get-in t ["tui" "status_line"])))
+        (is (= {"m-a" 4} (get-in t ["tui" "model_availability_nux"])))
+        (is (true? (get-in t ["tui" "status_line_use_colors"])))
+        (is (= "x" (get-in t ["tui" "theme"])))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (testing "import round-trips it"
+          (let [imported (:codex (imports/scan-settings))]
+            (is (= items (:status-line imported)))
+            (is (empty? (codex/settings-ops (config/normalize {:executors {:codex imported}} nil))))))))))
+
+(deftest codex-status-line-names-the-items-codex-accepts
+  (let [cfg (config/normalize {:executors {:codex {:status-line [:model :app-name]}}} nil)
+        [e] (filter #(= :error (:level %)) (config/structural-findings cfg))]
+    (is (str/includes? (:message e) "unknown status-line item :app-name"))
+    (is (str/includes? (:message e) "model-with-reasoning, reasoning"))
+    (is (= [:executors :codex :status-line] (:where e)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"app-name" (doall (codex/settings-ops cfg)))))
+  (testing "aliases 0.169.0 still renders are accepted"
+    (is (empty? (config/structural-findings
+                 (config/normalize {:executors {:codex {:status-line ["project" "model-name" :git-branch]}}} nil)))))
+  (testing "Claude's command status line in a unified row is no codex error, only unsupported there"
+    (let [cfg (config/normalize {:settings [{:status-line {:type "command" :command "x"} :in :all}]} "test")]
+      (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
+      (is (= [[:noop :status-line]] (map (juxt :action :id) (codex/settings-ops cfg)))))))
+
 (deftest codex-keymap-is-editable-as-edn
   (let [keymap {:global {:open_transcript "alt-t"}}
         m (form/model (pr-str {:executors {:codex {:keymap keymap}}}))

@@ -338,6 +338,26 @@ Under the entity DSL, dropping a slot from the config removes that slot's table
 if agentctl wrote it; a slot saved from Codex itself (`n · new` in the browser)
 is not agentctl's and stays. Import reads presets back as `{0 {:input …}}`.
 
+### Codex `:status-line`
+
+The native footer, `[tui] status_line`, as an item list:
+
+```edn
+{:executors
+ {:codex {:status-line [:model-with-reasoning :five-hour-limit :weekly-limit
+                        :used-tokens :context-used :current-dir :git-branch]}}}
+```
+
+Only that key of `[tui]` is set; Codex keeps its own state in the same table.
+A multi-line array Codex wrote is replaced whole. Items are keywords or strings
+in Codex's spelling. codex-cli 0.169.0 accepts any string at load time and drops
+an unknown one at startup with "Ignored invalid status line items", so
+`validate` checks each item against what that version renders (the list its
+`/statusline` picker shows, plus the older spellings `project` and `model-name`)
+and names the accepted ones on error. A map value is Claude Code's
+command-style status line; from a unified settings row it reaches codex as an
+unsupported setting, not an error. Import reads the list back as keywords.
+
 ### `:permissions`
 
 A mini-DSL that compiles to the rule strings Claude Code stores:
