@@ -673,10 +673,12 @@ stdin in the OEM codepage. An operation that does not end with a final `OK` line
 
 The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
 `~/.config/agent-statusline/config.json`, written whole and owned like any other
-resource. Keys are the renderer's JSON keys in kebab-case, keyword values become
-strings and `nil` becomes `null`. Nothing else is interpreted: the renderer's
-`--check` decides what is valid. Its ops are `agentctl statusline/config`, selected
-by `-k statusline` and never by `-t`. An `:awl` override plans nothing for awl,
+resource by path. Keys are the renderer's JSON keys in kebab-case, keyword values
+become strings and `nil` becomes `null` (shown `∅` in a plan). Nothing else is
+interpreted: the renderer's `--check` decides what is valid. Its ops are
+`agentctl statusline/config`, selected by `-k statusline` (which `-t` does not
+narrow) and never by `-t` alone. A symlinked file is replaced, never written through,
+and `import` reads the file back. An `:awl` override plans nothing for awl,
 which reads the same file only when built with `-Dstatusline`. `validate` and
 `apply` report whether the `awl` on `PATH` was built that way. See
 [the guide](GUIDE.md#shared-status-line) for validation, paths, ownership and awl.
@@ -859,7 +861,8 @@ otherwise hand-curated) is a `warn` and never fails the exit code.
 
 `STATUSLINE` is the renderer's own verdict on `:statusline`, from
 `agent-statusline --check` run on the candidate JSON. A rejection is an `error`
-that also stops `apply`. A missing renderer, or one without `--check`, is
+that also stops `apply`, or a `warn` on a run narrowed so that it cannot write the
+file. A missing renderer, or one without `--check`, is
 `unknown`, and a renderer that would read a different file in this environment
 is a `warn`. With an `:awl` override it also says whether the `awl` on `PATH`
 links the renderer (`ok`), does not (`warn`), or cannot be inspected (`warn`).

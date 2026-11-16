@@ -14,8 +14,7 @@
             [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
-            [clojure.string :as str]
-            [clojure.walk :as walk]))
+            [clojure.string :as str]))
 
 (def tool
   "The file belongs to no single CLI, so its ops are agentctl's own: `-t`
@@ -31,31 +30,61 @@
 ;; ---------------------------------------------------------------- where
 
 (defn- under? [parent child]
-  (let [parent (str/replace (str parent) #"/+$" "")]
-    (or (= parent child) (str/starts-with? (str child) (str parent "/")))))
+  (or (= parent child) (str/starts-with? (str child) (str parent "/"))))
+
+(defn- normal
+  "Absolute, with `.` and `..` resolved by spelling alone."
+  [p]
+  (str (fs/normalize (fs/absolutize (str p)))))
+
+(defn- canonical
+  "`normal`, then every ancestor that exists through its real path — on macOS
+   /tmp is /private/tmp, and two spellings of one place must compare equal.
+   The last segment is never resolved: a symlink there is a file of its own."
+  [p]
+  (let [p (normal p)
+        parent (fs/parent p)]
+    (if-not parent
+      p
+      (loop [cur parent tail (list (str (fs/file-name p)))]
+        (cond
+          (fs/exists? cur) (str/join "/" (cons (str (fs/real-path cur)) tail))
+          (nil? (fs/parent cur)) p
+          :else (recur (fs/parent cur) (conj tail (str (fs/file-name cur)))))))))
+
+(defn same-file?
+  "Do two paths name one file, whatever the spelling of the directories?"
+  [a b]
+  (= (canonical a) (canonical b)))
+
+(defn- canonical-dir
+  "A directory with its own symlinks resolved too, when it exists."
+  [d]
+  (str (fs/parent (canonical (str d "/x")))))
 
 (defn config-path
   "The file the renderer reads when neither `--config` nor
    `AGENT_STATUSLINE_CONFIG` names another: `$XDG_CONFIG_HOME/agent-statusline/config.json`,
-   else `~/.config/agent-statusline/config.json`.
+   else `~/.config/agent-statusline/config.json`, spelled without `.` or `..`.
 
    An empty or relative `XDG_CONFIG_HOME` is no base directory (the XDG spec
-   says to ignore one), and under `AGENTCTL_HOME` one outside that sandbox is
+   says to ignore one), and under `AGENTCTL_HOME` one that is not inside that
+   sandbox — compared after resolving `..` and symlinked directories — is
    ignored too: a scratch run must not write into the real home."
   ([] (config-path (System/getenv)))
   ([env]
    (let [xdg (get env "XDG_CONFIG_HOME")
          sandbox (get env "AGENTCTL_HOME")
-         usable? (and (not (str/blank? xdg))
-                      (fs/absolute? xdg)
-                      (or (str/blank? sandbox) (under? u/home xdg)))]
-     (str (if usable? (str/replace xdg #"/+$" "") (str u/home "/.config"))
-          "/agent-statusline/config.json"))))
+         base (when (and (not (str/blank? xdg)) (fs/absolute? xdg)) (normal xdg))
+         usable? (and base (or (str/blank? sandbox)
+                               (under? (canonical-dir u/home) (canonical-dir base))))]
+     (str (if usable? base (str (normal u/home) "/.config")) "/agent-statusline/config.json"))))
 
 (defn renderer-path
-  "The file the renderer itself would read, run with `env`. It takes
-   `XDG_CONFIG_HOME` as given, empty or relative, and `HOME` is `u/home`, so
-   a sandboxed run compares like with like."
+  "The file the renderer itself would read, run with `env`. It takes both
+   variables as given — an empty `AGENT_STATUSLINE_CONFIG` is an explicit path
+   it fails to read, an empty or relative `XDG_CONFIG_HOME` a base it uses —
+   and `HOME` is `u/home`, so a sandboxed run compares like with like."
   ([] (renderer-path (System/getenv)))
   ([env]
    (let [explicit (get env "AGENT_STATUSLINE_CONFIG")
@@ -75,11 +104,17 @@
    "warning_percent" "critical_percent"
    "cc" "codex" "awl" "pi"])
 
+(defn- spelled
+  "A keyword or symbol in full: a namespace is kept, never dropped, so
+   `:x/auto` reaches the renderer as \"x/auto\" and is judged there."
+  [x]
+  (if (keyword? x) (subs (str x) 1) (str x)))
+
 (defn json-key
   "`:context-style` -> \"context_style\". A string key is taken as written,
    apart from the same `-` -> `_`."
   [k]
-  (str/replace (if (keyword? k) (name k) (str k)) "-" "_"))
+  (str/replace (spelled k) "-" "_"))
 
 (defn- ordered [m]
   (let [rank (zipmap layout (range))]
@@ -97,7 +132,7 @@
       (doseq [[jk entries] groups :when (next entries)]
         (vswap! clashes conj {:where (conj where jk) :keys (sort-by str (map key entries))}))
       (ordered (into {} (for [[jk [[_ x]]] groups] [jk (translate x (conj where jk) clashes)]))))
-    (or (keyword? v) (symbol? v)) (name v)
+    (or (keyword? v) (symbol? v)) (spelled v)
     (coll? v) (mapv #(translate % where clashes) v)
     :else v))
 
@@ -122,18 +157,47 @@
         ;; awl reads the file but is built to, or not: see `awl-status`
         :awl? (and (map? agents) (contains? agents "awl"))}))))
 
+(defn- edn-key [k] (keyword (str/replace (u/key-str k) "_" "-")))
+
+(defn- untranslate [v]
+  (cond
+    (map? v) (into {} (map (fn [[k x]] [(edn-key k) (untranslate x)])) v)
+    (sequential? v) (mapv untranslate v)
+    :else v))
+
+(defn scan
+  "The `:statusline` the file on disk implies, for `import`: keys back in
+   kebab-case, values as written, so applying it writes the same settings.
+   nil when there is no file or it holds no JSON object."
+  []
+  (let [d (try (some-> (u/slurp-safe (config-path)) json/parse-string)
+               (catch Exception _ nil))]
+    (when (map? d) (untranslate d))))
+
 ;; ---------------------------------------------------------------- --check
+
+(defn- claude-renderer
+  "The renderer a declared Claude `:status-line` command runs, when that
+   command is `agent-statusline` by path — the common way it is set up."
+  [cfg]
+  (when-let [cmd (get-in cfg [:tools :claude :status-line :command])]
+    (let [bin (some-> (first (u/split-cmd cmd)) u/expand u/abs-path)]
+      (when (and bin (= "agent-statusline" (str (fs/file-name bin)))) bin))))
 
 (defn renderer-bin
   "The renderer to check with: `:bin`, else `AGENT_STATUSLINE_BIN` (the
    variable the renderer's own adapters honour), else `agent-statusline` on
-   PATH."
+   PATH, else the one a Claude `:status-line` command names."
   [sl]
   (let [env-bin (System/getenv "AGENT_STATUSLINE_BIN")]
     (cond
       (:bin sl) {:path (u/abs-path (str (:bin sl))) :via ":statusline :bin"}
       (not (str/blank? env-bin)) {:path (u/abs-path env-bin) :via "AGENT_STATUSLINE_BIN"}
-      :else (when-let [p (u/which "agent-statusline")] {:path p :via "PATH"}))))
+      :else (or (when-let [p (u/which "agent-statusline")] {:path p :via "PATH"})
+                (when-let [p (:claude-bin sl)]
+                  (when (fs/executable? p) {:path p :via "the Claude :status-line command"}))))))
+
+(def ^:dynamic *timeout-ms* 10000)
 
 (defn- run-check
   "`bin --check --config <text in a temp file>`. stdin is closed; the
@@ -144,9 +208,9 @@
     (try
       (spit (fs/file f) text)
       (let [proc (p/process [bin "--check" "--config" (str f)] {:in "" :out :string :err :string})
-            res (deref proc 10000 ::timeout)]
+            res (deref proc *timeout-ms* ::timeout)]
         (if (= ::timeout res)
-          (do (p/destroy-tree proc) {:exit -1 :err "timed out after 10s"})
+          (do (p/destroy-tree proc) {:exit -1 :timeout true})
           {:exit (:exit res) :err (str/trim (or (:err res) ""))}))
       (catch Exception e {:exit -1 :err (.getMessage e)})
       (finally (fs/delete-if-exists f)))))
@@ -157,18 +221,27 @@
 
 (def ^:private checked (atom {}))
 
+(def ^:private probe-invalid
+  "A document the contract rejects whatever the renderer's version: its
+   objects are closed, so an unknown top-level key exits 1."
+  "{\"agentctl_probe\": true}\n")
+
 (defn check
   "What the renderer says about the declared JSON:
      {:status :ok}                      it accepts it
      {:status :invalid :message …}      it rejects it (exit 1)
      {:status :unknown :message …}      it could not be asked
-   A binary that rejects the empty config `{}` does not implement `--check`
-   (one built before it answers UnknownArgument) — that is unknown, never a
-   verdict on the config. Remembered per binary and text: findings and the
-   plan ask the same question in one run."
+   Before the candidate, two probes: `{}` must pass and a document with an
+   unknown key must fail with 1. A binary that answers otherwise does not
+   implement `--check` — one built before it rejects everything, and
+   something like `true` accepts everything — so that is unknown, never a
+   verdict on the config. Remembered per binary, mtime and text: findings
+   and the plan ask the same question in one run."
   [sl]
   (let [{:keys [path via]} (renderer-bin sl)
-        unknown (fn [msg] {:status :unknown :message (str msg " — the config is not validated")})]
+        unknown (fn [msg] {:status :unknown :message (str msg " — the config is not validated")})
+        timed-out (fn [] (unknown (str (u/tilde path) " --check timed out after "
+                                       (quot *timeout-ms* 1000) "s")))]
     (cond
       (nil? path)
       (unknown "agent-statusline is not on PATH (set :bin under :statusline, or AGENT_STATUSLINE_BIN)")
@@ -182,18 +255,27 @@
             k (fn [text] [path (str (fs/last-modified-time path)) text])
             ask (fn [text] (or (get @checked (k text))
                                (let [r (run-check path text)] (swap! checked assoc (k text) r) r)))
-            probe (ask "{}\n")]
+            empty-ok (ask "{}\n")
+            bad (when (and (not (:timeout empty-ok)) (zero? (:exit empty-ok))) (ask probe-invalid))]
         (cond
-          (not (zero? (:exit probe)))
+          (or (:timeout empty-ok) (:timeout bad)) (timed-out)
+
+          (not (zero? (:exit empty-ok)))
           (unknown (str (u/tilde path) " does not implement --check (it rejects an empty config: "
-                        (diagnostic (:err probe)) ") — rebuild it"))
+                        (diagnostic (:err empty-ok)) ") — rebuild it"))
+
+          (not= 1 (:exit bad))
+          (unknown (str (u/tilde path) " does not implement --check (it "
+                        (if (zero? (:exit bad)) "accepts" (str "exits " (:exit bad) " on"))
+                        " a config with an unknown key)"))
 
           :else
-          (let [{:keys [exit err]} (ask (:text sl))]
-            (case (long exit)
-              0 {:status :ok :message (str "accepted by " (u/tilde path) " --check")}
-              1 {:status :invalid :message (str "agent-statusline rejects it: " (diagnostic err))}
-              (unknown (str (u/tilde path) " --check failed (exit " exit "): " (diagnostic err))))))))))
+          (let [{:keys [exit err timeout]} (ask (:text sl))]
+            (cond
+              timeout (timed-out)
+              (zero? exit) {:status :ok :message (str "accepted by " (u/tilde path) " --check")}
+              (= 1 exit) {:status :invalid :message (str "agent-statusline rejects it: " (diagnostic err))}
+              :else (unknown (str (u/tilde path) " --check failed (exit " exit "): " (diagnostic err))))))))))
 
 ;; ---------------------------------------------------------------- awl
 
@@ -265,50 +347,91 @@
         (finding :error where (str (str/join " and " (map pr-str keys)) " both name `"
                                    (last where) "` in the JSON — keep one"))))))
 
+(defn selected?
+  "Does a run with these options plan the file? `-k statusline` asks for it
+   by name, so `-t` — which names CLIs, none of which owns this file — does
+   not take it away again. A run narrowed to projects, or aimed at a host,
+   never touches it."
+  [{:keys [tools kinds projects host]}]
+  (let [named? (contains? (set kinds) kind)]
+    (boolean (and (not host) (empty? projects)
+                  (or (empty? kinds) named?)
+                  (or (empty? tools) named?)))))
+
+(defn env-finding
+  "The file the renderer would read here, when it is not the one agentctl
+   writes."
+  [env writes]
+  (let [explicit (get env "AGENT_STATUSLINE_CONFIG")
+        reads (renderer-path env)]
+    (cond
+      (= "" explicit)
+      (finding :warn [:env] (str "AGENT_STATUSLINE_CONFIG is set but empty: the renderer fails"
+                                 " to read any config (FileNotFound) and never reads " (u/tilde writes)))
+      (not (same-file? reads writes))
+      (finding :warn [:env] (str "the renderer, run with this environment, reads " (u/tilde reads)
+                                 " — agentctl writes " (u/tilde writes))))))
+
+(defn- with-claude [cfg]
+  (some-> (:statusline cfg) (assoc :claude-bin (claude-renderer cfg))))
+
 (defn findings
   "What this machine says about `:statusline`: the renderer's verdict, the
    file the renderer would read here, and awl's build. Local runs only — a
    host is not provisioned with the file, and none of this describes it.
-   `validate` reports these, and `apply` refuses on an error among them."
-  [cfg]
-  (let [sl (:statusline cfg)]
-    (when (and sl (not (:problem sl)) (not (:clashes sl)))
-      (concat
-       (let [{:keys [status message]} (check sl)]
-         [(finding (case status :ok :ok :invalid :error :unknown) [:config]
-                   (if (= :invalid status) (str message " — nothing is written") message))])
-       (let [writes (config-path) reads (renderer-path)]
-         (when (not= (u/abs-path reads) writes)
-           [(finding :warn [:env]
-                     (str "the renderer, run with this environment, reads " (u/tilde reads)
-                          " — agentctl writes " (u/tilde writes)))]))
-       ;; a `:warn`, not `:unknown`, when awl cannot be read: `apply` prints
-       ;; warnings on every run, and an override awl may never honour must not
-       ;; disappear behind "no changes" once the file is written
-       (when (:awl? sl)
-         (let [[level message] (awl-status)]
-           [(finding level [:awl] message)]))))))
+   `apply` refuses on an error among them, but only when the run would write
+   the file: one narrowed by `-t`, `-k` or to projects gets a warning."
+  ([cfg] (findings cfg {}))
+  ([cfg opts]
+   (let [sl (with-claude cfg)
+         soften (fn [f] (if (and (= :error (:level f)) (not (selected? opts)))
+                          (assoc f :level :warn :message (str (:message f) " (this run does not write it)"))
+                          f))]
+     (when (and sl (not (:problem sl)) (not (:clashes sl)))
+       (map soften
+            (concat
+             (let [{:keys [status message]} (check sl)]
+               [(finding (case status :ok :ok :invalid :error :unknown) [:config]
+                         (if (= :invalid status) (str message " — nothing is written") message))])
+             (keep identity [(env-finding (System/getenv) (config-path))])
+             ;; a `:warn`, not `:unknown`, when awl cannot be read: `apply`
+             ;; prints warnings on every run, and an override awl may never
+             ;; honour must not disappear behind "no changes" once the file is
+             ;; written
+             (when (:awl? sl)
+               (let [[level message] (awl-status)]
+                 [(finding level [:awl] message)]))))))))
 
 ;; ---------------------------------------------------------------- plan
 
 (defn- parse [text]
   (try (json/parse-string text) (catch Exception _ ::unparseable)))
 
-(def ^:private inherit
-  "How a `null` reads in the plan. In an agent's override it is the way to say
-   \"inherit the default\", and the generic diff drops a nil that has nothing to
-   differ from — the override would preview as an empty agent."
-  (symbol "null (inherit)"))
+(defn- backup!
+  "`u/backup!` copies a symlink as a link, which would leave the backup
+   pointing at the very file about to change. A link is backed up as the
+   bytes it resolves to."
+  [target]
+  (if (and (fs/sym-link? target) (fs/exists? target))
+    (let [dest (fs/path (u/backup-dir) (str/replace (u/tilde target) #"[/~]" "_"))]
+      (when-not (fs/exists? dest {:nofollow-links true})
+        (fs/create-dirs (fs/parent dest))
+        (fs/copy (fs/real-path target) dest))
+      (str dest))
+    (u/backup! target)))
 
-(defn- shown
-  "`m` as the plan shows it: every null value spelled out."
-  [m]
-  (walk/postwalk (fn [x] (if (map? x) (into (empty x) (map (fn [[k v]] [k (if (nil? v) inherit v)])) x) x)) m))
+(defn- owned-here?
+  "Ownership is of a path: a file agentctl wrote elsewhere says nothing
+   about the one at `target`."
+  [owned target]
+  (boolean (and owned (same-file? (or (:path owned) target) target))))
 
 (defn- write-op [sl owned]
   (let [target (config-path)
+        link (when (fs/sym-link? target) (str (fs/read-link target)))
         current (u/slurp-safe target)
         exists? (u/exists? target)
+        mine? (owned-here? owned target)
         before (some-> current parse)
         {:keys [status message]} (check sl)]
     (cond
@@ -321,7 +444,10 @@
 
       :else
       (let [notes (remove nil?
-                          [(when (and exists? (not owned))
+                          [(when link
+                             (str "replaces the symlink to " (u/tilde link) " with a regular file;"
+                                  " the file it points to is left as it is (its content backed up)"))
+                           (when (and exists? (not mine?) (not link))
                              "replaces a file agentctl did not write (backed up first)")
                            (when (= ::unparseable before) "the file on disk is not valid JSON")
                            (when (and (map? before) (= (u/norm before) (u/norm (:data sl))))
@@ -333,35 +459,48 @@
                   :note (when (seq notes) (str/join "; " notes))
                   ;; a whole file is the change: show it on create too
                   :preview true
-                  :diffs [{:key id :before (when (map? before) (shown before)) :after (shown (:data sl))}]
-                  :risk (if (and exists? (not owned)) :medium :low)
+                  :diffs [{:key id :before (when (map? before) before) :after (:data sl)}]
+                  :risk (if (and exists? (or link (not mine?))) :medium :low)
+                  ;; never through a link: agentctl writes the declared path
+                  ;; and nothing outside it
                   :exec! (fn []
-                           (u/backup! target)
+                           (backup! target)
+                           (when (fs/sym-link? target) (fs/delete target))
                            (u/write-text! target (:text sl)))})))))
 
 (defn- prune-op
-  "Only a file agentctl wrote is removed, at the path it was written to."
-  [owned]
+  "Only a file agentctl wrote is removed, at the path it was written to. A
+   symlink there now is someone else's, and stays."
+  [owned why]
   (let [target (or (:path owned) (config-path))
         current (u/slurp-safe target)]
-    (when-let [o (plan/unlink-op {:tool tool :kind kind :id id :dest target})]
-      (assoc o
-             :summary (str "removed from agents.edn — delete " (u/tilde target))
-             :note (when (and current (:sha256 owned) (not= (:sha256 owned) (u/sha256 current)))
-                     "edited since agentctl wrote it (backed up first)")))))
+    (cond
+      (fs/sym-link? target)
+      (plan/op {:action :noop :warn true :tool tool :kind kind :id id :target target
+                :summary (str (u/tilde target) " is a symlink now, not the file agentctl wrote — left in place")})
+
+      :else
+      (when-let [o (plan/unlink-op {:tool tool :kind kind :id id :dest target})]
+        (assoc o
+               :summary (str why " — delete " (u/tilde target))
+               :note (when (and current (:sha256 owned) (not= (:sha256 owned) (u/sha256 current)))
+                       "edited since agentctl wrote it (backed up first)"))))))
 
 (defn plan-ops
-  "The write, or the removal of a file agentctl owns. `-t` names CLIs, and
-   this file belongs to none of them, so a run narrowed by `-t` leaves it out."
+  "The write, the removal of the file agentctl owns, or both when the target
+   moved (XDG_CONFIG_HOME changed): the old file is agentctl's and goes, the
+   new path is judged on its own. See `selected?` for which runs plan it."
   [cfg st opts]
-  (when (empty? (:tools opts))
-    (let [sl (:statusline cfg)
+  (when (selected? opts)
+    (let [sl (with-claude cfg)
           owned (state/entry st tool kind id)]
       (remove nil?
-              [(cond
-                 (:problem sl) nil
-                 sl (write-op sl owned)
-                 owned (prune-op owned))]))))
+              (cond
+                (:problem sl) nil
+                sl [(write-op sl owned)
+                    (when (and owned (not (owned-here? owned (config-path))))
+                      (prune-op owned (str "moved to " (u/tilde (config-path)))))]
+                owned [(prune-op owned "removed from agents.edn")])))))
 
 (defn inventory
   "The ownership record: where the file went, and a digest of what was

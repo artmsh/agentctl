@@ -46,6 +46,8 @@ def options(o, nullable):
                 die("DuplicateSegment")
         if k in ENUMS and v not in ENUMS[k]:
             die("InvalidEnumTag")
+        if k == "separator" and any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for c in v):
+            die("InvalidSeparator")
         if k.endswith("_percent") and not (0 <= v <= 100):
             die("InvalidThresholds")
 
@@ -54,6 +56,8 @@ if not isinstance(cfg, dict) or set(cfg) - {"defaults", "agents"}:
 defaults = cfg.get("defaults", {})
 options(defaults, False)
 agents = cfg.get("agents", {})
+if not isinstance(agents, dict):
+    die("UnexpectedToken")
 if set(agents) - {"cc", "codex", "awl", "pi"}:
     die("UnknownField")
 merged = [defaults]

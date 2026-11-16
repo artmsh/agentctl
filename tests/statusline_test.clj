@@ -78,6 +78,24 @@
     (testing "empty and relative XDG are no base directory"
       (is (= (str home "/.config/agent-statusline/config.json") (sl/config-path {"XDG_CONFIG_HOME" ""})))
       (is (= (str home "/.config/agent-statusline/config.json") (sl/config-path {"XDG_CONFIG_HOME" "rel"}))))
+    (testing "`..` cannot climb out of the sandbox, and the stored path is normalized"
+      (is (= (str home "/.config/agent-statusline/config.json")
+             (sl/config-path {"AGENTCTL_HOME" home "XDG_CONFIG_HOME" (str home "/../outside")})))
+      (is (= (str home "/y/agent-statusline/config.json")
+             (sl/config-path {"AGENTCTL_HOME" home "XDG_CONFIG_HOME" (str home "/./x/../y")}))))
+    (testing "a symlinked spelling of a directory inside the sandbox is inside it"
+      (let [real (str home "/xdg-real")
+            link (str (fs/create-temp-dir) "/xdg-link")]
+        (fs/create-dirs real)
+        (fs/create-sym-link link real)
+        (is (= (str link "/agent-statusline/config.json")
+               (sl/config-path {"AGENTCTL_HOME" home "XDG_CONFIG_HOME" link})))
+        (is (sl/same-file? (str link "/agent-statusline/config.json")
+                           (str real "/agent-statusline/config.json")))))
+    (testing "an empty AGENT_STATUSLINE_CONFIG is a path the renderer fails on, and said so"
+      (let [m (:message (sl/env-finding {"AGENT_STATUSLINE_CONFIG" ""} (sl/config-path {})))]
+        (is (str/includes? m "set but empty"))
+        (is (not (str/includes? m "reads  —")))))
     (testing "the renderer's own lookup: AGENT_STATUSLINE_CONFIG, then XDG as given"
       (is (= "/c.json" (sl/renderer-path {"AGENT_STATUSLINE_CONFIG" "/c.json" "XDG_CONFIG_HOME" "/x"})))
       (is (= "/agent-statusline/config.json" (sl/renderer-path {"XDG_CONFIG_HOME" ""})))
@@ -93,6 +111,22 @@
     (let [r (sl/check (sl/normalize {:bin (str u/home "/nowhere/agent-statusline")}))]
       (is (= :unknown (:status r)))
       (is (str/includes? (:message r) "not validated"))))
+  (testing "a binary that accepts anything is not a renderer that checks"
+    (let [yes (str u/home "/yes-agent-statusline")]
+      (spit yes "#!/bin/sh\nexit 0\n")
+      (fs/set-posix-file-permissions yes "rwxr-xr-x")
+      (let [r (sl/check (sl/normalize {:bin yes :defaults {:segments [:model]}}))]
+        (is (= :unknown (:status r)))
+        (is (str/includes? (:message r) "accepts a config with an unknown key")))))
+  (testing "one that hangs has timed out, which says nothing about --check"
+    (let [slow (str u/home "/slow-agent-statusline")]
+      (spit slow "#!/bin/sh\nsleep 5\n")
+      (fs/set-posix-file-permissions slow "rwxr-xr-x")
+      (binding [sl/*timeout-ms* 300]
+        (let [r (sl/check (sl/normalize {:bin slow :defaults {:segments [:context]}}))]
+          (is (= :unknown (:status r)))
+          (is (str/includes? (:message r) "timed out"))
+          (is (not (str/includes? (:message r) "does not implement")))))))
   (testing "a binary without --check rejects even {}: unknown, not invalid"
     (let [old (str u/home "/old-agent-statusline")]
       (spit old "#!/bin/sh\necho 'agent-statusline: UnknownArgument' >&2\nexit 1\n")
@@ -110,24 +144,74 @@
       (is (not-any? #(= [:statusline :config] (:where %)) structural)))
     (is (not-any? #(str/includes? (:message %) "unknown top-level key") structural))))
 
-(deftest a-null-override-previews-as-inheriting
+(deftest a-null-override-previews-as-a-field
   (let [target (sl/config-path)
         c (cfg {:bin stub :defaults {:color :auto} :agents {:cc {:color nil :context-style :full}}})
-        render #(plan/render-op (first (sl/plan-ops c state/empty-state {})) {})]
+        op #(first (sl/plan-ops c state/empty-state {}))
+        render #(plan/render-op (op) {})]
     (fs/delete-if-exists target)
     (binding [plan/*color* false]
-      (is (str/includes? (render) "+ color: null (inherit)"))
+      (testing "a key set to null is listed, as the plan spells null"
+        (is (str/includes? (render) "+ cc\n          + color: ∅")))
+      (testing "the data stays data: JSON gets null, not a label"
+        (let [after (:after (first (:diffs (op))))]
+          (is (contains? (get-in after ["agents" "cc"]) "color"))
+          (is (nil? (get-in after ["agents" "cc" "color"])))
+          (is (str/includes? (json/generate-string (:diffs (op))) "\"color\":null"))))
       (testing "an unchanged null is no change"
         (u/write-text! target (str/replace (get-in c [:statusline :text]) "\"full\"" "\"compact\""))
         (let [out (render)]
           (is (str/includes? out "context_style: \"compact\" -> \"full\""))
-          (is (not (str/includes? out "null"))))))
+          (is (not (str/includes? out "∅"))))))
     (fs/delete-if-exists target)))
+
+(deftest a-run-that-cannot-write-the-file-is-not-stopped-by-it
+  (let [c (cfg {:bin stub :defaults {:segments [:model :model]}})
+        level #(:level (first (filter (fn [f] (= [:statusline :config] (:where f))) (sl/findings c %))))]
+    (is (= :error (level {})))
+    (is (= :error (level {:kinds #{:statusline}})))
+    (is (= :error (level {:kinds #{:statusline} :tools #{:claude}})))
+    (is (= :warn (level {:tools #{:claude}})))
+    (is (= :warn (level {:kinds #{:mcps}})))
+    (is (= :warn (level {:projects #{:x}}))))
+  (testing "-k statusline plans it whatever -t says; a project scope never does"
+    (let [c (cfg {:bin stub :defaults {:color :never}})]
+      (is (seq (sl/plan-ops c state/empty-state {:kinds #{:statusline} :tools #{:claude}})))
+      (is (empty? (sl/plan-ops c state/empty-state {:projects #{:x}}))))))
+
+(deftest namespaces-are-kept-not-dropped
+  (is (= "x/auto" (get-in (:data (sl/normalize {:defaults {:color :x/auto}})) ["defaults" "color"])))
+  (is (= {"x/color" "auto"} (get (:data (sl/normalize {:defaults {:x/color :auto}})) "defaults"))))
+
+(deftest import-reads-the-file-back
+  (let [target (sl/config-path)
+        decl {:defaults {:segments [:model :context] :context-style :full :warning-percent 40}
+              :agents {:pi {:show-pacing false} :cc {:color nil}}}
+        text (:text (sl/normalize decl))]
+    (u/write-text! target text)
+    (testing "the declaration it implies writes the same bytes"
+      (is (= text (:text (sl/normalize (sl/scan))))))
+    (testing "so --replace keeps it, and the next apply! has nothing to delete"
+      (is (= text (:text (sl/normalize (:statusline (:config (imports/scan {:existing nil}))))))))
+    (fs/delete-if-exists target)
+    (is (nil? (sl/scan)))))
+
+(deftest a-claude-status-line-names-the-renderer
+  (let [c (config/parse-config
+           (pr-str {:executors {:claude {:status-line {:type "command"
+                                                       :command "\"~/tools/agent-statusline\" --agent cc"}}}
+                    :statusline {:defaults {}}})
+           (str u/home "/agents.edn"))]
+    (is (= (str u/home "/tools/agent-statusline") (#'sl/claude-renderer c))))
+  (is (nil? (#'sl/claude-renderer
+             (config/parse-config (pr-str {:executors {:claude {:status-line {:type "command" :command "my-line"}}}})
+                                  (str u/home "/agents.edn"))))))
 
 (deftest t-leaves-it-out-and-ownership-records-the-path
   (let [c (cfg {:bin stub :defaults {:color :never}})]
     (is (seq (sl/plan-ops c state/empty-state {})))
     (is (empty? (sl/plan-ops c state/empty-state {:tools #{:claude}})))
+    (is (empty? (sl/plan-ops c state/empty-state {:host :box})))
     (let [[[t k id data]] (sl/inventory c)]
       (is (= [:agentctl :statusline :config] [t k id]))
       (is (= (sl/config-path) (:path data)))

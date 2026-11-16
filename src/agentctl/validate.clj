@@ -412,7 +412,7 @@
         drift (try (filter plan/mutating? (core/build-plan cfg st opts))
                    (catch Exception e [{:error (ex-message e)}]))
         findings (concat (map #(assoc % :level (:level %)) (config/structural-findings cfg))
-                         (statusline/findings cfg)
+                         (statusline/findings cfg opts)
                          (check-clis cfg)
                          (check-packs cfg deep?)
                          (check-skills cfg)

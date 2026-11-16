@@ -62,6 +62,13 @@ done <<'CASES'
 :warning-percent 90 :critical-percent 50|InvalidThresholds
 CASES
 
+declare_sl '{:defaults {:segments [:model :model]}}'
+for narrow in "-t claude" "-k mcps"; do
+  plan $narrow
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "an invalid statusline stopped apply $narrow, which cannot write it"; }
+  has "this run does not write it" "apply $narrow does not mention the invalid statusline"
+done
+
 declare_sl '{:defaults {:context-style :full :context_style :compact}}'
 validate
 [ "$code" = 1 ] && has "keep one" "two EDN spellings of one JSON key were not refused"
@@ -77,8 +84,14 @@ has "+ statusline/config" "no create planned"
 has "write ~/.config/agent-statusline/config.json" "the target is not named"
 has "+ warning_percent: 50" "the create does not preview the JSON"
 has '+ segments: ["model" "context" "directory" "branch" "cost"]' "the pi override is not previewed"
-has "+ color: null (inherit)" "a null override previews as an empty agent"
+has "+ color: ∅" "a null override previews as an empty agent"
 [ ! -e "$FILE" ] || fail "apply (read-only) wrote the file"
+set +e; run apply -f "$CFG" --all --json > "$SB/plan.json" 2>/dev/null; set -e
+python3 - "$SB/plan.json" <<'PY' || fail "--json does not carry the null override as null"
+import json, sys
+ops = [o for o in json.load(open(sys.argv[1]))["ops"] if o["kind"] == "statusline"]
+assert ops[0]["diffs"][0]["after"]["agents"]["cc"] == {"color": None}, ops[0]["diffs"]
+PY
 
 apply
 [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "apply! failed"; }
@@ -103,9 +116,14 @@ declare_sl "${GOOD/:warning-percent 50/:warning-percent 60}"
 plan
 [ "$code" = 2 ] && has "~ statusline/config" "no update planned"
 has "warning_percent: 50 -> 60" "the update does not show the field diff"
-lacks "null (inherit)" "an unchanged null override reads as a change"
+lacks "∅" "an unchanged null override reads as a change"
 apply
 [ "$(json "$FILE" 'd["defaults"]["warning_percent"]')" = 60 ] || fail "the update was not written"
+
+# --- import reads the file back, so --replace does not drop it
+set +e; run import -f "$CFG" --replace > "$SB/out.txt" 2>&1; set -e
+has ":statusline" "import --replace dropped the status line"
+has ":context-style \"compact\"" "import did not read the file back in kebab-case"
 
 # --- a hand edit is drift
 python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['defaults']['color']='never'; json.dump(d, open(p,'w'))" "$FILE"
@@ -119,6 +137,8 @@ plan -k statusline
 [ "$code" = 2 ] && has "statusline/config" "-k statusline did not select it"
 plan -t claude
 lacks "statusline/config" "-t claude planned the shared file"
+plan -k statusline -t claude
+[ "$code" = 2 ] && has "statusline/config" "-k statusline -t claude hid a pending write"
 
 # --- dropping the declaration deletes the file agentctl owns, backed up
 echo '{}' > "$CFG"
@@ -162,6 +182,16 @@ validate
 lacks "✗ config" "an old renderer's refusal was taken as invalid"
 rm "$SB/bin/agent-statusline"
 
+# --- with none on PATH, the renderer a Claude :status-line command runs
+mkdir -p "$SB/tools"
+ln -s "$RENDERER" "$SB/tools/agent-statusline"
+cat > "$CFG" <<EDN
+{:executors {:claude {:status-line {:type "command" :command "\"$SB/tools/agent-statusline\" --agent cc"}}}
+ :statusline {:defaults {:segments [:model :model]}}}
+EDN
+validate
+has "DuplicateSegment" "the renderer a Claude :status-line command names was not used"
+
 # --- :bin and AGENT_STATUSLINE_BIN find a renderer that is not on PATH
 declare_sl "{:bin \"$RENDERER\" :defaults {:segments [:model :model]}}"
 validate
@@ -174,12 +204,25 @@ apply
 if grep -q '"bin"' "$FILE"; then fail ":bin was written into the JSON"; fi
 ln -s "$RENDERER" "$SB/bin/agent-statusline"
 
-# --- the renderer's lookup: XDG_CONFIG_HOME, and a pointer elsewhere
+# --- the target moves: XDG_CONFIG_HOME set over a file agentctl owns at ~/.config
 declare_sl "$GOOD"
+apply
+XFILE="$SB/xdg/agent-statusline/config.json"
+mkdir -p "$(dirname "$XFILE")"
+printf '{"defaults": {"color": "always"}}\n' > "$XFILE"
+set +e; XDG_CONFIG_HOME="$SB/xdg" run apply -f "$CFG" --all > "$SB/out.txt" 2>&1; code=$?; set -e
+[ "$code" = 2 ] && has "replaces a file agentctl did not write" "a hand-made file at the new target reads as agentctl's"
+has "moved to ~/xdg/agent-statusline/config.json" "the file owned at the old path is not removed"
+rm -rf "$SB/.config/agentctl/backups"
 set +e; XDG_CONFIG_HOME="$SB/xdg" run apply! -f "$CFG" --all -y > "$SB/out.txt" 2>&1; set -e
-[ -f "$SB/xdg/agent-statusline/config.json" ] || { cat "$SB/out.txt"; fail "XDG_CONFIG_HOME was not followed"; }
-set +e; XDG_CONFIG_HOME=/agentctl-test-outside run apply -f "$CFG" --all -v > "$SB/out.txt" 2>&1; set -e
-has "~/.config/agent-statusline/config.json" "an XDG base outside the sandbox was followed"
+grep -q '"segments"' "$XFILE" || { cat "$SB/out.txt"; fail "XDG_CONFIG_HOME was not followed"; }
+[ ! -e "$FILE" ] || fail "the file agentctl owned at the old path stayed behind"
+grep -q always "$SB/.config/agentctl/backups"/*/*xdg_agent-statusline_config.json \
+  || fail "the hand-made file at the new target was not backed up"
+# `..` does not climb out of the sandbox
+set +e; XDG_CONFIG_HOME="$SB/../agentctl-test-outside" run apply -f "$CFG" --all -v > "$SB/out.txt" 2>&1; set -e
+has "write ~/.config/agent-statusline/config.json" "an XDG base climbing out with .. was followed"
+lacks "write $(dirname "$SB")" "an XDG base climbing out with .. was written to"
 set +e; XDG_CONFIG_HOME=/agentctl-test-outside run validate -f "$CFG" > "$SB/out.txt" 2>&1; set -e
 has "reads /agentctl-test-outside/agent-statusline/config.json" "the renderer/agentctl path split is not reported"
 set +e; AGENT_STATUSLINE_CONFIG="$SB/other.json" run validate -f "$CFG" > "$SB/out.txt" 2>&1; set -e
@@ -187,8 +230,31 @@ has "! env" "AGENT_STATUSLINE_CONFIG pointing elsewhere is not a warning"
 # ownership remembers where the file went: dropping it removes the XDG copy
 echo '{}' > "$CFG"
 apply
-[ ! -e "$SB/xdg/agent-statusline/config.json" ] || fail "the file written under XDG was not removed"
-[ -f "$FILE" ] || fail "a file agentctl no longer owns was removed"
+[ ! -e "$XFILE" ] || fail "the file written under XDG was not removed"
+
+# --- a symlinked config.json: the link is replaced, the file behind it never written
+mkdir -p "$SB/dotfiles" "$(dirname "$FILE")"
+printf '{"defaults": {"color": "never"}}\n' > "$SB/dotfiles/sl.json"
+ln -s "$SB/dotfiles/sl.json" "$FILE"
+declare_sl "$GOOD"
+plan
+[ "$code" = 2 ] && has "replaces the symlink to ~/dotfiles/sl.json" "replacing a symlink is not said"
+rm -rf "$SB/.config/agentctl/backups"
+apply
+[ -L "$FILE" ] && fail "the symlink was written through, not replaced"
+grep -q '"segments"' "$FILE" || fail "the regular file was not written"
+[ "$(cat "$SB/dotfiles/sl.json")" = '{"defaults": {"color": "never"}}' ] || fail "the file behind the symlink was overwritten"
+BK=$(ls "$SB/.config/agentctl/backups"/*/*agent-statusline_config.json)
+[ -f "$BK" ] && [ ! -L "$BK" ] && grep -q never "$BK" || fail "the backup is not the linked content as a regular file"
+# an owned path that has become a symlink is left alone on removal
+rm "$FILE"
+ln -s "$SB/dotfiles/sl.json" "$FILE"
+echo '{}' > "$CFG"
+plan --show-noop
+has "is a symlink now" "an owned path turned symlink is not reported"
+apply
+[ -L "$FILE" ] || fail "a symlink at the owned path was removed"
+rm "$FILE"
 
 # --- awl reads the file only when built with -Dstatusline; nothing else says so
 declare_sl '{:defaults {:segments [:model :context]} :agents {:awl {:context-style :full}}}'

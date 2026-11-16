@@ -356,8 +356,9 @@ JSON file: `defaults` for every agent, plus overrides under `agents.cc`, `agents
 
 The EDN is the renderer's JSON with kebab-case keys, which agentctl turns back into the
 renderer's snake_case (`:context-style` is `context_style`). Keyword values are written as
-strings, and `nil` is JSON `null`, which in an agent's override means "inherit the default".
-The translation knows no option or value. A key agentctl has never heard of is written as
+strings, a namespaced keyword in full (`:x/auto` is `"x/auto"`), and `nil` is JSON `null`,
+which in an agent's override means "inherit the default"; the plan shows it as `∅`. The
+translation knows no option or value. A key agentctl has never heard of is written as
 given, and the renderer judges it, so new renderer options need no agentctl release. Two
 spellings that land on one JSON key (`:context-style` and `:context_style`) are a config
 error. `:bin` is agentctl's own and is not written. Each override lands under its own agent
@@ -367,27 +368,41 @@ only.
 temporary file and run `agent-statusline --check --config <tmp>`, which reads no stdin and
 runs no git. Exit 1 is a config error naming the renderer's diagnostic, such as
 `InvalidEnumTag`, `DuplicateSegment` or `InvalidThresholds`, and `apply` refuses to plan
-anything until it is fixed. The binary is `:bin`, else `AGENT_STATUSLINE_BIN`, else
-`agent-statusline` on `PATH`. When none is found, or the one found predates `--check` (it
-rejects even `{}`), `validate` reports `unknown`, and the planned write carries a
-"not validated" note. Neither case counts as a pass.
+anything until it is fixed. A run that cannot write the file (narrowed by `-t` or `-k` to
+other things, or to projects) gets the same finding as a warning instead. The binary is
+`:bin`, else `AGENT_STATUSLINE_BIN`, else `agent-statusline` on `PATH`, else the
+`agent-statusline` a declared Claude `:status-line` command runs by path. A binary
+implements `--check` only if it accepts `{}` and rejects a document with an unknown key
+with exit 1. When none is found, or the one found fails either probe (one that predates
+`--check` rejects everything, and something like `true` accepts everything), or it times out
+after 10 s, `validate` reports `unknown`, and the planned write carries a "not validated"
+note. None of these counts as a pass.
 
 **Where.** The renderer reads `--config`, else `AGENT_STATUSLINE_CONFIG`, else
 `$XDG_CONFIG_HOME/agent-statusline/config.json`, else `~/.config/agent-statusline/config.json`.
 agentctl writes the last two, which are the files the renderer finds without being told:
-`$XDG_CONFIG_HOME` when it is set to an absolute path, `~/.config` otherwise. Under
-`AGENTCTL_HOME`, an `XDG_CONFIG_HOME` outside that directory is ignored, so a scratch run
-never writes the real home. When the renderer, run in the current environment, would read
-another file (`AGENT_STATUSLINE_CONFIG` is set, or `XDG_CONFIG_HOME` is empty or relative),
-`validate` warns and names both paths.
+`$XDG_CONFIG_HOME` when it is set to an absolute path, `~/.config` otherwise, with `.` and
+`..` resolved. Under `AGENTCTL_HOME`, an `XDG_CONFIG_HOME` outside that directory, compared
+after resolving `..` and symlinked directories, is ignored, so a scratch run never writes
+the real home. When the renderer, run in the current environment, would read another file
+(`AGENT_STATUSLINE_CONFIG` is set, or `XDG_CONFIG_HOME` is empty or relative), `validate`
+warns and names both paths. An empty `AGENT_STATUSLINE_CONFIG` gets its own warning,
+because the renderer then fails to read any file.
 
 **Ownership.** `apply!` backs the file up before each write and records the path it wrote
-in `state.edn`. Removing `:statusline` deletes the file only if agentctl owns it, at the
-recorded path. A hand-made file is never deleted, and replacing it is flagged in the plan
-and backed up first. A file whose settings already match but whose layout differs is
-rewritten, because agentctl owns the bytes.
+in `state.edn`; ownership is of that path. Removing `:statusline` deletes the file only if
+agentctl owns it, at the recorded path. When the target moves (`XDG_CONFIG_HOME` changed),
+the file at the old path is removed and the one at the new path is treated as anyone's:
+replacing a file there is flagged and backed up first. A hand-made file is never deleted. A
+file whose settings already match but whose layout differs is rewritten, because agentctl
+owns the bytes. agentctl never writes through a symlink: a `config.json` that links into,
+say, a dotfiles checkout is backed up as the content it resolves to and replaced by a
+regular file, which the plan notes, and the linked file is left as it was. A symlink found
+at an owned path on removal is left in place. `import` reads an existing file back into
+`:statusline`, so `import! --replace` does not drop the declaration and with it the file.
 
-The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it.
+The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it,
+whatever `-t` says.
 A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
 well, as it does every user-wide resource; `--all` includes it. Codex does not read this
 file: its status line is a native setting, and the `codex` override only feeds the

@@ -109,9 +109,10 @@
 
 (defn- check-config!
   "Refuse a config with errors; say what is merely odd about one without.
-   `local` are findings about this machine, which a `--host` run leaves out."
-  [cfg & [local]]
-  (let [findings (concat (config/structural-findings cfg) local)
+   `findings` are the config's structural ones unless given: a local run
+   also checks what this machine says, once it knows its scope."
+  [cfg & [findings]]
+  (let [findings (or findings (config/structural-findings cfg))
         errors (filter #(= :error (:level %)) findings)]
     (when (seq errors)
       (println "config errors — refusing to plan:")
@@ -189,7 +190,7 @@
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
         st (state/load-state)]
-    (check-config! cfg (statusline/findings cfg))
+    (check-config! cfg)
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole
@@ -197,6 +198,9 @@
           scope (when-not (or (:all opts) (seq (:projects opts)))
                   (core/cwd-scope cfg (System/getProperty "user.dir")))
           opts (cond-> opts scope (assoc :projects (:projects scope)))
+          ;; this machine's verdict on the status-line file; a run that
+          ;; cannot write the file gets it as a warning
+          _ (check-config! cfg (vec (statusline/findings cfg opts)))
           ops (core/build-plan cfg st opts)
           cfg (assoc cfg :planned-ops ops)
           changes (filter plan/mutating? ops)]

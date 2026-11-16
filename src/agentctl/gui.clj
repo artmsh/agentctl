@@ -57,7 +57,7 @@
   (try
     (let [cfg (config/parse-config (buffer-text text) path)
           ;; the GUI plans this machine, so this machine's findings too
-          findings (concat (config/structural-findings cfg) (statusline/findings cfg))
+          findings (concat (config/structural-findings cfg) (statusline/findings cfg opts))
           errors (filter #(= :error (:level %)) findings)]
       (if (seq errors)
         {:ok false
