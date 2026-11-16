@@ -1110,7 +1110,18 @@
             (is (not (re-find #"(?m)^\s+[~+-] input:" out)) out)))
         (testing "and as data"
           (let [rows (mapcat :rows (mapcat :groups (plan/plan-data ops {})))]
-            (is (some #(= "presets.5.input" (:key %)) rows))))
+            (is (some #(= "presets.5.input" (:key %)) rows))
+            (is (some #(= "\"alt-t\"" (:after %)) rows) "a binding is no credential: shown")))
+        (is (str/includes? (plan/render-plan ops {}) "keymap.chat.open_presets: \"alt-t\""))
+        (testing "masking goes by the native key, never by the prefix"
+          (let [o {:action :update :tool :codex :kind :settings :id :x :target f
+                   :field-prefix "permission-profiles.token-dev"
+                   :diffs [{:key "extends" :before ":read-only" :after ":workspace"}
+                           {:key "api_key" :before "old-pass" :after "new-pass"}]}
+                out (plan/render-plan [o] {})]
+            (is (str/includes? out "permission-profiles.token-dev.extends: \":read-only\" -> \":workspace\"") out)
+            (is (str/includes? out "permission-profiles.token-dev.api_key") out)
+            (is (not (str/includes? out "new-pass")) out)))
         (is (= #{"input" "label"} (set (map :key (:diffs (first preset)))))
             "the diff keys stay native: ownership prunes by them")))))
 

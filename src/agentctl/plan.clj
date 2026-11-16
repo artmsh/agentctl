@@ -68,24 +68,36 @@
 
 (defn- plain-map? [v] (and (map? v) (not (refs/ref? v))))
 
+(defn- shown
+  "What a field is called in the plan: a prefixed field's label, else its key."
+  [k]
+  (if (map? k) (:label k) (u/kw->str k)))
+
+(defn- native-key
+  "The key a value is masked by — never the label, whose prefix (a profile
+   or a table name) says nothing about whether the value is a credential."
+  [k]
+  (if (map? k) (:key k) k))
+
 (defn- render-diff
   "One line per changed field, nested. Printing both sides of a map whole makes
    the reader diff it by eye — which is the job this output exists to do."
   [indent k b a]
-  (let [act (diff-action b a)]
+  (let [act (diff-action b a)
+        mk (native-key k)]
     (if (and (or (plain-map? b) (nil? b))
              (or (plain-map? a) (nil? a))
              (or (plain-map? b) (plain-map? a)))
-      (cons (colorize act (str indent (sigil act) " " (u/kw->str k)))
+      (cons (colorize act (str indent (sigil act) " " (shown k)))
             (mapcat (fn [{:keys [key before after]}]
                       (render-diff (str indent "  ") key before after))
                     (map-fields b a)))
       [(colorize act
-                 (str indent (sigil act) " " (u/kw->str k) ": "
+                 (str indent (sigil act) " " (shown k) ": "
                       (case act
-                        :create (render-val k a)
-                        :delete (render-val k b)
-                        (str (render-val k b) " -> " (render-val k a)))))])))
+                        :create (render-val mk a)
+                        :delete (render-val mk b)
+                        (str (render-val mk b) " -> " (render-val mk a)))))])))
 
 (defn changed? [before after ks] (boolean (seq (field-diffs before after ks))))
 
@@ -162,7 +174,7 @@
    of preset slot 5, which `input` alone does not say. The diff `:key` stays
    the native key: ownership records and prunes by it."
   [o k]
-  (if-let [p (:field-prefix o)] (str p "." (u/kw->str k)) k))
+  (if-let [p (:field-prefix o)] {:label (str p "." (u/kw->str k)) :key k} k))
 
 (defn render-op [o {:keys [verbose]}]
   (let [cmds (op-cmds o)
@@ -449,17 +461,18 @@
   "`render-diff`, as data. Same recursion into nested maps, same masking; the
    indent becomes a depth the table can indent by itself."
   [depth k b a]
-  (let [act (diff-action b a)]
+  (let [act (diff-action b a)
+        mk (native-key k)]
     (if (and (or (plain-map? b) (nil? b))
              (or (plain-map? a) (nil? a))
              (or (plain-map? b) (plain-map? a)))
-      (cons {:action (name act) :depth depth :key (u/kw->str k)}
+      (cons {:action (name act) :depth depth :key (shown k)}
             (mapcat (fn [{:keys [key before after]}]
                       (diff-rows (inc depth) key before after))
                     (map-fields b a)))
-      [{:action (name act) :depth depth :key (u/kw->str k)
-        :before (when-not (= :create act) (render-val k b))
-        :after (when-not (= :delete act) (render-val k a))}])))
+      [{:action (name act) :depth depth :key (shown k)
+        :before (when-not (= :create act) (render-val mk b))
+        :after (when-not (= :delete act) (render-val mk a))}])))
 
 (defn- op-rows
   "The rows one op contributes to its group. `label` qualifies a field with the
@@ -510,7 +523,7 @@
      :runs (vec (mapcat :runs ops))
      :cmds (vec (for [x ops, c (op-cmds x)]
                   (str/join " " (map (comp u/tilde str) (remove nil? (flatten c))))))
-     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (u/kw->str (prefixed % k))))) ops))}))
+     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (let [l (prefixed % k)] (if (map? l) l (u/kw->str l)))))) ops))}))
 
 (defn plan-data
   "`render-plan` as data: the same visibility rule, the same tool sections and
