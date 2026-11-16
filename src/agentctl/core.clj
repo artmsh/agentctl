@@ -17,6 +17,7 @@
             [agentctl.skills-cli :as skills-cli]
             [agentctl.sources :as sources]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [babashka.fs :as fs]
             [clojure.string :as str]))
@@ -390,6 +391,7 @@
                                                        tool-ops))
                 ;; after the user-wide installs they check for
                 (:ops dups)
+                (statusline/plan-ops cfg st opts)
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
@@ -419,6 +421,9 @@
    so it can never be mistaken for the user-wide server of the same name and
    pruned out from under a tool that still uses it."
   [cfg]
+  (concat
+   ;; the status-line file belongs to no CLI, so no executor selects it
+   (statusline/inventory cfg)
   (filter
    (comp (set (config/active-tools cfg)) first)
    (concat
@@ -467,7 +472,7 @@
      [t :extensions id {:root (:root e) :default-tools (vec (:default-tools e))}])
    (for [[id m] (:memory cfg) t (:tools m)] [t :memory id])
    (for [[id p] (:projects cfg) t (:for-tools p)]
-     [t :projects id {:entity-id id :project-id id :project-path (:path p)}]))))
+     [t :projects id {:entity-id id :project-id id :project-path (:path p)}])))))
 
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.

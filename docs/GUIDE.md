@@ -333,6 +333,66 @@ moves, `apply` plans a fetch, a hard reset and a rebuild, so local edits in
 the `defaultTools` entries it brought; the checkout stays as a cache.
 Extensions are user-wide, and `:in` does not apply to them.
 
+## Shared status line
+
+An external renderer, `agent-statusline`, draws the status line of several agents from one
+JSON file: `defaults` for every agent, plus overrides under `agents.cc`, `agents.codex`,
+`agents.awl` and `agents.pi`. `:statusline` declares that file, and agentctl writes it whole:
+
+```clojure
+{:statusline {:defaults {:segments [:model :limits :context :directory :branch]
+                         :separator " · "
+                         :color :auto
+                         :context-style :compact
+                         :short-model true
+                         :show-pacing true
+                         :warning-percent 50
+                         :critical-percent 80}
+              :agents {:pi {:segments [:model :context :directory :branch :cost]}
+                       :codex {:context-style :percent}
+                       :cc {:color nil}}
+              :bin "~/.local/bin/agent-statusline"}}
+```
+
+The EDN is the renderer's JSON with kebab-case keys, which agentctl turns back into the
+renderer's snake_case (`:context-style` is `context_style`). Keyword values are written as
+strings, and `nil` is JSON `null`, which in an agent's override means "inherit the default".
+The translation knows no option or value. A key agentctl has never heard of is written as
+given, and the renderer judges it, so new renderer options need no agentctl release. Two
+spellings that land on one JSON key (`:context-style` and `:context_style`) are a config
+error. `:bin` is agentctl's own and is not written. Each override lands under its own agent
+only.
+
+**Validation** is the renderer's. `validate` and `apply` write the candidate JSON to a
+temporary file and run `agent-statusline --check --config <tmp>`, which reads no stdin and
+runs no git. Exit 1 is a config error naming the renderer's diagnostic, such as
+`InvalidEnumTag`, `DuplicateSegment` or `InvalidThresholds`, and `apply` refuses to plan
+anything until it is fixed. The binary is `:bin`, else `AGENT_STATUSLINE_BIN`, else
+`agent-statusline` on `PATH`. When none is found, or the one found predates `--check` (it
+rejects even `{}`), `validate` reports `unknown`, and the planned write carries a
+"not validated" note. Neither case counts as a pass.
+
+**Where.** The renderer reads `--config`, else `AGENT_STATUSLINE_CONFIG`, else
+`$XDG_CONFIG_HOME/agent-statusline/config.json`, else `~/.config/agent-statusline/config.json`.
+agentctl writes the last two, which are the files the renderer finds without being told:
+`$XDG_CONFIG_HOME` when it is set to an absolute path, `~/.config` otherwise. Under
+`AGENTCTL_HOME`, an `XDG_CONFIG_HOME` outside that directory is ignored, so a scratch run
+never writes the real home. When the renderer, run in the current environment, would read
+another file (`AGENT_STATUSLINE_CONFIG` is set, or `XDG_CONFIG_HOME` is empty or relative),
+`validate` warns and names both paths.
+
+**Ownership.** `apply!` backs the file up before each write and records the path it wrote
+in `state.edn`. Removing `:statusline` deletes the file only if agentctl owns it, at the
+recorded path. A hand-made file is never deleted, and replacing it is flagged in the plan
+and backed up first. A file whose settings already match but whose layout differs is
+rewritten, because agentctl owns the bytes.
+
+The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it.
+A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
+well, as it does every user-wide resource; `--all` includes it. Codex does not read this
+file: its status line is a native setting, and the `codex` override only feeds the
+renderer's `--codex-config` preset.
+
 ## Claude plugins
 
 A Claude Code plugin bundles skills, subagents and hooks, and is installed

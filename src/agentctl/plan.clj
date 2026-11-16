@@ -151,7 +151,9 @@
         line (colorize (:action o) (head-line (:action o) o [(id-str (:id o))]))
         detail (when (and (:summary o) (not cmds)) (str "    " (:summary o)))
         note (when (:note o) (str "    " (:note o)))
-        diffs (when (or verbose (= :update (:action o)))
+        ;; `:preview` — an op whose diff *is* the change (a whole file
+        ;; written) shows it on create too, not only under -v
+        diffs (when (or verbose (= :update (:action o)) (:preview o))
                 (mapcat (fn [{:keys [key before after]}]
                           (render-diff "      " key before after))
                         (second (op-diffs o))))
