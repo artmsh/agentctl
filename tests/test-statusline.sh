@@ -309,4 +309,20 @@ for cmd in apply validate; do
   if [ -s "$STUB_LOG" ]; then cat "$STUB_LOG"; fail "$cmd --host ran the local renderer"; fi
 done
 
+# selectors: -k and --only name the file; --only on other kinds leaves it alone
+rm -f "$FILE"
+declare_sl '{:defaults {:segments [:model :context :model]}}'
+plan -k statusline
+[ "$code" = 1 ] && has "DuplicateSegment" "-k statusline did not check the file it plans"
+plan --only statusline/config
+[ "$code" = 1 ] && has "DuplicateSegment" "--only statusline/config did not check the file it plans"
+plan --only mcps/x
+[ "$code" != 1 ] || { cat "$SB/out.txt"; fail "--only mcps/x refused a run that cannot write the status-line file"; }
+has "DuplicateSegment" "--only mcps/x hid the invalid status line instead of warning"
+[ ! -e "$FILE" ] || fail "--only mcps/x touched the status-line file"
+declare_sl '{:defaults {:segments [:model :context]}}'
+plan --only statusline/config
+[ "$code" = 2 ] || { cat "$SB/out.txt"; fail "--only statusline/config planned no write"; }
+lacks "nothing declared or owned" "--only statusline/config was reported unmatched"
+
 echo "all statusline e2e checks passed"

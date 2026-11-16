@@ -230,7 +230,14 @@
     (is (not (sl/selected? {:only [[:mcps "x"]]})))
     (is (sl/selected? {:user true}) "user scope is where the file lives")
     (is (empty? (core/unmatched-only c state/empty-state {:only [[:statusline "config"]]}))
-        "its id names a file, not a declaration")))
+        "its id names a file, not a declaration")
+    (testing "a run narrowed to other entities neither forgets nor rewrites its ownership"
+      (let [st (core/sync-state! state/empty-state c)
+            gone (config/parse-config (pr-str {}) (str u/home "/agents.edn"))]
+        (is (state/managed? st :agentctl :statusline :config))
+        (is (state/managed? (core/sync-state! st gone #{} #{[:claude :skills :review]})
+                            :agentctl :statusline :config))
+        (is (not (state/managed? (core/sync-state! st gone) :agentctl :statusline :config)))))))
 
 (defn- write-bytes [path & parts]
   (with-open [o (java.io.FileOutputStream. (str path))]
