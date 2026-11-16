@@ -147,6 +147,13 @@
 
 (defn- op-cmds [o] (when-let [c (:cmds o)] (if (vector? (first c)) c [c])))
 
+(defn- prefixed
+  "A field's label under the op's `:field-prefix` — `presets.5` for a field
+   of preset slot 5, which `input` alone does not say. The diff `:key` stays
+   the native key: ownership records and prunes by it."
+  [o k]
+  (if-let [p (:field-prefix o)] (str p "." (u/kw->str k)) k))
+
 (defn render-op [o {:keys [verbose]}]
   (let [cmds (op-cmds o)
         line (colorize (:action o) (head-line (:action o) o [(id-str (:id o))]))
@@ -154,7 +161,7 @@
         note (when (:note o) (str "    " (:note o)))
         diffs (when (or verbose (= :update (:action o)))
                 (mapcat (fn [{:keys [key before after]}]
-                          (render-diff "      " key before after))
+                          (render-diff "      " (prefixed o key) before after))
                         (second (op-diffs o))))
         target (when (and verbose (:target o)) (str "    target: " (u/tilde (:target o))))]
     (str/join "\n" (remove nil? (concat [line detail note]
@@ -218,9 +225,10 @@
    header, and `type` alone would not say whose. An op contributing one field of
    its own naming (a settings key, a permissions bucket) already reads clearly."
   [o collapsed? ds]
-  (if (or collapsed? (> (count ds) 1))
-    #(str (name (:id o)) "." (u/kw->str %))
-    #(u/kw->str %)))
+  (cond
+    (:field-prefix o) #(prefixed o %)
+    (or collapsed? (> (count ds) 1)) #(str (name (:id o)) "." (u/kw->str %))
+    :else #(u/kw->str %)))
 
 (defn render-group [ops opts]
   (if (= 1 (count ops))
@@ -468,7 +476,7 @@
      :runs (vec (mapcat :runs ops))
      :cmds (vec (for [x ops, c (op-cmds x)]
                   (str/join " " (map (comp u/tilde str) (remove nil? (flatten c))))))
-     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (u/kw->str k)))) ops))}))
+     :rows (vec (mapcat #(op-rows % (when single? (fn [k] (u/kw->str (prefixed % k))))) ops))}))
 
 (defn plan-data
   "`render-plan` as data: the same visibility rule, the same tool sections and
@@ -703,7 +711,7 @@
 
 (defn toml-set-op
   "Set scalar keys inside a TOML table via surgical edit."
-  [{:keys [tool kind id file table kvs summary note risk project]}]
+  [{:keys [tool kind id file table kvs summary note risk project field-prefix]}]
   (let [current (toml/read-toml-lenient file)
         before (if (seq table) (get-in current (vec (map u/kw->str table))) current)
         diffs (field-diffs (into {} (map (fn [[k v]] [(u/kw->str k) v])) before)
@@ -716,6 +724,7 @@
            :summary summary
            :note note
            :diffs diffs
+           :field-prefix field-prefix
            :risk (or risk :low)
            :exec! (fn []
                     (u/backup! file)
@@ -727,13 +736,15 @@
    same tables survive. Every nested map is a table of its own: one the file
    holds inline (`domains = {…}`) is written into where it stands, entry by
    entry, and one it lacks gets a `[header]`. `id-for` names each table's op
-   from its path below `table`."
-  [{:keys [tool kind file table value summary project id-for]}]
+   from its path below `table`; `field-prefix` heads each field's label in
+   the plan."
+  [{:keys [tool kind file table value summary project id-for field-prefix]}]
   (let [walk (fn walk [path sub m]
                (let [kvs (into {} (keep (fn [[k v]] (when-not (map? v) [(u/key-str k) v]))) m)]
                  (cons (when (seq kvs)
                          (toml-set-op {:tool tool :kind kind :project project :id (id-for sub)
                                        :file file :table path :kvs kvs
+                                       :field-prefix (when field-prefix (str/join "." (cons field-prefix sub)))
                                        :summary (str summary (when (seq sub) (str " " (str/join "." sub))))}))
                        (mapcat (fn [[k v]] (walk (conj path (u/key-str k)) (conj sub (u/key-str k)) v))
                                (filter (comp map? val) m)))))]

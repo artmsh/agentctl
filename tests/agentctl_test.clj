@@ -1087,6 +1087,32 @@
             (is (= "hand-written" (get-in t ["tui" "presets" "7" "input"])))
             (is (empty? (codex-drift less st2)))))))))
 
+(deftest codex-plan-lines-name-the-table-a-field-is-in
+  (let [f (str (temp-dir) "/config.toml")
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b"
+                         :keymap {:chat {:open_presets "alt-t"}}
+                         :presets {5 {:input "/review"}}
+                         :sandbox "dev" :permission-profiles {:dev {:network {:domains {"example.test" "allow"}}}}}]}]
+    (u/write-text! f "model = \"m-a\"\n\n[tui.presets.5]\ninput = \"/status\"\nlabel = \"saved\"\n")
+    (with-redefs [codex/config-file f]
+      (let [ops (codex-drift raw state/empty-state)
+            preset (filter #(= :preset-5 (:id %)) ops)]
+        (testing "alone, an update shows its fields"
+          (let [out (plan/render-plan preset {})]
+            (is (str/includes? out "presets.5.input: \"/status\" -> \"/review\"") out)
+            (is (str/includes? out "presets.5.label") out)))
+        (testing "grouped with the rest of config.toml"
+          (let [out (plan/render-plan ops {})]
+            (is (str/includes? out "presets.5.input") out)
+            (is (str/includes? out "keymap.chat.open_presets") out)
+            (is (str/includes? out "permission-profiles.dev.network.domains.example.test") out)
+            (is (not (re-find #"(?m)^\s+[~+-] input:" out)) out)))
+        (testing "and as data"
+          (let [rows (mapcat :rows (mapcat :groups (plan/plan-data ops {})))]
+            (is (some #(= "presets.5.input" (:key %)) rows))))
+        (is (= #{"input" "label"} (set (map :key (:diffs (first preset)))))
+            "the diff keys stay native: ownership prunes by them")))))
+
 (deftest codex-preset-slot-is-owned-whole
   ;; Codex saves presets into the same slots; owning only `input` would leave
   ;; `[tui.presets.5] label = …` behind on a prune, and Codex then refuses

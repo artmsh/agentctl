@@ -90,6 +90,7 @@
                              :id (keyword "keymap" (u/kw->str context))
                              :file config-file :table ["tui" "keymap" (u/kw->str context)]
                              :kvs actions
+                             :field-prefix (str "keymap." (u/kw->str context))
                              :summary (str "codex keymap " (u/kw->str context))}))
         keymap))
 
@@ -153,6 +154,7 @@
       (plan/op {:action (if have :update :create) :tool tool :kind :settings
                 :id (keyword (str "preset-" n)) :target config-file :path table
                 :summary (str "codex preset " n) :diffs diffs :risk :low
+                :field-prefix (str "presets." n)
                 :exec! (fn []
                          (u/backup! config-file)
                          (toml/update-file! config-file #(toml/set-table % table want)))}))))
@@ -183,6 +185,7 @@
               (plan/toml-tree-ops {:tool tool :kind :settings :file file
                                    :table ["permissions" nm] :value (native p)
                                    :summary (str "codex permission profile " nm)
+                                   :field-prefix (str "permission-profiles." nm)
                                    :id-for #(op-id "profile-" (cons nm %))})))
           (sort-by (comp str key) profiles)))
 
