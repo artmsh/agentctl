@@ -179,7 +179,10 @@ longer plans it.
 carries a credential — a `!bw://` reference that resolves at apply time, or a
 token written out literally — puts that credential in the repo. The plan marks
 it `⚠ secret value written into the project`, and `validate` scans every
-project's `.mcp.json`.
+project's `.mcp.json`. In either project placement the plan, and `apply --json`,
+print a resolved env or header secret masked (`"plai…34"`, marked `(changed)`
+when a rotation masks the same), and every env or header value a change removes
+is masked as well.
 
 A server written at local scope that is *also* still declared in the project's
 `.mcp.json` is reported, not deleted — agentctl never wrote that file and will

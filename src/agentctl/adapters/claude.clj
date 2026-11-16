@@ -546,6 +546,30 @@
      :label "~/.claude.json (local scope)"
      :shared? false}))
 
+(defn- declared-secret-keys
+  "Names in a declared env or header map whose value is a credential."
+  [refs-map]
+  (common/secret-keys refs-map (into {} (map (fn [[k r]] [k (if (refs/ref? r) (:ref/raw r) r)])) refs-map)))
+
+(defn- mask-entry-diffs
+  "An MCP entry's diff as a plan may print it. The entry carries resolved
+   values, and rendering masks only a credential-shaped name or value, so a
+   secret under `DOCS_KEY` would print in clear — in the plan and in --json.
+   Values under a declared secret name are masked, and so is every value the
+   change removes: nothing needs to read a value that is going away."
+  [op env-ks header-ks]
+  (letfn [(mask [d k ks]
+            (let [b (get (:before d) k)
+                  a (get (:after d) k)
+                  gone (remove (set (map u/key-str (keys a))) (map u/key-str (keys b)))
+                  [b' a'] (common/mask-secrets b a (into ks gone))]
+              (cond-> d
+                (map? b) (assoc-in [:before k] b')
+                (map? a) (assoc-in [:after k] a'))))]
+    (cond-> op
+      (seq (:diffs op))
+      (update :diffs (partial mapv #(-> % (mask :env env-ks) (mask :headers header-ks)))))))
+
 (defn- project-mcp-writes [cfg id proj]
   (for [[mid m] (common/project-mcps cfg proj tool)
         :let [{:keys [file path shared?]} (project-mcp-target proj m mid)
@@ -557,16 +581,18 @@
               secret? (common/holds-secret? (merge (:env m) (:headers m)))
               op (if (seq issues)
                    (common/unresolved-op {:tool tool :kind :mcps :project id :id oid :target file} issues)
-                   (plan/json-set-op
-                    {:tool tool :kind :mcps :project id
-                     :id oid
-                     :file file
-                     :path path
-                     :value (mcp-json-entry m current env headers)
-                     :risk (if secret? :secret :low)
-                     :summary (common/mcp-summary m)
-                     :note (when (and secret? shared?)
-                             "⚠ secret value written into the project — .mcp.json is usually tracked")}))]
+                   (some-> (plan/json-set-op
+                            {:tool tool :kind :mcps :project id
+                             :id oid
+                             :file file
+                             :path path
+                             :value (mcp-json-entry m current env headers)
+                             :risk (if secret? :secret :low)
+                             :summary (common/mcp-summary m)
+                             :note (when (and secret? shared?)
+                                     "⚠ secret value written into the project — .mcp.json is usually tracked")})
+                           (mask-entry-diffs (declared-secret-keys (:env m))
+                                             (declared-secret-keys (:headers m)))))]
         :when op]
     op))
 

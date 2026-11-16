@@ -307,7 +307,7 @@ for scope in local project; do
   http $scope
   plan -k mcps
   [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "$scope: a transport change is not drift"; }
-  for line in '- command: "/bin/echo"' '- env' '- USER_VAR: "kept"' '~ type: "stdio" -> "http"' '+ url: "https://mcp.example.com/docs"'; do
+  for line in '- command: "/bin/echo"' '- env' '- USER_VAR: "********"' '~ type: "stdio" -> "http"' '+ url: "https://mcp.example.com/docs"'; do
     grep -qF -- "$line" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "$scope: the plan does not show '$line'"; }
   done
   grep -q "$SECRET" "$SB/plan.txt" && fail "$scope: the plan printed a resolved secret"
@@ -380,5 +380,47 @@ apply -k mcps
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "re-approval exited $code"; }
 [ "$(json "$LOCAL" "d['enabledMcpjsonServers']")" = "['handmade', 'docs', 'legacy', 'search']" ] \
   || { cat "$LOCAL"; fail "re-approval reordered or dropped entries"; }
+
+# ---------------------------------------------------------------- masking
+
+# a value with no vendor prefix under names that say nothing about a
+# credential: rendering alone would print it, so these steps see the masking
+PLAIN=plainvalue1234
+PLAIN2=plainother9934
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :mlocal :cmd "/bin/echo m" :env {"DOCS_KEY" "!bw://vendor/PLAIN"} :in "proj" :acli [:claude]}
+        {:id :mrepo :type :http :url "https://mcp.example.com/m" :headers {"x-docs" "!bw://vendor/PLAIN"} :in "proj" :at :repo :acli [:claude]}]}
+EDN
+vault '{"vendor": {"PLAIN": "'$PLAIN'"}}'
+
+echo "17. a resolved project MCP secret is masked in the plan and in --json"
+plan -k mcps
+set +e; run apply -f "$SB/agents.edn" --all -t claude -k mcps --json > "$SB/plan.json" 2>&1; set -e
+for f in plan.txt plan.json; do
+  grep -q "$PLAIN" "$SB/$f" && { cat "$SB/$f"; fail "$f printed a resolved project MCP secret"; }
+done
+grep -q '+ DOCS_KEY: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the local-scope env secret is not shown masked"; }
+grep -q '+ x-docs: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the .mcp.json header secret is not shown masked"; }
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "masked apply! exited $code"; }
+[ "$(json "$SB/proj/.mcp.json" "d['mcpServers']['mrepo']['headers']['x-docs']")" = "$PLAIN" ] || fail "masking changed what was written"
+
+echo "18. a rotated project MCP secret that masks the same shows as changed"
+vault '{"vendor": {"PLAIN": "'$PLAIN2'"}}'
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a rotated project MCP secret is not drift"; }
+grep -q 'DOCS_KEY: "plai…34" -> "plai…34 (changed)"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the rotation shows no change"; }
+grep -qE "$PLAIN|$PLAIN2" "$SB/plan.txt" && fail "the plan printed a rotated secret"
+apply -k mcps
+
+echo "19. a secret a transport change removes is masked too"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}
+        {:id :mrepo :type :http :url "https://mcp.example.com/m" :headers {"x-docs" "!bw://vendor/PLAIN"} :in "proj" :at :repo :acli [:claude]}]}
+EDN
+plan -k mcps
+grep -q -- '- DOCS_KEY: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the removed secret is not listed masked"; }
+grep -qE "$PLAIN|$PLAIN2" "$SB/plan.txt" && { cat "$SB/plan.txt"; fail "the plan printed a removed secret"; }
+apply -k mcps
 
 echo "all claude mcp e2e checks passed"
