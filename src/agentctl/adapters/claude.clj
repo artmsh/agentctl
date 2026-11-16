@@ -687,6 +687,8 @@
                                  ", the copy carries a credential"))}))
      (project-mcp-writes cfg st id proj))))
 
+(defn project-local-settings-file [proj] (str (:path proj) "/.claude/settings.local.json"))
+
 (defn- project-mcp-prune-ops
   "A project's server dropped from agents.edn. The user-wide prune loop skips a
    namespaced id on purpose — it would `claude mcp remove --scope user` the
@@ -694,7 +696,11 @@
    moving a server out of a project would leak it forever.
 
    Both scopes are checked because the entry may have been written under either
-   one, and a scope flip is indistinguishable from a removal in the manifest."
+   one, and a scope flip is indistinguishable from a removal in the manifest.
+
+   A `.mcp.json` server whose approval agentctl added (`:approved` in the
+   manifest, see `mcp-approval-op`) loses it too; one the user approved
+   before agentctl did keeps it."
   [cfg st]
   (let [desired (into #{} (for [[pid proj] (:projects cfg)
                                 :when (contains? (:for-tools proj) tool)
@@ -711,21 +717,29 @@
           ;; Version 2 state records the path even after the project declaration
           ;; disappears. Version 1 cannot recover a path it never stored.
           :when proj
-          [file path] (let [local [runtime-file [:projects (keyword (:path proj)) :mcpServers (keyword (name id))]]
-                            repo [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
-                        (case (:scope old) :local [local] :project [repo] [local repo]))
-          :let [op (plan/json-unset-op {:tool tool :kind :mcps :id id
-                                        :project (keyword (namespace id))
-                                        :file file :path path
-                                        :summary "removed from agents.edn"})]
-          :when op]
-      ;; the entry carries resolved secrets, and the declaration that named
-      ;; them is gone: print none of its env or header values
-      (update op :diffs (partial mapv (fn [d] (update d :before #(cond-> %
-                                                                    (:env %) (update :env common/mask-all)
-                                                                    (:headers %) (update :headers common/mask-all)))))))))
-
-(defn project-local-settings-file [proj] (str (:path proj) "/.claude/settings.local.json"))
+          op (concat
+              (for [[file path] (let [local [runtime-file [:projects (keyword (:path proj)) :mcpServers (keyword (name id))]]
+                                      repo [(project-mcp-file proj) [:mcpServers (keyword (name id))]]]
+                                  (case (:scope old) :local [local] :project [repo] [local repo]))
+                    :let [op (plan/json-unset-op {:tool tool :kind :mcps :id id
+                                                  :project (keyword (namespace id))
+                                                  :file file :path path
+                                                  :summary "removed from agents.edn"})]
+                    :when op]
+                ;; the entry carries resolved secrets, and the declaration that
+                ;; named them is gone: print none of its env or header values
+                (update op :diffs (partial mapv (fn [d] (update d :before #(cond-> %
+                                                                              (:env %) (update :env common/mask-all)
+                                                                              (:headers %) (update :headers common/mask-all)))))))
+              (when (and (:approved old) (= :project (:scope old)))
+                (some-> (plan/json-array-unset-op {:tool tool :kind :mcps :id id
+                                                   :project (keyword (namespace id))
+                                                   :file (project-local-settings-file proj)
+                                                   :path [:enabledMcpjsonServers]
+                                                   :old (name id)
+                                                   :summary "approval agentctl added, removed with the server"})
+                        vector)))]
+      op)))
 
 (defn- mcp-approval-op
   "Approve the project's `.mcp.json` servers, so Claude Code starts them
@@ -736,10 +750,13 @@
    `claude` run, so written there it came back as drift after every run.
 
    The list is shared with the user and with Claude Code's own approval
-   prompt, so declared servers are added to it and nothing is removed. It is
-   an MCP op, not a settings one: it belongs with the servers it approves,
-   and stays out of the settings ownership pass, which records keys a
-   declared setting owns.
+   prompt, so declared servers are added to it and nothing else is touched.
+   `:approves` names the servers this op adds: `core/sync-state!` marks them
+   `:approved` in the manifest, and `project-mcp-prune-ops` takes the name
+   out again when the server goes. A name already in the list was approved
+   by someone else, and stays. It is an MCP op, not a settings one: it
+   belongs with the servers it approves, and stays out of the settings
+   ownership pass, which records keys a declared setting owns.
 
    A server held back on an unresolved secret is not approved: nothing was
    written to `.mcp.json` for it, and an approval would start whatever entry
@@ -748,13 +765,14 @@
   (when-let [shared (not-empty (keys (filter (fn [[_ m]] (and (= :project (:scope m))
                                                               (empty? (:issues (resolve-mcp m)))))
                                              (common/project-mcps cfg proj tool))))]
-    (plan/json-union-op {:tool tool :kind :mcps :project id
-                         :id (keyword (name id) "enabledMcpjsonServers")
-                         :file (project-local-settings-file proj)
-                         :path [:enabledMcpjsonServers]
-                         :values (mapv u/kw->str (sort shared))
-                         :risk :medium
-                         :summary "approve the project's .mcp.json servers"})))
+    (when-let [op (plan/json-union-op {:tool tool :kind :mcps :project id
+                                       :id (keyword (name id) "enabledMcpjsonServers")
+                                       :file (project-local-settings-file proj)
+                                       :path [:enabledMcpjsonServers]
+                                       :values (mapv u/kw->str (sort shared))
+                                       :risk :medium
+                                       :summary "approve the project's .mcp.json servers"})]
+      (assoc op :approves (mapv #(keyword (name id) %) (:added op))))))
 
 (defn- project-ops-for [cfg id proj]
   (let [pfile (project-settings-file proj)

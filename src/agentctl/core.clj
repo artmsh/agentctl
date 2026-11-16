@@ -476,6 +476,31 @@
    (for [[id p] (:projects cfg) t (:for-tools p)]
      [t :projects id {:entity-id id :project-id id :project-path (:path p)}]))))
 
+(declare op-keys)
+
+(defn- mark-approvals
+  "A Claude `.mcp.json` server whose name agentctl added to the project's
+   `enabledMcpjsonServers` is marked `:approved`, so removing the server can
+   take the approval with it; a name that was there already is the user's,
+   and never marked. Recording rebuilds an entry from the declaration, so
+   the mark is carried over while the server stays at `:project` scope, and
+   set for the servers a completed approval op added (`:approves`)."
+  [s old cfg failed done]
+  (let [ok? (fn [o] (let [k (first (op-keys o))]
+                      (and (not (failed k)) (or (nil? done) (done k)))))
+        project? (fn [s k] (= :project (get-in s [:managed k :scope])))
+        s (reduce (fn [s [k e]]
+                    (cond-> s
+                      (and (:approved e) (= :project (:scope e)) (project? s k))
+                      (assoc-in [:managed k :approved] true)))
+                  s (:managed old))]
+    (reduce (fn [s o]
+              (reduce (fn [s id]
+                        (let [k (state/key-for :claude :mcps id)]
+                          (cond-> s (project? s k) (assoc-in [:managed k :approved] true))))
+                      s (when (ok? o) (:approves o))))
+            s (:planned-ops cfg))))
+
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.
    `failed` (tool kind id) triples are left unrecorded — claiming ownership of
@@ -517,6 +542,7 @@
                    (state/record s t k id (or (data-for t k id data) {})) s))
                $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)
+       (mark-approvals $ st cfg failed done)
        (ownership/record $ cfg failed done)))))
 
 ;; ---------------------------------------------------------------- apply

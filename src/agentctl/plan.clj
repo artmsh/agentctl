@@ -624,6 +624,9 @@
            :summary summary
            :note note
            :diffs [{:key (last path) :before current :after (into (vec current) missing)}]
+           ;; what this op puts in the array, for a caller that has to take it
+           ;; out again later — and only that: the rest was someone else's
+           :added missing
            :risk (or risk :low)
            ;; re-read at execution time: the tool rewrites this array itself,
            ;; and several ops may target one file in a single run

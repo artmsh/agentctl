@@ -170,12 +170,14 @@ warning rather than silently installing the server user-wide.
 A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
 the project's `.claude/settings.local.json`, the list Claude Code reads, so it
 starts without the approval prompt. Names already there, added by hand or by
-that prompt, are kept, and nothing is removed from the list. A server held
-back because a secret did not resolve is not approved either: nothing was
-written for it in `.mcp.json`. Older releases
-wrote the list under the project in `~/.claude.json`; Claude Code moves that
-copy into `settings.local.json` and deletes it on its next run, and agentctl no
-longer plans it.
+that prompt, are kept. A name agentctl added is removed again when its server is
+dropped or leaves `:project` scope; the manifest records which names those are,
+so a server the user had approved before agentctl declared it stays approved. A
+server held back because a secret did not resolve is not approved either:
+nothing was written for it in `.mcp.json`. Older releases wrote the list under
+the project in `~/.claude.json`; Claude Code moves that copy into
+`settings.local.json` and deletes it on its next run, and agentctl no longer
+plans it.
 
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` reference that resolves at apply time, or a

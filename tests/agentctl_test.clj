@@ -1975,6 +1975,7 @@
       (is (= :update (:action op)))
       (is (= [{:key :enabledMcpjsonServers :before ["handmade" "docs"] :after ["handmade" "docs" "search"]}]
              (:diffs op)))
+      (is (= ["search"] (:added op)) "only what the op adds is its own")
       (testing "the array is re-read when the op runs: an entry added since the plan survives"
         (u/write-json! f {:enabledMcpjsonServers ["handmade" "docs" "late"] :permissions {:allow ["Bash(ls)"]}})
         ((:exec! op))

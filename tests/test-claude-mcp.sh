@@ -789,4 +789,38 @@ PY
   [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "$scope: not converged after dropping a secret: exit $code"; }
 done
 
+echo "36. dropping a .mcp.json server removes the approval agentctl added, never one that was there"
+git init -q "$SB/proj2"
+L2="$SB/proj2/.claude/settings.local.json"
+mkdir -p "$SB/proj2/.claude"
+printf '{"enabledMcpjsonServers": ["handmade", "asearch"]}\n' > "$L2"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :adocs :cmd "/bin/echo adocs" :in "proj2" :at :repo :acli [:claude]}
+        {:id :asearch :cmd "/bin/echo asearch" :in "proj2" :at :repo :acli [:claude]}
+        {:id :aflip :cmd "/bin/echo aflip" :in "proj2" :at :repo :acli [:claude]}]}
+EDN
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "approval apply! exited $code"; }
+[ "$(json "$L2" "d['enabledMcpjsonServers']")" = "['handmade', 'asearch', 'adocs', 'aflip']" ] \
+  || { cat "$L2"; fail "the servers were not approved"; }
+# a no-op run must keep what agentctl added on record
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "converged apply! exited $code"; }
+# adocs and asearch dropped, aflip moved to local scope
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :aflip :cmd "/bin/echo aflip" :in "proj2" :acli [:claude]}]}
+EDN
+plan -k mcps
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "the dropped approvals are not drift: exit $code"; }
+for id in adocs aflip; do
+  grep -qF -- "- enabledMcpjsonServers: \"$id\"" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not remove the approval of $id"; }
+done
+grep -qF -- '- enabledMcpjsonServers: "asearch"' "$SB/plan.txt" && { cat "$SB/plan.txt"; fail "the plan removes an approval agentctl did not add"; }
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! removing approvals exited $code"; }
+[ "$(json "$L2" "d['enabledMcpjsonServers']")" = "['handmade', 'asearch']" ] \
+  || { cat "$L2"; fail "an approval agentctl added stayed, or one it did not add went"; }
+plan -k mcps
+[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after removing approvals: exit $code"; }
+
 echo "all claude mcp e2e checks passed"
