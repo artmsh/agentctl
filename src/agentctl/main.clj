@@ -8,6 +8,7 @@
             [agentctl.plan :as plan]
             [agentctl.remote :as remote]
             [agentctl.state :as state]
+            [agentctl.statusline :as statusline]
             [agentctl.util :as u]
             [agentctl.validate :as validate]
             [cheshire.core :as json]
@@ -107,9 +108,10 @@
        " (--all for the whole config)")))
 
 (defn- check-config!
-  "Refuse a config with errors; say what is merely odd about one without."
-  [cfg]
-  (let [findings (config/structural-findings cfg)
+  "Refuse a config with errors; say what is merely odd about one without.
+   `local` are findings about this machine, which a `--host` run leaves out."
+  [cfg & [local]]
+  (let [findings (concat (config/structural-findings cfg) local)
         errors (filter #(= :error (:level %)) findings)]
     (when (seq errors)
       (println "config errors — refusing to plan:")
@@ -187,7 +189,7 @@
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
         st (state/load-state)]
-    (check-config! cfg)
+    (check-config! cfg (statusline/findings cfg))
     (let [;; where the run happens is itself a scope: `apply` in a project asks
           ;; about that project, not about the machine. An explicit -p is the
           ;; same question asked by hand, and --all is the way to say the whole

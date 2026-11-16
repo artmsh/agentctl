@@ -391,7 +391,10 @@ The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` sel
 A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
 well, as it does every user-wide resource; `--all` includes it. Codex does not read this
 file: its status line is a native setting, and the `codex` override only feeds the
-renderer's `--codex-config` preset.
+renderer's `--codex-config` preset. A host is not provisioned with the file, so
+`apply --host` and `validate --host` neither run the local renderer nor report on it.
+Only a malformed `:statusline` (not a map, or two spellings of one key) stops them,
+as any config error does.
 
 ### awl
 

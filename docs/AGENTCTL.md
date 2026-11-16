@@ -863,6 +863,7 @@ that also stops `apply`. A missing renderer, or one without `--check`, is
 `unknown`, and a renderer that would read a different file in this environment
 is a `warn`. With an `:awl` override it also says whether the `awl` on `PATH`
 links the renderer (`ok`), does not (`warn`), or cannot be inspected (`warn`).
+All of this describes this machine, so `validate --host` leaves it out.
 
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers

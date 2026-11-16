@@ -77,6 +77,7 @@ has "+ statusline/config" "no create planned"
 has "write ~/.config/agent-statusline/config.json" "the target is not named"
 has "+ warning_percent: 50" "the create does not preview the JSON"
 has '+ segments: ["model" "context" "directory" "branch" "cost"]' "the pi override is not previewed"
+has "+ color: null (inherit)" "a null override previews as an empty agent"
 [ ! -e "$FILE" ] || fail "apply (read-only) wrote the file"
 
 apply
@@ -102,6 +103,7 @@ declare_sl "${GOOD/:warning-percent 50/:warning-percent 60}"
 plan
 [ "$code" = 2 ] && has "~ statusline/config" "no update planned"
 has "warning_percent: 50 -> 60" "the update does not show the field diff"
+lacks "null (inherit)" "an unchanged null override reads as a change"
 apply
 [ "$(json "$FILE" 'd["defaults"]["warning_percent"]')" = 60 ] || fail "the update was not written"
 
@@ -216,5 +218,29 @@ rm "$SB/bin/awl"
 declare_sl '{:defaults {:segments [:model :context]} :agents {:pi {:context-style :full}}}'
 validate
 lacks "awl" "a statusline without an awl override asked about awl"
+
+# --- --host: the file is this machine's; a host run neither checks nor mentions it
+export AGENTCTL_SSH_CMD="$ROOT/tests/ssh-stub"
+mkdir -p "$SB/far"
+HOSTCFG="$SB/host.edn"
+cat > "$HOSTCFG" <<EDN
+{:hosts {:box {:ssh "box" :os :linux :home "$SB/far"}}
+ :statusline {:defaults {:segments [:model :model]} :agents {:awl {:color :never}}}}
+EDN
+: > "$STUB_LOG"
+set +e; run validate -f "$HOSTCFG" > "$SB/out.txt" 2>&1; code=$?; set -e
+[ "$code" = 1 ] && has "DuplicateSegment" "fixture: the local run does not reject the config"
+[ -n "${AGENTCTL_TEST_STATUSLINE_BIN:-}" ] || [ -s "$STUB_LOG" ] || fail "fixture: the local run did not ask the renderer"
+for cmd in apply validate; do
+  : > "$STUB_LOG"
+  set +e; XDG_CONFIG_HOME= run "$cmd" -f "$HOSTCFG" --host box > "$SB/out.txt" 2>&1; code=$?; set -e
+  [ "$code" = 0 ] || { cat "$SB/out.txt"; fail "$cmd --host was refused or failed on a local-only statusline"; }
+  # the sandbox path itself contains "statusline": match the report's own words
+  lacks "STATUSLINE" "$cmd --host reported the local statusline"
+  lacks " statusline " "$cmd --host warned about the local statusline"
+  lacks "awl" "$cmd --host scanned the local awl"
+  lacks "renderer" "$cmd --host compared local paths"
+  if [ -s "$STUB_LOG" ]; then cat "$STUB_LOG"; fail "$cmd --host ran the local renderer"; fi
+done
 
 echo "all statusline e2e checks passed"

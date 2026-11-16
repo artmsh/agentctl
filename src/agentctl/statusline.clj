@@ -14,7 +14,8 @@
             [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.walk :as walk]))
 
 (def tool
   "The file belongs to no single CLI, so its ops are agentctl's own: `-t`
@@ -253,20 +254,29 @@
 (defn- finding [level where message]
   {:level level :where (into [:statusline] where) :message message})
 
-(defn findings
-  "What `validate` reports for `:statusline`, and what `apply` refuses on."
+(defn shape-findings
+  "What is wrong with `:statusline` as written, wherever agentctl runs: part
+   of the structural check every command makes, `--host` included."
   [cfg]
   (when-let [sl (:statusline cfg)]
     (if-let [problem (:problem sl)]
       [(finding :error [] problem)]
+      (for [{:keys [where keys]} (:clashes sl)]
+        (finding :error where (str (str/join " and " (map pr-str keys)) " both name `"
+                                   (last where) "` in the JSON — keep one"))))))
+
+(defn findings
+  "What this machine says about `:statusline`: the renderer's verdict, the
+   file the renderer would read here, and awl's build. Local runs only — a
+   host is not provisioned with the file, and none of this describes it.
+   `validate` reports these, and `apply` refuses on an error among them."
+  [cfg]
+  (let [sl (:statusline cfg)]
+    (when (and sl (not (:problem sl)) (not (:clashes sl)))
       (concat
-       (for [{:keys [where keys]} (:clashes sl)]
-         (finding :error where (str (str/join " and " (map pr-str keys)) " both name `"
-                                    (last where) "` in the JSON — keep one")))
-       (when-not (:clashes sl)
-         (let [{:keys [status message]} (check sl)]
-           [(finding (case status :ok :ok :invalid :error :unknown) [:config]
-                     (if (= :invalid status) (str message " — nothing is written") message))]))
+       (let [{:keys [status message]} (check sl)]
+         [(finding (case status :ok :ok :invalid :error :unknown) [:config]
+                   (if (= :invalid status) (str message " — nothing is written") message))])
        (let [writes (config-path) reads (renderer-path)]
          (when (not= (u/abs-path reads) writes)
            [(finding :warn [:env]
@@ -283,6 +293,17 @@
 
 (defn- parse [text]
   (try (json/parse-string text) (catch Exception _ ::unparseable)))
+
+(def ^:private inherit
+  "How a `null` reads in the plan. In an agent's override it is the way to say
+   \"inherit the default\", and the generic diff drops a nil that has nothing to
+   differ from — the override would preview as an empty agent."
+  (symbol "null (inherit)"))
+
+(defn- shown
+  "`m` as the plan shows it: every null value spelled out."
+  [m]
+  (walk/postwalk (fn [x] (if (map? x) (into (empty x) (map (fn [[k v]] [k (if (nil? v) inherit v)])) x) x)) m))
 
 (defn- write-op [sl owned]
   (let [target (config-path)
@@ -312,7 +333,7 @@
                   :note (when (seq notes) (str/join "; " notes))
                   ;; a whole file is the change: show it on create too
                   :preview true
-                  :diffs [{:key id :before (when (map? before) before) :after (:data sl)}]
+                  :diffs [{:key id :before (when (map? before) (shown before)) :after (shown (:data sl))}]
                   :risk (if (and exists? (not owned)) :medium :low)
                   :exec! (fn []
                            (u/backup! target)

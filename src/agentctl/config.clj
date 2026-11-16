@@ -790,7 +790,7 @@
     (concat
      (:load-findings cfg)
      (host-findings cfg)
-     (statusline/findings cfg)
+     (statusline/shape-findings cfg)
      (for [{:keys [kind id decl]} (:entities cfg) :when (contains? decl :scope)]
        (finding :warn [kind id :scope] ":scope is deprecated; use :at :machine or :repo"))
      (for [{:keys [kind id in targets]} (:entities cfg)

@@ -5,6 +5,7 @@
   (:require [agentctl.config :as config]
             [agentctl.core :as core]
             [agentctl.imports :as imports]
+            [agentctl.plan :as plan]
             [agentctl.state :as state]
             [agentctl.statusline :as sl]
             [agentctl.util :as u]
@@ -101,10 +102,27 @@
         (is (str/includes? (:message r) "does not implement --check"))))))
 
 (deftest findings-sit-in-their-own-section
-  (let [fs (config/structural-findings (cfg {:bin stub :defaults {:warning-percent 90 :critical-percent 50}}))]
+  (let [c (cfg {:bin stub :defaults {:warning-percent 90 :critical-percent 50}})
+        structural (config/structural-findings c)]
     (is (some #(and (= [:statusline :config] (:where %)) (= :error (:level %))
-                    (str/includes? (:message %) "InvalidThresholds")) fs))
-    (is (not-any? #(str/includes? (:message %) "unknown top-level key") fs))))
+                    (str/includes? (:message %) "InvalidThresholds")) (sl/findings c)))
+    (testing "the renderer's verdict is about this machine, not part of the structural check"
+      (is (not-any? #(= [:statusline :config] (:where %)) structural)))
+    (is (not-any? #(str/includes? (:message %) "unknown top-level key") structural))))
+
+(deftest a-null-override-previews-as-inheriting
+  (let [target (sl/config-path)
+        c (cfg {:bin stub :defaults {:color :auto} :agents {:cc {:color nil :context-style :full}}})
+        render #(plan/render-op (first (sl/plan-ops c state/empty-state {})) {})]
+    (fs/delete-if-exists target)
+    (binding [plan/*color* false]
+      (is (str/includes? (render) "+ color: null (inherit)"))
+      (testing "an unchanged null is no change"
+        (u/write-text! target (str/replace (get-in c [:statusline :text]) "\"full\"" "\"compact\""))
+        (let [out (render)]
+          (is (str/includes? out "context_style: \"compact\" -> \"full\""))
+          (is (not (str/includes? out "null"))))))
+    (fs/delete-if-exists target)))
 
 (deftest t-leaves-it-out-and-ownership-records-the-path
   (let [c (cfg {:bin stub :defaults {:color :never}})]
