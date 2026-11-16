@@ -6,6 +6,7 @@
             [agentctl.adapters.dsh :as dsh]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
+            [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
             [agentctl.core :as core]
@@ -1257,6 +1258,38 @@
     (testing "the summary counts it apart from what is unchanged"
       (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
              (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
+
+(deftest every-adapter-holds-back-what-an-unresolved-secret-would-leave-partial
+  ;; a locked vault: every ref below stays unresolved, and `bw` never runs
+  (let [ref "!bw://vendor/KEY"
+        cfg (fn [tool]
+              (config/normalize
+               {:mcps {:docs {:command "/bin/echo" :env {"TOKEN" ref "MODE" "fast"} :tools [tool]}
+                       :web {:url "https://mcp.example.com/w" :headers {"x-key" ref} :tools [tool]}}
+                :extra-providers {:gw {:url "https://api.example.com/v1" :api "openai-completions"
+                                       :key ref :models ["m1"] :tools [tool]}}}
+               "x"))
+        held (fn [ops id] (first (filter #(= id (:id %)) ops)))
+        held? (fn [ops id]
+                (let [o (held ops id)]
+                  (and (:unresolved o) (nil? (:exec! o))
+                       (= [o] (filter #(= id (:id %)) ops))
+                       (str/includes? (:summary o) "bitwarden vault locked"))))]
+    (reset! @#'refs/cache {})
+    (with-redefs [refs/bw-state (delay :locked)
+                  codex/mcp-list (fn [] {})]
+      (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs]]
+                              [:omp omp/mcp-ops [:docs]]
+                              [:antigravity antigravity/mcp-ops [:docs :web]]
+                              [:kimi kimi/mcp-ops [:docs :web]]
+                              [:codex codex/mcp-ops [:docs :web]]]
+              id ids]
+        (testing (str (name tool) " MCP server " (name id))
+          (is (held? (ops (cfg tool) state/empty-state) id))))
+      (doseq [[tool ops] [[:pi pi/provider-ops] [:omp omp/provider-ops] [:kimi kimi/provider-ops]]]
+        (testing (str (name tool) " provider key")
+          (is (held? (ops (cfg tool)) :gw)))))
+    (reset! @#'refs/cache {})))
 
 (deftest a-secret-env-value-is-masked-and-a-rotation-still-shows
   (let [ks (common/secret-keys {"X" (refs/parse "!bw://vendor/KEY") "MODE" (refs/parse "fast")}

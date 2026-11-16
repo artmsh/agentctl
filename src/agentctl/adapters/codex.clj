@@ -135,12 +135,14 @@
                  cur (get current name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
                  want (mcp-desired-shape m (:values headers))
                  have (some-> cur mcp-current-shape)]
-           :when (or (seq (:issues headers)) (not= (u/norm want) (u/norm have)))]
-       (if (seq (:issues headers))
-         (plan/op {:tool tool :kind :mcps :id id :warn true
-                   :summary "HTTP header reference unresolved — existing server left untouched"})
+           ;; an unresolved env or header ref holds the server back: written
+           ;; without it, it would run and authenticate nothing
+           :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
+       (if (seq issues)
+         (common/unresolved-op {:tool tool :kind :mcps :id id :target config-file} issues)
          (plan/op {:action (if cur :update :create)
                  :tool tool :kind :mcps :id id
                  :target config-file
@@ -223,14 +225,13 @@
                  id (keyword (name pid) name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
-                 issues (concat (:issues env) (:issues headers))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers))
                  have (get servers name*)
                  want (project-mcp-table m (:values env) (:values headers))
                  secret? (common/holds-secret? (merge (:env m) (:headers m)))]
            :when (or (seq issues) (not= (u/norm want) (u/norm have)))]
        (if (seq issues)
-         (plan/op {:tool tool :kind :mcps :project pid :id id :warn true
-                   :summary "env or header reference unresolved — existing server left untouched"})
+         (common/unresolved-op {:tool tool :kind :mcps :project pid :id id :target file} issues)
          (plan/op {:action (if have :update :create)
                    :tool tool :kind :mcps :project pid :id id
                    :target file

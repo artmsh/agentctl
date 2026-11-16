@@ -43,6 +43,29 @@
   [where resolved]
   (map #(assoc % :where where) (:issues resolved)))
 
+(declare declared-models)
+
+(defn ref-issues
+  "Every ref that did not resolve, tagged with where it sits: `places` maps
+   a label (`env`, `headers`, `provider`) to an env-like map of refs."
+  [places]
+  (mapcat (fn [[where m]] (issues-in where (resolve-env m))) places))
+
+(defn mcp-issues
+  "A server's unresolved env and header refs."
+  [m]
+  (ref-issues [["env" (:env m)] ["headers" (:headers m)]]))
+
+(defn provider-issues
+  "A provider's unresolved refs: its key, unless `key?` is false (a key the
+   tool reads from the environment itself), its headers, and each declared
+   model's headers."
+  [p key?]
+  (ref-issues (concat [["provider" (when (and key? (:key p)) {"key" (:key p)})]
+                       ["headers" (:headers p)]]
+                      (for [m (declared-models p)]
+                        [(str "models." (u/kw->str (:id m)) ".headers") (:headers m)]))))
+
 (defn- unresolved-reason
   "`bitwarden vault locked (headers.api-key)`: the resolver's message and the
    key names it applies to. Names only — a value never reaches this line."

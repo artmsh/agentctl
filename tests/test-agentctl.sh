@@ -348,7 +348,13 @@ set +e
 # user-wide kinds are expected to come back converged
 run apply -f "$SB/imported15.edn" -t antigravity -k settings -k mcps -k memory > "$SB/plan15b.txt"; code=$?
 set -e
-[ "$code" = 0 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config should already be converged"; }
+# the redacted header is a placeholder the vault does not hold yet: the server
+# is held back on it, and nothing else differs
+[ "$code" = 2 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config: expected the placeholder held back, got exit $code"; }
+grep -q "0 to add, 0 to change, 0 to remove, .*1 unresolved" "$SB/plan15b.txt" \
+  || { cat "$SB/plan15b.txt"; fail "imported antigravity config should otherwise be converged"; }
+grep -q "secret unresolved: .*(headers.Authorization)" "$SB/plan15b.txt" \
+  || { cat "$SB/plan15b.txt"; fail "the unresolved placeholder is not named"; }
 
 echo "15b. kimi converges, and its own spellings are written the way kimi reads them"
 mkdir -p "$SB/kproj" "$SB/packs/demo/skills/local-skill"
