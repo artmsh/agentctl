@@ -491,6 +491,17 @@
              o))
          ops)))
 
+(defn- drop-moot-collisions
+  "Pi's report that it loads a project copy in place of a user-wide skill,
+   left out where this plan removes that copy. It runs after every filter and
+   after `defer-unmet-removals`, so a removal that will not happen leaves the
+   report standing."
+  [ops]
+  (let [removed (set (for [o ops
+                           :when (and (plan/mutating? o) (= :delete (:action o)) (:target o))]
+                       (sources/leaf-path (:target o))))]
+    (remove #(and (:collision %) (removed (sources/leaf-path (:target %)))) ops)))
+
 (defn- skill-readers
   "The agents that read project `p`'s shared `.agents/skills`: those placed
    there, pi unless it never reads the project's skills. A copy there is
@@ -557,6 +568,7 @@
         (keep-only cfg opts)
         (keep-user opts)
         defer-unmet-removals
+        drop-moot-collisions
         (->> (annotate-skill-ops cfg))
         same-command
         vec)))

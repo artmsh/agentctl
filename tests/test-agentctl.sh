@@ -1743,4 +1743,25 @@ EDN
   run apply -f "$H/agents.edn" --all -t pi -t codex > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-order: not converged"; }
 )
 
+echo "39. pi's collision is not reported for a copy the same plan removes"
+(
+  H=$(fresh_home moot-collision); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex :pi]}}
+ :trust [{:in "projects/game" :acli [:pi]}]}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q "remove wrap-up -y" "$H/plan.txt" && ! grep -q 'pi loads' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a collision is reported for the copy the plan removes"; }
+)
+
 echo "all agentctl e2e checks passed"
