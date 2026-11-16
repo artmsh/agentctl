@@ -183,8 +183,9 @@ token written out literally — puts that credential in the repo. The plan marks
 it `⚠ secret value written into the project`, and `validate` scans every
 project's `.mcp.json`. In either project placement the plan, and `apply --json`,
 print a resolved env or header secret masked (`"plai…34"`, marked `(changed)`
-when a rotation masks the same), and every env or header value a change removes
-is masked as well.
+when a rotation masks the same), and so is every old env or header value a change
+replaces or removes, whatever the new declaration says: it may have come from a
+reference the declaration no longer makes.
 
 A server written at local scope that is *also* still declared in the project's
 `.mcp.json` is reported, not deleted — agentctl never wrote that file and will
@@ -231,8 +232,10 @@ value:
 The resolved value is what lands in `settings.json`, so the plan flags the op
 `⚠ secret value written into the project` (or into `~/.claude/settings.json`)
 and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
-same on both sides is marked `(changed)`. A project's `.claude/settings.json` is
-usually committed; `.claude/settings.local.json` is the private one.
+same on both sides is marked `(changed)`. An old value that a change replaces
+or drops is masked too, even when the new value is a plain literal. A project's
+`.claude/settings.json` is usually committed; `.claude/settings.local.json` is
+the private one.
 
 When a reference does not resolve — the vault is locked, the variable is unset,
 the Bitwarden field is empty or holds the text `null`, the reference is

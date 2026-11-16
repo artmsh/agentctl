@@ -140,20 +140,30 @@
         refs))
 
 (defn mask-secrets
-  "`[before after]` env maps as a plan may print them, the value under each
-   name in `ks` masked. A plan carries resolved values, and a name that says
-   nothing about a credential (`X`, `DOCS_KEY`) is not masked by rendering. A
-   value that changed but masks the same on both sides is marked changed, or
-   a rotated secret would show no change at all."
+  "`[before after]` env maps as a plan may print them. A plan carries resolved
+   values, and a name that says nothing about a credential (`X`, `DOCS_KEY`)
+   is not masked by rendering, so the value under each name in `ks` — the
+   secrets the declaration names now — is masked on both sides.
+
+   The before side is masked as well wherever the value changes or goes
+   away. What it held may have come from a ref the declaration no longer
+   makes, and nothing on disk says which — dropping a secret, or replacing
+   it with a literal, would otherwise print it. A value that changed but
+   masks the same on both sides is marked changed, or a rotated secret
+   would show no change at all."
   [before after ks]
-  (let [masked (fn [m] (when (map? m)
-                         (into {} (map (fn [[k v]] (let [k (u/key-str k)]
-                                                     [k (if (ks k) (refs/mask v) v)])))
-                               m)))
-        b (masked before)
-        a (masked after)
+  (let [ks (set ks)
         raw-b (u/norm before)
-        raw-a (u/norm after)]
+        raw-a (u/norm after)
+        changed (into #{} (keep (fn [[k v]] (let [k (u/key-str k)]
+                                              (when (not= v (get raw-a k)) k))))
+                      raw-b)
+        masked (fn [m ks] (when (map? m)
+                            (into {} (map (fn [[k v]] (let [k (u/key-str k)]
+                                                        [k (if (ks k) (refs/mask v) v)])))
+                                  m)))
+        b (masked before (into ks changed))
+        a (masked after ks)]
     [b (when a
          (into {} (map (fn [[k v]] [k (if (and (ks k) (= v (get b k))
                                                (not= (get raw-b k) (get raw-a k)))

@@ -1263,8 +1263,13 @@
       (is (= [{"X" "sk-t…ef"} {"X" "sk-t…ef (changed)"}]
              (common/mask-secrets {:X "sk-test-0123456789abcdef"} {"X" "sk-test-9999999999abcdef"} ks))))
     (testing "an unchanged value is not"
-      (is (= [{"X" "********" "MODE" "fast"} {"X" "********" "MODE" "slow"}]
-             (common/mask-secrets {:X "s3cret" :MODE "fast"} {"X" "s3cret" "MODE" "slow"} ks))))))
+      (is (= [{"X" "********" "MODE" "fast"} {"X" "********" "MODE" "fast"}]
+             (common/mask-secrets {:X "s3cret" :MODE "fast"} {"X" "s3cret" "MODE" "fast"} ks))))
+    (testing "a value a change replaces or removes is masked whatever the new declaration says"
+      ;; what it held may have come from a ref the declaration no longer makes
+      (is (= [{"DOCS_KEY" "plai…34" "OLD" "plai…99"} {"DOCS_KEY" "literal-new"}]
+             (common/mask-secrets {:DOCS_KEY "plainvalue1234" :OLD "plainother99"}
+                                  {"DOCS_KEY" "literal-new"} #{}))))))
 
 (defn- mcp-op [id action diffs]
   (plan/op {:action action :tool :claude :kind :mcps :project :example

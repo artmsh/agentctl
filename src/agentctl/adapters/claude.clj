@@ -587,13 +587,12 @@
    values, and rendering masks only a credential-shaped name or value, so a
    secret under `DOCS_KEY` would print in clear — in the plan and in --json.
    Values under a declared secret name are masked, and so is every value the
-   change removes: nothing needs to read a value that is going away."
+   change replaces or removes (`common/mask-secrets`)."
   [op env-ks header-ks]
   (letfn [(mask [d k ks]
             (let [b (get (:before d) k)
                   a (get (:after d) k)
-                  gone (remove (set (map u/key-str (keys a))) (map u/key-str (keys b)))
-                  [b' a'] (common/mask-secrets b a (into ks gone))]
+                  [b' a'] (common/mask-secrets b a ks)]
               (cond-> d
                 (map? b) (assoc-in [:before k] b')
                 (map? a) (assoc-in [:after k] a'))))]

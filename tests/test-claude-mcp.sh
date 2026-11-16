@@ -565,4 +565,64 @@ validate
 grep -qE "✗ (hdocs|claude|~/proj)" "$SB/validate.txt" && { cat "$SB/validate.txt"; fail "a resolved ref is still reported"; }
 grep -q "$SECRET" "$SB/validate.txt" && fail "validate printed a resolved secret"
 
+# ---------------------------------------------------------------- old values
+
+outputs() { # outputs <kind>: the plan as apply prints it, verbose, --json and from the gui
+  set +e
+  run apply -f "$SB/agents.edn" --all -t claude -k "$1" > "$SB/plain.txt" 2>&1
+  run apply -f "$SB/agents.edn" --all -t claude -k "$1" --json > "$SB/plan.json" 2>&1
+  set -e
+  plan -k "$1"
+  gui plan "$1" > "$SB/gui.out"
+}
+leaks() { # leaks <value>: fail when any plan output, or apply!'s, carries it
+  for f in plain.txt plan.txt plan.json gui.out apply.txt; do
+    grep -q "$1" "$SB/$f" && { cat "$SB/$f"; fail "$f printed a value it replaced: $1"; }
+  done
+  return 0
+}
+
+echo "26. a settings env secret a change drops or replaces prints masked, at user and project level"
+cat > "$SB/agents.edn" <<EDN
+{:settings [{:env {"DOCS_KEY" "!bw://m2/KEY" "MODE" "fast"} :acli [:claude] :in :all}
+            {:env {"DOCS_KEY" "!bw://m2/KEY" "MODE" "fast"} :acli [:claude] :in "proj"}]}
+EDN
+vault '{"m2": {"KEY": "'$PLAIN'"}}'
+apply -k settings
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "settings env apply! exited $code"; }
+# dropped at user level, a literal now at project level
+cat > "$SB/agents.edn" <<EDN
+{:settings [{:env {"MODE" "fast"} :acli [:claude] :in :all}
+            {:env {"DOCS_KEY" "literal-new" "MODE" "fast"} :acli [:claude] :in "proj"}]}
+EDN
+outputs settings
+grep -qF -- '- DOCS_KEY: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the dropped secret is not listed masked"; }
+grep -qF -- '~ DOCS_KEY: "plai…34" -> "literal-new"' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the secret a literal replaces is not shown masked"; }
+grep -qF 'plai…34' "$SB/gui.out" || { cat "$SB/gui.out"; fail "the gui plan does not show the change"; }
+apply -k settings
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "settings env apply! exited $code"; }
+leaks "$PLAIN"
+[ "$(json "$SB/proj/.claude/settings.json" "d['env']['DOCS_KEY']")" = literal-new ] || fail "the literal was not written"
+
+echo "27. a project MCP secret a literal replaces prints masked, in either placement"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :m3l :cmd "/bin/echo m" :env {"DOCS_KEY" "!bw://m3/KEY" "MODE" "fast"} :in "proj" :acli [:claude]}
+        {:id :m3r :type :http :url "https://mcp.example.com/m3" :headers {"x-docs" "!bw://m3/KEY" "x-mode" "fast"} :in "proj" :at :repo :acli [:claude]}]}
+EDN
+vault '{"m3": {"KEY": "'$PLAIN'"}}'
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "project MCP apply! exited $code"; }
+sed -i.bak 's|"!bw://m3/KEY"|"literal-new"|g' "$SB/agents.edn"
+outputs mcps
+grep -qF -- '~ DOCS_KEY: "plai…34" -> "literal-new"' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the local-scope secret a literal replaces is not shown masked"; }
+grep -qF -- '~ x-docs: "plai…34" -> "literal-new"' "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the .mcp.json secret a literal replaces is not shown masked"; }
+grep -qF 'plai…34' "$SB/gui.out" || { cat "$SB/gui.out"; fail "the gui plan does not show the change"; }
+apply -k mcps
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "project MCP apply! exited $code"; }
+leaks "$PLAIN"
+[ "$(json "$SB/proj/.mcp.json" "d['mcpServers']['m3r']['headers']['x-docs']")" = literal-new ] || fail "the literal was not written"
+
 echo "all claude mcp e2e checks passed"
