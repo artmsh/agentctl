@@ -257,8 +257,12 @@
   (let [settings (common/settings-for cfg tool)
         _ (when-let [e (schema/errors settings [:executors :codex])]
             (throw (ex-info (str "codex settings: " e) {:path [:executors :codex]})))
-        _ (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg))))]
-            (throw (ex-info (str/join "; " (map last es)) {:path [:executors :codex :sandbox]})))
+        ;; a run that writes codex settings is refused on these; any other
+        ;; run only warns (`core/gate-codex-permissions`)
+        gate (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg))))]
+               (plan/op {:action :noop :warn true :tool tool :kind :settings :id :permissions
+                         :refuse-if-settings-change true
+                         :summary (str/join "; " (map last es))}))
         ;; Claude's status line is a command object; in a unified settings
         ;; row it reaches codex too, and stays an unsupported setting here
         footer? (schema/status-line? (:status-line settings))
@@ -275,6 +279,7 @@
      (preset-ops (:presets settings))
      (when footer? (keep identity [(status-line-op (:status-line settings))]))
      (permission-profile-ops (:permission-profiles settings) config-file)
+     (when gate [gate])
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")

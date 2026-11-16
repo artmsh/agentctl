@@ -530,6 +530,20 @@
                o)))
          ops)))
 
+(defn gate-codex-permissions
+  "Codex's permissions check (`codex/permission-findings`) refuses a run
+   whose plan, after `-t`/`-k`/`-p`/`--only`/`--user`, still writes codex
+   settings — only those can leave config.toml's profiles and its default
+   out of step. Any other run (`-k mcps -t codex`) gets the finding as a
+   warning. `gates` were set aside before the filters, so a warning survives
+   a `-k` that names another kind."
+  [gates ops]
+  (if (empty? gates)
+    ops
+    (if (some #(and (= :codex (:tool %)) (= :settings (:kind %)) (plan/mutating? %)) ops)
+      (throw (ex-info (:summary (first gates)) {:path [:executors :codex :sandbox]}))
+      (concat ops (map #(dissoc % :refuse-if-settings-change) gates)))))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -566,7 +580,7 @@
                             (:project o) (assoc :project-path (get-in cfg [:projects (:project o) :path]))
                             (= :projects (:kind o)) (assoc :kind (dsl-section o)))) tool-ops)
                    tool-ops)]
-    (-> (concat (sources/pack-ops cfg)
+    (let [all (concat (sources/pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
                 ;; a collision report names the copy as well, but says what pi
@@ -580,6 +594,8 @@
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
+          gates (filter :refuse-if-settings-change all)]
+      (-> (remove :refuse-if-settings-change all)
         (keep-kinds opts)
         (keep-projects cfg opts)
         (keep-only cfg opts)
@@ -588,7 +604,8 @@
         (->> (annotate-skill-ops cfg))
         same-command
         refuse-unparseable-json
-        vec)))
+        (->> (gate-codex-permissions gates))
+        vec))))
 
 (defn missing-tools [cfg opts]
   (remove (fn [t] ((get-in registry [t :present?])))

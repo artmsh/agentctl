@@ -1370,7 +1370,9 @@
       (is (empty? (config/structural-findings cfg)))
       (with-redefs [codex/config-file f]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
-                              (doall (codex/settings-ops cfg))))
+                              (vec (core/gate-codex-permissions
+                                    (filter :refuse-if-settings-change (codex/settings-ops cfg))
+                                    (remove :refuse-if-settings-change (codex/settings-ops cfg))))))
         (is (not (u/exists? f)))
         (u/write-text! f "default_permissions = \"p\"\n")
         (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough"))))
@@ -1425,6 +1427,27 @@
       (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
       (with-redefs [codex/config-file f]
         (is (seq (codex-drift (row {:model "m-b"}) state/empty-state)))))))
+
+(deftest codex-permissions-check-refuses-only-runs-that-touch-codex-settings
+  (let [f (str (temp-dir) "/config.toml")
+        dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}
+        row (fn [m] {:settings [(merge {:id :user-codex :acli [:codex] :in :all :model "m-a"} m)]
+                     :mcps [{:id :docs :cmd "/bin/echo docs" :in :all :acli [:codex]}]})
+        plan (fn [raw st opts] (core/build-plan (config/normalize raw "test") st opts))]
+    (u/write-text! f "model = \"m-a\"\n")
+    (with-redefs [codex/config-file f
+                  codex/mcp-list (constantly {})]
+      (let [{st :st} (converge-codex (row {:sandbox "dev" :permission-profiles {:dev dev}}) state/empty-state)
+            broken (row {:permission-profiles {:dev dev}})]
+        (testing "-k mcps -t codex cannot change permissions: a warning, not a refusal"
+          (let [ops (plan broken st {:tools #{:codex} :kinds #{:mcps}})]
+            (is (some #(and (:warn %) (re-find #"no default_permissions" (str (:summary %)))) ops))
+            (is (some #(and (= :mcps (:kind %)) (plan/mutating? %)) ops) "the MCP server is still planned")))
+        (testing "a run that writes codex settings is refused"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                                (plan broken st {:tools #{:codex}})))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                                (plan broken st {:tools #{:codex} :kinds #{:settings}}))))))))
 
 (def vendor-codex-hooks
   "A hooks.json a vendor installer wrote: one SessionStart and one Stop hook."

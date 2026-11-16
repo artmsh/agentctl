@@ -222,4 +222,22 @@ c=$(code_of run apply! -f "$SB/g.edn" --all -t codex -y)
 [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "apply! on a broken hooks.json exited $c, not 1"; }
 cmp -s "$HOOKS" "$SB/before.json" || fail "a hooks.json that does not parse was rewritten"
 
+echo "9. a broken permissions setup refuses runs that write codex settings, and only warns others"
+rm -f "$HOOKS"
+printf 'model = "m-a"\n' > "$CONF"
+cp "$CONF" "$SB/before.toml"
+cat > "$SB/h.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b"
+             :permission-profiles {:dev {:extends ":read-only"}}}]
+ :mcps [{:id :docs :cmd "/bin/echo docs" :in :all :acli [:codex]}]}
+EDN
+c=$(code_of run apply -f "$SB/h.edn" --all -k mcps -t codex)
+[ "$c" != 1 ] || { cat "$SB/out.txt"; fail "-k mcps -t codex was refused on a permissions finding"; }
+grep -q 'no default_permissions' "$SB/out.txt" || { cat "$SB/out.txt"; fail "-k mcps -t codex does not warn about the permissions finding"; }
+grep -q 'docs' "$SB/out.txt" || { cat "$SB/out.txt"; fail "-k mcps -t codex does not plan the MCP server"; }
+c=$(code_of run apply! -f "$SB/h.edn" --all -t codex -y)
+[ "$c" = 1 ] || { cat "$SB/out.txt"; fail "a run that writes codex settings exited $c, not 1"; }
+grep -q 'no default_permissions' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the refusal does not name the finding"; }
+cmp -s "$CONF" "$SB/before.toml" || fail "config.toml changed on a refused run"
+
 echo "all codex e2e checks passed"

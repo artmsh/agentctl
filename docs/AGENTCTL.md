@@ -412,7 +412,10 @@ otherwise what is on disk, unless agentctl wrote it and will prune it. A
 violation is an error in `validate` and refuses `apply` before any op, with the
 declared, kept and built-in names listed. It is checked only when agentctl
 touches permissions, so a file broken by hand does not block an unrelated
-setting. Import reads profiles back with field
+setting. The refusal applies only to a run whose plan, after `-t`, `-k`, `-p`,
+`--only` and `--user`, still writes Codex settings. Any other run, such as
+`-k mcps -t codex`, cannot change permissions, so it shows the finding as a
+warning and goes on. Import reads profiles back with field
 names as keywords and paths and hosts as strings.
 
 ### `:permissions`
