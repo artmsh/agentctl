@@ -3096,5 +3096,49 @@
         (is (not (u/exists? link)) "no link is left dangling")
         (is (fs/directory? src))))))
 
+(deftest a-skill-committed-in-the-project-is-linked-not-moved
+  (doseq [acli [[:claude] [:claude :codex]]]
+    (testing (str acli)
+      (let [root (temp-dir) repo (str root "/repo") src (str repo "/.agents/skills/shared")
+            link (str repo "/.claude/skills/shared")
+            cfg #(config/normalize {:skill-packs {[:uri (str "file://" repo "/.agents/skills")] {:alias 'own}}
+                                    :skills {['own "shared"] {:in repo :acli acli}}} "test")
+            plan-for #(core/build-plan (cfg) state/empty-state {:tools (set acli)})]
+        (skill-dir! src "shared")
+        (git! repo "init" "-q")
+        (git! repo "add" "-A")
+        (git! repo "commit" "-qm" "own skill")
+        (let [ops (filter #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for))]
+          (is (= [[["ln" "-sfn" "../../.agents/skills/shared" link]]] (map :cmds ops))
+              "one relative link: no rm, no skills CLI, nothing linked onto itself")
+          (is (empty? (:failed (core/execute! ops)))))
+        (is (fs/directory? src) "the committed source is intact")
+        (is (not (fs/sym-link? src)))
+        (is (= "../../.agents/skills/shared" (str (fs/read-link link))))
+        (is (u/same-content? link src) "the link resolves")
+        (is (not (u/exists? (str repo "/skills-lock.json"))))
+        (is (str/blank? (:out (u/sh "git" "-C" repo "status" "--porcelain" "--untracked-files=no"))))
+        (is (not-any? plan/mutating? (filter #(= :skills (:kind %)) (plan-for))) "converged")))))
+
+(deftest dropping-a-skill-committed-in-the-project-keeps-it
+  (let [root (temp-dir) repo (str root "/repo") src (str repo "/.agents/skills/shared")
+        link (str repo "/.claude/skills/shared")
+        raw (fn [skills] {:skill-packs {[:uri (str "file://" repo "/.agents/skills")] {:alias 'own}}
+                          :skills skills})
+        keep-repo {[:uri (str root "/other")] {:in repo :acli [:claude :codex]}}]
+    (skill-dir! src "shared")
+    (skill-dir! (str root "/other") "other")
+    (fs/create-dirs (str repo "/.git"))
+    (let [cfg (config/normalize (raw (assoc keep-repo ['own "shared"] {:in repo :acli [:claude :codex]})) "test")
+          ops (core/build-plan cfg state/empty-state {:tools #{:claude :codex}})
+          _ (is (empty? (:failed (core/execute! ops))))
+          st (core/sync-state! state/empty-state (assoc cfg :planned-ops ops))
+          gone (core/build-plan (config/normalize (raw keep-repo) "test") st {:tools #{:claude :codex}})
+          rm (filter #(and (= :skills (:kind %)) (= :delete (:action %))) gone)]
+      (is (= [link] (map :target rm)) "only claude's link goes")
+      (is (empty? (:failed (core/execute! rm))))
+      (is (not (u/exists? link)))
+      (is (fs/directory? src) "the committed source stays"))))
+
 (let [{:keys [fail error]} (run-tests 'agentctl-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

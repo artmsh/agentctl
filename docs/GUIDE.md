@@ -403,6 +403,11 @@ at the pack cache under `~/.agents/skill-packs`. `:scope :global` on an
 explicit `:skills` declaration keeps a skill user-wide even when a project
 names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 To promote a skill already linked in several projects, set its scope explicitly:
 
 ```clojure
@@ -414,7 +419,8 @@ whole-pack references. `apply` previews a `- projects/<id> skills/wrap-up` unlin
 for each redundant symlink in the configured projects; `apply!` installs the
 global skill first, then removes those links. This also covers legacy symlinks
 that predate agentctl's state file and projects that no longer name the skill.
-Local directories are preserved. Project links are kept if the global skill
+A local directory is removed only when it matches the source and nothing keeps
+it (see the list near the top of this guide). Project links are kept if the global skill
 is unavailable (including a project-only apply before global installation).
 
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports

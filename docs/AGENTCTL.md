@@ -491,6 +491,11 @@ relative one) is repointed at the pack cache under `~/.agents/skill-packs`.
 `:scope :global` on an explicit `:skills` declaration keeps a skill user-wide
 even when a project names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.

@@ -949,4 +949,40 @@ EDN
   [ "$code" = 0 ] || { cat "$H/plan2.txt"; fail "one apply! did not converge (exit $code)"; }
 )
 
+echo "23. a skill committed in the project's own .agents/skills is linked, never moved"
+(
+  H=$(fresh_home committed-skill); export AGENTCTL_HOME="$H"
+  P="$H/projects/sample"
+  mkdir -p "$P/.agents/skills/shared"
+  printf -- '---\nname: shared\ndescription: Demo.\n---\n' > "$P/.agents/skills/shared/SKILL.md"
+  git -C "$P" init -q
+  git -C "$P" add -A
+  git -C "$P" -c user.email=t@e -c user.name=t commit -qm init
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$P/.agents/skills"] {:alias sample-skills}}
+ :skills {[sample-skills "shared"] {:in "projects/sample" :acli [:claude]}}}
+EDN
+  set +e
+  run apply -f "$H/agents.edn" --all -k skills -k skill-packs > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "the committed skill: expected drift (exit 2), got $code"; }
+  [ "$(grep -c "^exec:" "$H/plan.txt")" = 1 ] \
+    && grep -q "^exec: 'ln -sfn ../../.agents/skills/shared ~/projects/sample/.claude/skills/shared'" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the plan is not one relative link"; }
+  for i in 1 2; do
+    run apply! -f "$H/agents.edn" --all -k skills -k skill-packs -y > "$H/apply$i.txt" 2>&1 || { cat "$H/apply$i.txt"; fail "apply! $i failed"; }
+  done
+  [ -f "$P/.agents/skills/shared/SKILL.md" ] && [ ! -L "$P/.agents/skills/shared" ] || fail "the committed source was moved"
+  [ "$(readlink "$P/.claude/skills/shared")" = "../../.agents/skills/shared" ] || fail "claude's link is not relative"
+  [ -f "$P/.claude/skills/shared/SKILL.md" ] || fail "claude's link does not resolve"
+  [ ! -e "$P/skills-lock.json" ] || fail "a skills-lock.json was written"
+  # the new .claude/ is untracked by design; nothing git tracks may change
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "apply! changed tracked files"; }
+  # a relative link is committable: once committed, the tree stays clean
+  git -C "$P" add -A
+  git -C "$P" -c user.email=t@e -c user.name=t commit -qm link
+  run apply -f "$H/agents.edn" --all -k skills -k skill-packs > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "not idempotent"; }
+  [ -z "$(git -C "$P" status --porcelain)" ] || { git -C "$P" status; fail "git status is not clean"; }
+)
+
 echo "all agentctl e2e checks passed"

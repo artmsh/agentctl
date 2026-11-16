@@ -167,7 +167,7 @@
    into the `skills` CLI's `.agents/skills/<name>`."
   [".claude/skills" ".agents/skills"])
 
-(defn- leaf-path
+(defn leaf-path
   "`p` with the directories above it resolved and its last segment kept as
    written: where a link itself lives, as opposed to where it leads."
   [p]
