@@ -637,14 +637,16 @@ is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and und
 `--json` as ops with `"warn": true` — and still exits 0, since nothing would
 change.
 
-Under `--json`, `apply` (and `validate`) print one JSON document on stdout:
-the plan's `ops`, the selector `warnings`, the config's own warnings and this
-machine's (the status line's) in `findings` (`level`, `where`, `message`, as
-`validate --json` prints them) and the `summary`. An error is `{"error": …}`
-with exit 1 instead — a config with errors carries its `findings` too, an
-unknown option or a missing file only the message. `apply! --json` prints the
-plan document the same way, then the confirmation prompt and the result of
-the run as text.
+Under `--json`, `apply`, `apply!` and `validate` print one JSON document on
+stdout: the plan's `ops`, the selector `warnings`, the config's own warnings
+and this machine's (the status line's) in `findings` (`level`, `where`,
+`message`, as `validate --json` prints them), the number of changes that write
+a resolved secret in `secrets`, and the `summary`. `apply!` adds `applied` —
+`done` and `failed`, each op with its `tool`, `kind`, `id` and `action`, a
+failed one with its `error` — and `backups`. A confirmation prompt cannot share
+stdout with that document, so `apply! --json` needs `-y`. An error is
+`{"error": …}` with exit 1 instead — a config with errors carries its
+`findings` too, an unknown option or a missing file only the message.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a

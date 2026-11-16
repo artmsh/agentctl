@@ -1217,4 +1217,64 @@ python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.ar
 run --help | grep -q 'legacy (old-format configs only, in place of trust): projects$' \
   || { run --help; fail "--help does not mark projects as legacy"; }
 
+echo "26. apply! --json needs -y, and prints one document with what it applied"
+AJ="$SB/apply-json"
+mkdir -p "$AJ"
+aj() { (cd "$AJ" && AGENTCTL_HOME="$AJ" run "$@"); }
+# aj_json <want-exit> <out-file> <args…>: exits as wanted, stdout is one JSON document
+aj_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  aj "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$AJ/ok.edn" <<'EDN'
+{:executors {:pi {:model "m1"}}}
+EDN
+# a prompt cannot share stdout with JSON: without -y it is refused before
+# anything is planned — on a host too, before it is looked up
+aj_json 1 "$AJ/noyes.json" apply! -f "$AJ/ok.edn" -t pi
+aj_json 1 "$AJ/noyes-host.json" apply! -f "$AJ/ok.edn" --host nowhere
+for f in noyes noyes-host; do
+  python3 -c 'import json,sys; sys.exit(0 if "-y" in json.load(open(sys.argv[1]))["error"] else 1)' "$AJ/$f.json" \
+    || { cat "$AJ/$f.json"; fail "apply! --json without -y did not ask for -y"; }
+done
+[ -e "$AJ/.pi/agent/settings.json" ] && fail "apply! --json without -y wrote settings"
+aj_json 0 "$AJ/apply.json" apply! -f "$AJ/ok.edn" -t pi -y
+python3 - "$AJ/apply.json" <<'PY' || { cat "$AJ/apply.json"; fail "apply! --json did not report what it applied"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(o["action"] == "create" for o in d["ops"]), d
+assert d["applied"]["failed"] == [], d
+assert any(o["tool"] == "pi" and o["kind"] == "settings" for o in d["applied"]["done"]), d
+assert d["backups"] and d["summary"], d
+assert d["findings"] == [] and d["warnings"] == [], d
+PY
+grep -q 'm1' "$AJ/.pi/agent/settings.json" || fail "apply! --json -y did not converge"
+aj_json 0 "$AJ/again.json" apply! -f "$AJ/ok.edn" -t pi -y
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["applied"] == {"done": [], "failed": []} else 1)' "$AJ/again.json" \
+  || { cat "$AJ/again.json"; fail "a converged apply! --json reported something applied"; }
+# a failed op is in the document with its error, and the run exits 1
+cat > "$AJ/fail.edn" <<EDN
+{:executors {:pi {:model "m1"}}
+ :skill-packs {:gone {:uri "file://$AJ/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}}}
+EDN
+aj_json 1 "$AJ/fail.json" apply! -f "$AJ/fail.edn" -t pi -y
+python3 - "$AJ/fail.json" <<'PY' || { cat "$AJ/fail.json"; fail "apply! --json lost a failed op"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["kind"] == "skill-packs" and "git clone exited" in f["error"] for f in d["applied"]["failed"]), d
+PY
+# the text output is unchanged
+cat > "$AJ/ok2.edn" <<'EDN'
+{:executors {:pi {:model "m2"}}}
+EDN
+aj apply! -f "$AJ/ok2.edn" -t pi -y > "$AJ/text.txt"
+grep -q '^applied 1 change(s)$' "$AJ/text.txt" && grep -q '^backups: ' "$AJ/text.txt" \
+  || { cat "$AJ/text.txt"; fail "apply! text output changed"; }
+
 echo "all agentctl e2e checks passed"

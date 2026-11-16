@@ -167,11 +167,22 @@
         (println "  ⚠" (str/join " " (map u/kw->str (:where f))) "—" (:message f))))
     warnings))
 
+(defn- applied->data
+  "What a mutating run did, for --json: each op done, and each failed with
+   its error."
+  [done failed]
+  {:done (mapv #(select-keys (op->data %) [:tool :kind :id :action]) done)
+   :failed (mapv #(select-keys (op->data %) [:tool :kind :id :action :error]) failed)})
+
+(defn- print-json [doc] (println (json/generate-string doc {:pretty true})))
+
 (defn- confirm!
-  "Ask before a mutating run, unless told not to. Declining exits."
+  "Ask before a mutating run, unless told not to. Declining exits. Under
+   --json `-y` is required, so there is nothing to ask and nothing to print:
+   the document carries `secrets`."
   [opts changes]
   (let [secretive (filter #(= :secret (:risk %)) changes)]
-    (when (seq secretive)
+    (when (and (seq secretive) (not (:json opts)))
       (println (format "\n⚠ %d change(s) write resolved secrets into tool config files."
                        (count secretive))))
     (when-not (:yes opts)
@@ -198,42 +209,48 @@
         st (state/load-host-state (:id host))
         planned (hosts/plan-host host st opts)
         ops (:ops planned)
-        changes (filter plan/mutating? ops)]
-    (if (:json opts)
-      (println (json/generate-string {:host (name (:id host))
-                                      :ops (map op->data ops)
-                                      :skipped (map name (:skipped planned))
-                                      :findings (mapv finding->data findings)
-                                      :summary (plan/summary-line ops)}
-                                     {:pretty true}))
-      (do
-        (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
-        (when-let [missing (seq (:skipped planned))]
-          (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
-        (if (plan/show-plan? ops opts)
-          (println (plan/render-plan ops opts))
-          (println "\nno changes — host matches agents.edn"))
-        (println)
-        (println (plan/summary-line ops))))
+        changes (filter plan/mutating? ops)
+        ;; under --json, printed once, when the run is over: apply! adds
+        ;; what it applied, so stdout stays one document
+        doc {:host (name (:id host))
+             :ops (map op->data ops)
+             :skipped (map name (:skipped planned))
+             :findings (mapv finding->data findings)
+             :summary (plan/summary-line ops)}]
+    (when-not (:json opts)
+      (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
+      (when-let [missing (seq (:skipped planned))]
+        (println (str "skipped (CLI not installed on host): " (str/join ", " (map name missing)))))
+      (if (plan/show-plan? ops opts)
+        (println (plan/render-plan ops opts))
+        (println "\nno changes — host matches agents.edn"))
+      (println)
+      (println (plan/summary-line ops)))
     (cond
       (not mutate?)
-      (System/exit (if (seq changes) 2 0))
+      (do (when (:json opts) (print-json doc))
+          (System/exit (if (seq changes) 2 0)))
 
       (empty? changes)
       (do (state/save-host! (:id host) (hosts/sync-host-state st planned [] []))
+          (when (:json opts) (print-json (assoc doc :applied (applied->data [] []))))
           (System/exit 0))
 
       :else
       (do
         (confirm! opts changes)
-        (let [{:keys [plan done failed]} (hosts/converge! cfg host st opts planned)]
+        (let [{:keys [plan done failed]} (hosts/converge! cfg host st opts planned)
+              backups (remote/backup-dir host (get-in plan [:inventory :home]))]
           (state/save-host! (:id host) (hosts/sync-host-state st plan done failed))
-          (println (format "\napplied %d change(s)%s"
-                           (count done)
-                           (if (seq failed) (str ", " (count failed) " failed") "")))
-          (doseq [f failed]
-            (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
-          (println (str "backups on host: " (remote/backup-dir host (get-in plan [:inventory :home]))))
+          (if (:json opts)
+            (print-json (assoc doc :applied (applied->data done failed) :backups backups))
+            (do
+              (println (format "\napplied %d change(s)%s"
+                               (count done)
+                               (if (seq failed) (str ", " (count failed) " failed") "")))
+              (doseq [f failed]
+                (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+              (println (str "backups on host: " backups))))
           (System/exit (if (seq failed) 1 0)))))))
 
 (defn cmd-apply [opts mutate?]
@@ -264,33 +281,35 @@
                     (for [p (core/unmatched-projects cfg opts)]
                       (str "-p " p " — no declared project there"))
                     (for [o (core/unmatched-only cfg st opts)]
-                      (str "--only " o " — nothing declared or owned by that id")))]
-      (if (:json opts)
-        (println (json/generate-string
-                  (cond-> {:ops (map op->data ops)
-                           :warnings (vec warnings)
-                           :findings (mapv finding->data findings)
-                           :summary (plan/summary-line ops)}
-                    scope (assoc :scope {:where (u/kw->str (:where scope))
-                                         :path (:path scope)
-                                         :projects (mapv u/kw->str (sort (:projects scope)))}))
-                  {:pretty true}))
-        (do
-          (when scope (println (scope-note cfg scope)))
-          (doseq [w warnings] (println (str "  ⚠ " w)))
-          (when-let [missing (seq (core/missing-tools cfg opts))]
-            (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
-          (if (plan/show-plan? ops opts)
-            (println (plan/render-plan ops opts))
-            (println "\nno changes — environment matches agents.edn"))
-          (println)
-          (println (plan/summary-line ops))))
+                      (str "--only " o " — nothing declared or owned by that id")))
+          ;; under --json, printed once, when the run is over: apply! adds
+          ;; what it applied, so stdout stays one document
+          doc (cond-> {:ops (map op->data ops)
+                       :warnings (vec warnings)
+                       :findings (mapv finding->data findings)
+                       :secrets (count (filter #(= :secret (:risk %)) changes))
+                       :summary (plan/summary-line ops)}
+                scope (assoc :scope {:where (u/kw->str (:where scope))
+                                     :path (:path scope)
+                                     :projects (mapv u/kw->str (sort (:projects scope)))}))]
+      (when-not (:json opts)
+        (when scope (println (scope-note cfg scope)))
+        (doseq [w warnings] (println (str "  ⚠ " w)))
+        (when-let [missing (seq (core/missing-tools cfg opts))]
+          (println (str "skipped (CLI not installed): " (str/join ", " (map name missing)))))
+        (if (plan/show-plan? ops opts)
+          (println (plan/render-plan ops opts))
+          (println "\nno changes — environment matches agents.edn"))
+        (println)
+        (println (plan/summary-line ops)))
       (cond
         (not mutate?)
-        (System/exit (if (seq changes) 2 0))
+        (do (when (:json opts) (print-json doc))
+            (System/exit (if (seq changes) 2 0)))
 
         (empty? changes)
         (do (state/save! (core/sync-state! st cfg #{} (when (core/scoped? opts) #{})))
+            (when (:json opts) (print-json (assoc doc :applied (applied->data [] []))))
             (System/exit 0))
 
         :else
@@ -305,12 +324,16 @@
                                             (set (mapcat core/op-keys failed))
                                             (when (core/scoped? opts)
                                               (set (mapcat core/op-keys done)))))
-            (println (format "\napplied %d change(s)%s"
-                             (count done)
-                             (if (seq failed) (str ", " (count failed) " failed") "")))
-            (doseq [f failed]
-              (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
-            (println (str "backups: " (u/tilde (u/backup-dir))))
+            (if (:json opts)
+              (print-json (assoc doc :applied (applied->data done failed)
+                                 :backups (u/tilde (u/backup-dir))))
+              (do
+                (println (format "\napplied %d change(s)%s"
+                                 (count done)
+                                 (if (seq failed) (str ", " (count failed) " failed") "")))
+                (doseq [f failed]
+                  (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+                (println (str "backups: " (u/tilde (u/backup-dir))))))
             (System/exit (if (seq failed) 1 0))))))))
 
 (defn cmd-validate [opts]
@@ -406,6 +429,9 @@
           (throw (ex-info (str command " does not take --host") {})))
         (when (and (or (seq (:only opts)) (:user opts)) (not (#{"apply" "plan" "apply!"} command)))
           (throw (ex-info (str command " does not take --only or --user") {})))
+        ;; stdout is the JSON document; a confirmation prompt has nowhere to go
+        (when (and (= "apply!" command) (:json opts) (not (:yes opts)))
+          (throw (ex-info "apply! --json needs -y: a confirmation prompt cannot share stdout with JSON" {})))
         (let [opts (check-selectors! opts)]
           (case command
             "apply" (if (:host opts) (cmd-apply-host opts false) (cmd-apply opts false))
