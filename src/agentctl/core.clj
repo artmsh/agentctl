@@ -515,6 +515,21 @@
                        (or (not= :pi %) (not= :untrusted (pi/trust as-pi))))
                  (:for-tools p)))))
 
+(defn refuse-unparseable-json
+  "Every mutating op whose target is a JSON file that does not parse, as a
+   refusal: shown in the plan, failing on apply!, the file left byte for
+   byte. Adapters read such a file as nil, so whatever they planned on top of
+   it would write a new file over the old one. This holds for any JSON
+   writer, the ones added later included."
+  [ops]
+  (let [why (memoize plan/unreadable-json)]
+    (map (fn [o]
+           (let [t (str (:target o))]
+             (if-let [w (and (plan/mutating? o) (str/ends-with? t ".json") (why t))]
+               (plan/refused-json-op (assoc (select-keys o [:tool :kind :id :project :path :project-path]) :file t) w)
+               o)))
+         ops)))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -572,6 +587,7 @@
         defer-unmet-removals
         (->> (annotate-skill-ops cfg))
         same-command
+        refuse-unparseable-json
         vec)))
 
 (defn missing-tools [cfg opts]

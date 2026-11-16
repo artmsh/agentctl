@@ -511,6 +511,7 @@
                  desired-e (conj {:key :enabledPlugins :before before-e :after true})
                  missing (conj {:key :installed :before false :after true}))
         :exec! (fn []
+                 (plan/read-json-strict file)
                  (run argv-add)
                  (run argv-install)
                  ;; Keep the JSON deterministic even when the CLI is stubbed,
@@ -518,7 +519,7 @@
                  ;; ordering than the settings file expects.
                  (u/backup! file)
                  (u/write-json! file
-                                (-> (or (u/read-json file) {})
+                                (-> (plan/read-json-strict file)
                                     (assoc-in [:extraKnownMarketplaces (keyword mname)] want-marketplace)
                                     (assoc-in [:enabledPlugins (keyword key)] true))))}))))
 
@@ -534,12 +535,13 @@
         :cmds [argv] :summary "removed from agents.edn" :risk :medium
         :diffs [{:key :enabledPlugins :before before :after nil}]
         :exec! (fn []
+                 (plan/read-json-strict file)
                  ;; a plugin enabled in settings but never installed is
                  ;; already gone as far as the CLI is concerned
                  (let [r (if cwd (claude-sh-in cwd argv) (claude-sh argv))]
                    (when-not (not-installed? r) (ok! r argv)))
                  (u/backup! file)
-                 (let [s (or (u/read-json file) {})
+                 (let [s (plan/read-json-strict file)
                        eps (dissoc (or (:enabledPlugins s) {}) (keyword key))]
                    (u/write-json! file (assoc s :enabledPlugins eps))))}))))
 

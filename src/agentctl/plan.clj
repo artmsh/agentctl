@@ -573,10 +573,40 @@
       (update-in m (butlast path) dissoc (last path))
       m)))
 
+(defn unreadable-json
+  "Why `file` is not JSON — it exists, holds something, and does not parse —
+   or nil. `u/read-json` reads such a file as nil, and any edit on top of
+   that would write a new file over it: a settings.json would keep only the
+   keys agentctl declared, a hooks.json only agentctl's hooks."
+  [file]
+  (when-let [s (u/slurp-safe file)]
+    (when-not (str/blank? s)
+      (try (json/parse-string s) nil
+           (catch Exception e (or (first (str/split-lines (str (ex-message e)))) "does not parse"))))))
+
+(defn refused-json-op
+  "The op an edit plans in a file that does not parse: shown in the plan,
+   and failing when run, so apply! exits non-zero, the file stays byte for
+   byte, and the state keeps what it last recorded."
+  [{:keys [tool kind id file path project]} why]
+  (let [msg (str (u/tilde file) " is not valid JSON (" why "): fix it by hand — agentctl will not rewrite it")]
+    (op {:project project :action :update :tool tool :kind kind :id id :target file
+         :path (mapv u/kw->str path) :summary msg :warn true :risk :medium
+         :exec! (fn [] (throw (ex-info msg {:path file})))})))
+
+(defn read-json-strict
+  "The file's JSON, {} when absent or blank; throws when it does not parse."
+  [file]
+  (when-let [why (unreadable-json file)]
+    (throw (ex-info (str (u/tilde file) " is not valid JSON (" why "): left untouched") {:path file})))
+  (or (u/read-json file) {}))
+
 (defn json-unset-op
   "Op that removes `path` from a JSON file. Nothing to remove is no op at all —
    an entry agentctl once wrote may already be gone by hand."
-  [{:keys [tool kind id file path summary note risk project]}]
+  [{:keys [tool kind id file path summary note risk project] :as args}]
+  (if-let [why (unreadable-json file)]
+    (refused-json-op args why)
   (let [before (get-in (u/read-json file) path)]
     (when (some? before)
       (op {:project project :action :delete :tool tool :kind kind :id id
@@ -588,12 +618,14 @@
            :risk (or risk :medium)
            :exec! (fn []
                     (u/backup! file)
-                    (u/write-json! file (dissoc-in (or (u/read-json file) {}) path)))}))))
+                    (u/write-json! file (dissoc-in (read-json-strict file) path)))})))))
 
 (defn json-set-op
   "Op that sets `path` (vector of keys) to `value` inside a JSON file."
   [{:keys [tool kind id file path value summary note risk compare-as project
-           report-converged?]}]
+           report-converged?] :as args}]
+  (if-let [why (unreadable-json file)]
+    (refused-json-op args why)
   (let [current (u/read-json file)
         before (get-in current path)
         ;; :compare-as :set — for lists the tool is free to reorder, where
@@ -616,10 +648,12 @@
            ;; single run, and a stale snapshot would drop the earlier writes
            :exec! (fn []
                     (u/backup! file)
-                    (u/write-json! file (assoc-in (or (u/read-json file) {}) path value)))}))))
+                    (u/write-json! file (assoc-in (read-json-strict file) path value)))})))))
 
 (defn json-remove-op
-  [{:keys [tool kind id file path summary project]}]
+  [{:keys [tool kind id file path summary project] :as args}]
+  (if-let [why (unreadable-json file)]
+    (refused-json-op args why)
   (let [current (u/read-json file)
         before (get-in current path)]
     (when (some? before)
@@ -632,7 +666,7 @@
            :risk :medium
            :exec! (fn []
                     (u/backup! file)
-                    (u/write-json! file (u/dissoc-in (or (u/read-json file) {}) (vec path))))}))))
+                    (u/write-json! file (u/dissoc-in (read-json-strict file) (vec path))))})))))
 
 (defn- sans-nils
   "`v` with every nil-valued map entry dropped, at any depth."
@@ -648,33 +682,6 @@
    are one hook, not two."
   [a b]
   (= (u/norm (sans-nils a)) (u/norm (sans-nils b))))
-
-(defn- unreadable-json
-  "Why `file` is not JSON — it exists, holds something, and does not parse —
-   or nil. `u/read-json` reads such a file as nil, and an array edit on top
-   of that would write a new file over it, the vendor's hooks gone."
-  [file]
-  (when-let [s (u/slurp-safe file)]
-    (when-not (str/blank? s)
-      (try (json/parse-string s) nil
-           (catch Exception e (or (first (str/split-lines (str (ex-message e)))) "does not parse"))))))
-
-(defn- refused-json-op
-  "The op an array edit plans in a file that does not parse: shown in the
-   plan, and failing when run, so apply! exits non-zero and the state keeps
-   the element it last wrote."
-  [{:keys [tool kind id file path project]} why]
-  (let [msg (str (u/tilde file) " is not valid JSON (" why "): fix it by hand — agentctl will not rewrite it")]
-    (op {:project project :action :update :tool tool :kind kind :id id :target file
-         :path (mapv u/kw->str path) :summary msg :warn true :risk :medium
-         :exec! (fn [] (throw (ex-info msg {:path file})))})))
-
-(defn- read-json-strict
-  "The file's JSON, {} when absent or blank; throws when it does not parse."
-  [file]
-  (when-let [why (unreadable-json file)]
-    (throw (ex-info (str (u/tilde file) " is not valid JSON (" why "): left untouched") {:path file})))
-  (or (u/read-json file) {}))
 
 (defn json-array-merge-op
   "Op that keeps exactly one caller-owned element inside a JSON array at

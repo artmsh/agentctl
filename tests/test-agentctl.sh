@@ -1950,4 +1950,27 @@ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$DB/json.out" \
   || { cat "$DB/json.out"; fail "--debug broke the --json document"; }
 grep -q 'FileNotFoundException' "$DB/json.err" || { cat "$DB/json.err"; fail "--json --debug printed no trace"; }
 
+echo "42. a Claude settings.json that does not parse is refused, never rewritten"
+(
+  H=$(fresh_home broken-json); export AGENTCTL_HOME="$H"
+  P="$H/projects/app"; mkdir -p "$P/.claude" "$H/.claude"; git -C "$P" init -q
+  broken='{"env": {"KEEP": "1"}, "model": "m-a",}'
+  printf '%s\n' "$broken" > "$H/.claude/settings.json"
+  printf '%s\n' "$broken" > "$P/.claude/settings.json"
+  cp "$H/.claude/settings.json" "$H/user.before"; cp "$P/.claude/settings.json" "$H/proj.before"
+  cat > "$H/agents.edn" <<'EDN'
+{:settings [{:id :user-claude :acli [:claude] :in :all :model "m-b"}
+            {:id :app-claude :acli [:claude] :in "projects/app" :model "m-c"}]}
+EDN
+  (run apply -f "$H/agents.edn" --all -t claude || true) > "$H/plan.txt" 2>&1
+  [ "$(grep -c 'settings.json is not valid JSON' "$H/plan.txt")" -ge 2 ] \
+    || { cat "$H/plan.txt"; fail "the plan does not report both broken settings files"; }
+  set +e
+  run apply! -f "$H/agents.edn" --all -t claude -y > "$H/apply.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] || { cat "$H/apply.txt"; fail "apply! on broken settings.json exited $code, not 1"; }
+  cmp -s "$H/.claude/settings.json" "$H/user.before" || fail "user settings.json was rewritten"
+  cmp -s "$P/.claude/settings.json" "$H/proj.before" || fail "project settings.json was rewritten"
+)
+
 echo "all agentctl e2e checks passed"

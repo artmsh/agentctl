@@ -1508,6 +1508,38 @@
         (is (nil? (plan/json-array-merge-op {:tool :claude :kind :hooks :id :x :file f :path [:hooks :Stop]
                                             :value {:hooks [{:type "command" :command "x"}]}})))))))
 
+(deftest a-json-file-that-does-not-parse-is-never-rewritten
+  ;; read as nil, a settings.json with one trailing comma was rewritten
+  ;; holding only what agentctl declared: env and every other key gone
+  (let [f (str (temp-dir) "/settings.json")
+        broken "{\"env\": {\"A\": \"1\"}, \"model\": \"m-a\",}\n"
+        args {:tool :claude :kind :settings :id :model :file f :path [:model]}]
+    (doseq [[label mk] [["set" #(plan/json-set-op (assoc args :value "m-b"))]
+                        ["unset" #(plan/json-unset-op args)]
+                        ["remove" #(plan/json-remove-op args)]]
+            :let [_ (u/write-text! f broken)
+                  o (mk)]]
+      (testing label
+        (is (some? o) "a file that does not parse is reported, not read as empty")
+        (is (:warn o))
+        (is (re-find #"not valid JSON" (str (:summary o))))
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)) "byte for byte")))
+    (testing "an op planned before the file broke still refuses at exec time"
+      (u/write-text! f "{\"model\": \"m-a\"}\n")
+      (let [o (plan/json-set-op (assoc args :value "m-b"))]
+        (u/write-text! f broken)
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)))))
+    (testing "every planned write to a broken JSON file is refused, whichever adapter built it"
+      (u/write-text! f broken)
+      (let [raw-op (plan/op {:action :update :tool :claude :kind :plugins :id :p :target f
+                             :exec! #(u/write-json! f {:enabledPlugins {}})})
+            [o] (core/refuse-unparseable-json [raw-op])]
+        (is (:warn o))
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)))))))
+
 (deftest codex-hooks-refuse-a-hooks-json-that-does-not-parse
   ;; read as nil, an unparseable hooks.json was replaced by one holding only
   ;; agentctl's hook: every vendor hook in it deleted
