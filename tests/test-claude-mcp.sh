@@ -751,7 +751,10 @@ json.dump(d, open(f, "w"), indent=2)
 f = sb + "/.claude.json"
 d = json.load(open(f))
 d["mcpServers"]["hx"] = {"type": "http", "url": "https://mcp.example.com/x", "headers": {"x-docs": plain}}
-d["mcpServers"]["sx"] = {"type": "stdio", "command": "/bin/echo", "args": [], "env": {"UPSTREAM": plain2, "PORT": "8080", "HOME_VAR": "$HOME"}}
+d["mcpServers"]["sx"] = {"type": "stdio", "command": "/bin/echo",
+                         "args": ["--api-key", "argsecret1234", "--mode", "fast", "--token=argsecret5678",
+                                  "--token-file", "/etc/docs-token", "--password", "$DOCS_PW"],
+                         "env": {"UPSTREAM": plain2, "PORT": "8080", "HOME_VAR": "$HOME"}}
 json.dump(d, open(f, "w"), indent=2)
 PY
 run import -f "$SB/none.edn" | grep -v '^;;' > "$SB/imported.edn"
@@ -764,6 +767,12 @@ grep -qF '"$HOME"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a \$VAR
 grep -qF '"API_TOKEN" "!bw://claude-env/API_TOKEN"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "the settings env secret is not a placeholder"; }
 grep -qF '"MODE" "fast"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain settings env value was not imported"; }
 grep -qF '!bw://hx/x-docs' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a header with a plain-looking value is not a placeholder"; }
+# an argument after a credential-looking flag, or its `=value`, becomes a
+# variable; a flag that names where the credential lives keeps its value
+grep -q argsecret "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import kept a secret argument"; }
+for arg in '"$SX_API_KEY"' '"fast"' '"--token=$SX_TOKEN"' '"/etc/docs-token"' '"$DOCS_PW"'; do
+  grep -qF -- "$arg" "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "import did not write the argument $arg"; }
+done
 vault '{"claude-env": {"API_TOKEN": "'$SECRET'", "DOCS_AUTH": "'$PLAIN2'"}, "hx": {"x-docs": "'$PLAIN'"}}'
 set +e; run apply! -f "$SB/imported.edn" --all -t claude -k settings -y > "$SB/apply.txt" 2>&1; code=$?; set -e
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the imported config exited $code"; }

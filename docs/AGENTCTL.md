@@ -743,6 +743,10 @@ are redacted the same way unless they are provably no secret: a whole `$VAR`, a
 boolean, a number of up to five digits, or a common settings word such as
 `debug` or `fast`. A token under a plain name, `DOCS_AUTH` or `UPSTREAM`, is a
 placeholder too, and the import notes list each vault field to fill in.
+An MCP argument that follows a credential-looking flag — `--api-key X`,
+`--token=X` — becomes a `$<SERVER>_<FLAG>` variable (`$DOCS_API_KEY`), since
+arguments are written literally and only a `$VAR` in them is expanded; a flag
+naming where the credential lives, such as `--token-file`, keeps its value.
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to

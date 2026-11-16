@@ -55,7 +55,8 @@ segment.
   Claude Code and Codex; vendor hooks in the same file are left alone ([hooks](docs/GUIDE.md#hooks)).
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
-  values, every MCP header, and every env value it cannot show is no secret; review its output
+  values, every MCP header, every env value it cannot show is no secret, and every argument
+  after a credential-looking flag; review its output
   before sharing a config.
 
 ## Comparison

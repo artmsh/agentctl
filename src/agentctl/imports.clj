@@ -82,6 +82,42 @@
                         (refs/redact scope k)))]))
         m))
 
+(defn- credential-flag
+  "The name a credential-looking flag carries — `api-key` for `--api-key`,
+   `token` for `-token` — or nil. A flag naming where the credential lives
+   (`--token-file`, `--api-key-env`) takes a path or a name, and is not one."
+  [a]
+  (when-let [[_ nm] (and (string? a) (re-matches #"--?([A-Za-z][A-Za-z0-9_-]*)" a))]
+    (when (and (re-find refs/secret-key-pattern nm)
+               (not (re-find refs/indirection-key-pattern nm))
+               (not (re-find #"(?i)[-_](file|path|dir|var|name)$" nm)))
+      nm)))
+
+(defn- redact-args
+  "An argument after a credential-looking flag (`--token X`, `--token=X`) as
+   a `$VAR` reference: argv is written literally, so a `!bw://` placeholder
+   would reach the server as text, while `$VAR` is expanded when agentctl
+   reads the config. The variable is named after the server and the flag.
+   A whole `$VAR` already there is kept."
+  [scope args]
+  (let [secret (fn [flag v]
+                 (if (env-ref? v)
+                   v
+                   (let [var (-> (str (u/kw->str scope) "_" flag)
+                                 (str/replace #"[^A-Za-z0-9]+" "_")
+                                 str/upper-case)]
+                     (note! (str "redacted " scope " argument after --" flag " -> set $" var))
+                     (str "$" var))))]
+    (first
+     (reduce (fn [[out flag] a]
+               (if-let [[_ f v] (and (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))]
+                 [(conj out (if-let [nm (credential-flag f)] (str f "=" (secret nm v)) a)) nil]
+                 (if (and flag (string? a) (not (str/starts-with? a "-")))
+                   [(conj out (secret flag a)) nil]
+                   [(conj out a) (credential-flag a)])))
+             [[] nil]
+             args))))
+
 (defn- invert [key-map] (into {} (map (fn [[k v]] [(u/kw->str v) k])) key-map))
 
 ;; ---------------------------------------------------------------- settings
@@ -243,7 +279,8 @@
     (u/prune-nils
      {:tool tool
       :command (or (:command t) (:command entry))
-      :args (not-empty (vec (or (:args t) (:args entry))))
+      ;; a token passed on the command line is as much a secret as one in env
+      :args (not-empty (redact-args nm (or (:args t) (:args entry))))
       :url (or (:url t) (:url entry))
       :env (not-empty (redact-env nm (or (:env t) (:env entry))))
       ;; an http server's whole credential rides in a header — left
