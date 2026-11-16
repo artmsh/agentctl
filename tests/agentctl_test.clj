@@ -138,14 +138,17 @@
       (is (nil? (toml/find-python old-py)))
       (is (nil? (toml/find-python (str dir "/no-such-python"))))
       (is (some? (toml/find-python nil)) "this suite runs with a python3 3.11+ on PATH")))
-  (testing "a file that does not parse reads as nil leniently, but a missing interpreter is never swallowed"
+  (testing "a file this python cannot parse is an error naming the cause and the fix, never an empty table"
     (let [f (str (temp-dir) "/c.toml")]
       (u/write-text! f "a = 1\na = 2\n")
-      (is (nil? (toml/read-toml-lenient f)))
-      (is (nil? (toml/read-toml-lenient (str f ".absent"))))
+      (doseq [read [toml/read-toml]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"(?s)c\.toml does not parse.*TOML 1\.1.*3\.15.*AGENTCTL_PYTHON"
+                              (read f))))
+      (is (nil? (toml/read-toml (str f ".absent"))))
       (with-redefs [toml/python! (fn [] (throw (ex-info "no python" {:type :agentctl.toml/no-python})))]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml-lenient f)))
-        (is (nil? (toml/read-toml-lenient (str f ".absent"))) "an absent file needs no interpreter")))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml f)))
+        (is (nil? (toml/read-toml (str f ".absent"))) "an absent file needs no interpreter")))))
 
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)
@@ -1372,7 +1375,9 @@
       (is (empty? (config/structural-findings cfg)))
       (with-redefs [codex/config-file f]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
-                              (doall (codex/settings-ops cfg))))
+                              (vec (core/gate-codex-permissions
+                                    (filter :refuse-if-settings-change (codex/settings-ops cfg))
+                                    (remove :refuse-if-settings-change (codex/settings-ops cfg))))))
         (is (not (u/exists? f)))
         (u/write-text! f "default_permissions = \"p\"\n")
         (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough"))))
@@ -1427,6 +1432,27 @@
       (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
       (with-redefs [codex/config-file f]
         (is (seq (codex-drift (row {:model "m-b"}) state/empty-state)))))))
+
+(deftest codex-permissions-check-refuses-only-runs-that-touch-codex-settings
+  (let [f (str (temp-dir) "/config.toml")
+        dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}
+        row (fn [m] {:settings [(merge {:id :user-codex :acli [:codex] :in :all :model "m-a"} m)]
+                     :mcps [{:id :docs :cmd "/bin/echo docs" :in :all :acli [:codex]}]})
+        plan (fn [raw st opts] (core/build-plan (config/normalize raw "test") st opts))]
+    (u/write-text! f "model = \"m-a\"\n")
+    (with-redefs [codex/config-file f
+                  codex/mcp-list (constantly {})]
+      (let [{st :st} (converge-codex (row {:sandbox "dev" :permission-profiles {:dev dev}}) state/empty-state)
+            broken (row {:permission-profiles {:dev dev}})]
+        (testing "-k mcps -t codex cannot change permissions: a warning, not a refusal"
+          (let [ops (plan broken st {:tools #{:codex} :kinds #{:mcps}})]
+            (is (some #(and (:warn %) (re-find #"no default_permissions" (str (:summary %)))) ops))
+            (is (some #(and (= :mcps (:kind %)) (plan/mutating? %)) ops) "the MCP server is still planned")))
+        (testing "a run that writes codex settings is refused"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                                (plan broken st {:tools #{:codex}})))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                                (plan broken st {:tools #{:codex} :kinds #{:settings}}))))))))
 
 (def vendor-codex-hooks
   "A hooks.json a vendor installer wrote: one SessionStart and one Stop hook."
@@ -1513,6 +1539,38 @@
         (is (nil? (plan/json-array-merge-op {:tool :claude :kind :hooks :id :x :file f :path [:hooks :Stop]
                                             :value {:hooks [{:type "command" :command "x"}]}})))))))
 
+(deftest a-json-file-that-does-not-parse-is-never-rewritten
+  ;; read as nil, a settings.json with one trailing comma was rewritten
+  ;; holding only what agentctl declared: env and every other key gone
+  (let [f (str (temp-dir) "/settings.json")
+        broken "{\"env\": {\"A\": \"1\"}, \"model\": \"m-a\",}\n"
+        args {:tool :claude :kind :settings :id :model :file f :path [:model]}]
+    (doseq [[label mk] [["set" #(plan/json-set-op (assoc args :value "m-b"))]
+                        ["unset" #(plan/json-unset-op args)]
+                        ["remove" #(plan/json-remove-op args)]]
+            :let [_ (u/write-text! f broken)
+                  o (mk)]]
+      (testing label
+        (is (some? o) "a file that does not parse is reported, not read as empty")
+        (is (:warn o))
+        (is (re-find #"not valid JSON" (str (:summary o))))
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)) "byte for byte")))
+    (testing "an op planned before the file broke still refuses at exec time"
+      (u/write-text! f "{\"model\": \"m-a\"}\n")
+      (let [o (plan/json-set-op (assoc args :value "m-b"))]
+        (u/write-text! f broken)
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)))))
+    (testing "every planned write to a broken JSON file is refused, whichever adapter built it"
+      (u/write-text! f broken)
+      (let [raw-op (plan/op {:action :update :tool :claude :kind :plugins :id :p :target f
+                             :exec! #(u/write-json! f {:enabledPlugins {}})})
+            [o] (core/refuse-unparseable-json [raw-op])]
+        (is (:warn o))
+        (is (seq (:failed (core/execute! [o]))))
+        (is (= broken (slurp f)))))))
+
 (deftest codex-hooks-refuse-a-hooks-json-that-does-not-parse
   ;; read as nil, an unparseable hooks.json was replaced by one holding only
   ;; agentctl's hook: every vendor hook in it deleted
@@ -1538,6 +1596,25 @@
           (is (= [:update] (map :action ops)))
           (is (seq (:failed (core/execute! ops))))
           (is (= broken (slurp hooks))))))))
+
+(deftest a-settings-rows-hooks-and-hooks-rows-both-contribute
+  (let [settings {:id :user-claude :acli [:claude] :in :all :model "m-a"
+                  :hooks {:Stop [{:id :from-settings :command "a"}]
+                          :from-settings-keyed {:event :SessionStart :command "c"}}}
+        hook {:id :from-row :event :Stop :command "b" :acli [:claude] :in :all}]
+    (testing "whichever placement comes first, every hook reaches the tool"
+      (doseq [raw [{:settings [settings] :hooks [hook]}
+                   {:hooks [hook] :settings [settings]}
+                   ;; a row without :acli is placed in another order
+                   {:settings [settings] :hooks [(dissoc hook :acli)]}
+                   {:settings [(dissoc settings :acli)] :hooks [(dissoc hook :acli)]}]
+              :let [hooks (get-in (config/normalize raw "test") [:tools :claude :hooks])]]
+        (is (= #{:from-settings :from-settings-keyed :from-row} (set (keys hooks))) (pr-str raw))
+        (is (= :Stop (keyword (u/kw->str (:event (:from-settings hooks))))))))
+    (testing "one id declared in both, with different bodies, is a structural error"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hook :from-row is declared twice"
+                            (config/normalize {:settings [(assoc-in settings [:hooks :Stop 0 :id] :from-row)]
+                                               :hooks [hook]} "test"))))))
 
 (deftest codex-hooks-validate-events-and-stay-opt-in
   (testing "validate accepts codex hooks and rejects an event codex never fires"
@@ -3187,6 +3264,40 @@
                                  :ops [{:op "set" :path [":mcps" ":x" ":env"]
                                         :type "edn" :value "{oops"}]})))))))
 
+(deftest gui-edits-a-dsl-row-and-leaves-every-other-section-as-written
+  (let [text (str ";; hand-written\n{:#def {effort \"high\"}\n\n"
+                  " :settings\n [{:id :base :thinking $effort :acli [:claude] :in :all} ; user-wide\n"
+                  "  {:id :app :model \"opus\" :in \"projects/app\"}]\n\n"
+                  " :mcps [{:id :search :cmd \"s\" :in :all}]\n\n"
+                  " :agents {[team \"reviewer\"] {:in :all}}\n\n"
+                  " :statusline {:segments [:model]}}\n")
+        dir (temp-dir)
+        path (str dir "/agents.edn")
+        _ (u/write-text! path text)
+        ctx {:tok "t" :path path :base-opts {} :lock (Object.)}
+        body (fn [m] (java.io.ByteArrayInputStream. (.getBytes (json/generate-string m))))
+        post (fn [ops] (-> (gui/handler ctx {:request-method :post :uri "/api/edit"
+                                             :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                             :body (body {:text text :ops ops})})
+                           :body (json/parse-string true)))]
+    (is (= (str/replace text "\"opus\"" "\"haiku\"")
+           (:text (post [{:op "set" :path [":settings" "1" ":model"] :type "scalar" :value "haiku"}]))))
+    (is (= (str/replace text "{[team \"reviewer\"] {:in :all}}" "{[team \"reviewer\"] {:in \"projects\"}}")
+           (:text (post [{:op "set" :path [":agents" "[team \"reviewer\"]" ":in"] :type "edn"
+                          :value "\"projects\""}]))))
+    (let [data (post [{:op "append" :path [":mcps"] :edn "{:in :all}"}])]
+      (is (= (str/replace text "{:id :search :cmd \"s\" :in :all}]" "{:id :search :cmd \"s\" :in :all} {:in :all}]")
+             (:text data)))
+      (is (= 2 (count (:entries (first (filter #(= ":mcps" (:key %)) (get-in data [:form :sections]))))))
+          "the form answers the edited buffer"))
+    (testing "a row index gone stale (deleted before the form re-rendered) is a message, not a 500"
+      (is (= 400 (:status (gui/handler ctx {:request-method :post :uri "/api/edit"
+                                            :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                            :body (body {:text text
+                                                         :ops [{:op "set" :path [":settings" "9" ":model"]
+                                                                :type "scalar" :value "x"}]})})))))
+    (is (= text (slurp path)))))
+
 (deftest gui-coerces-json-filters-into-keywords
   (testing "keep-projects compares keywords and does no coercion of its own"
     (let [o (gui/opts-from-json {:tools ["pi"] :kinds ["mcps"] :projects ["example"] :verbose true}
@@ -3639,13 +3750,83 @@
     (is (false? (get-in cfg [:tools :claude :auto-compact])))
     (is (= "c" (get-in cfg [:tools :codex :model])))))
 
+(defn- dsl-section [m k] (first (filter #(= (str k) (:key %)) (:sections m))))
+(defn- dsl-field [entry k] (first (filter #(= (name k) (:key %)) (:fields entry))))
+
 (deftest entity-gui-preserves-the-vector-file-shape
   (let [text "{:#def {effort \"high\"} :settings [{:thinking $effort :in :all}]}"
+        m (form/model text)
+        row (first (:entries (dsl-section m :settings)))]
+    (is (:ok m))
+    (is (= ":all" (:selector (first (:targets m)))))
+    (is (= "$effort" (:value (dsl-field row :thinking))) "a reference is shown as itself")
+    (is (= [":settings" "0" ":thinking"] (:path (dsl-field row :thinking))))))
+
+(deftest entity-gui-has-a-section-for-every-dsl-kind
+  (let [text (str "{:settings [{:id :base :model \"sonnet\" :tools [:claude] :in :all}"
+                  "            {:model \"opus\" :in \"projects/app\"}]"
+                  " :skill-packs {[:uri \"file:///x\"] {:alias team}}"
+                  " :agents {[team \"r\"] {:in :all}}"
+                  " :plugins {[:gh \"o/r\" \"p\"] {:in :all :version :latest}}"
+                  " :statusline {:segments [:model]}}")
         m (form/model text)]
     (is (:ok m))
-    (is (= "entities" (:layout (second (:sections m)))))
-    (is (= ":all" (:selector (first (:targets m)))))
-    (is (str/includes? (:value (first (:fields (second (:sections m))))) "$effort"))))
+    (is (= #{":#def" ":settings" ":permissions" ":mcps" ":skill-packs" ":skills" ":providers" ":memory"
+             ":trust" ":hooks" ":plugins" ":agents" ":extensions" ":statusline"}
+           (set (map :key (:sections m)))))
+    (let [[base app] (:entries (dsl-section m :settings))]
+      (is (= ["base  · :all" "#2  · \"projects/app\""] [(:label base) (:label app)]))
+      (testing "placement is on every row, :tools edited where the row wrote it"
+        (is (= [":settings" "0" ":tools"] (:path (dsl-field base :acli))))
+        (is (= [":claude"] (:value (dsl-field base :acli))))
+        (is (= [":settings" "1" ":acli"] (:path (dsl-field app :acli))))
+        (is (false? (:present (dsl-field app :acli))))
+        (is (= "\"projects/app\"" (:value (dsl-field app :in))))))
+    (let [agent (first (:entries (dsl-section m :agents)))]
+      (is (= "[team \"r\"]" (:label agent)))
+      (is (= [":agents" "[team \"r\"]" ":in"] (:path (dsl-field agent :in))))
+      (is (= [":claude"] (:options (dsl-field agent :acli))) "only Claude reads subagents"))
+    (is (= ":latest" (:value (dsl-field (first (:entries (dsl-section m :plugins))) :version))))
+    (is (str/includes? (get-in (dsl-section m :statusline) [:raw :value]) ":segments"))
+    (is (= "row" (:id-kind (dsl-section m :settings))))
+    (is (= "edn" (:id-kind (dsl-section m :agents))))))
+
+(deftest entity-gui-edits-rows-and-keyed-entries-in-place
+  (let [text (str ";; mine\n{:settings\n [{:model \"a\" :in :all} ; first\n  {:in \"projects\"}]\n\n"
+                  " :agents {[team \"r\"] {:in :all}}}\n")
+        edit #(edit/apply-ops text (form/ops->edits [%]))]
+    (is (= (str/replace text "{:in \"projects\"}" "{:in \"projects\" :model \"b\"}")
+           (edit {:op "set" :path [":settings" "1" ":model"] :type "scalar" :value "b"})))
+    (is (= (str/replace text "{:in \"projects\"}]" "{:in \"projects\"}\n  {:in :all :acli [:codex]}]")
+           (edit {:op "append" :path [":settings"] :edn "{:in :all :acli [:codex]}"}))
+        "a new row is broken and indented like the rows above it, with no commas")
+    (is (= (str/replace text "{[team \"r\"] {:in :all}}" "{[team \"r\"] {:in :all :acli [:claude]}}")
+           (edit {:op "set" :path [":agents" "[team \"r\"]" ":acli"] :type "kw-set" :value [":claude"]})))
+    (is (= (str/replace text "{[team \"r\"] {:in :all}}" "{}")
+           (edit {:op "unset" :path [":agents" "[team \"r\"]"]})))
+    (is (not (str/includes? (edit {:op "unset" :path [":settings" "0"]}) "{:model \"a\" :in :all}")))
+    (is (str/includes? (edit {:op "append" :path [":mcps"] :edn "{:in :all}"}) ":mcps [{:in :all}]")
+        "a section not in the file yet is created")
+    (is (thrown? Exception (edit {:op "set" :path [":settings" "5" ":model"] :type "scalar" :value "x"}))
+        "a row that is not there is refused, not appended")
+    (testing "a stale or negative row index is refused on unset too, not a silent no-op"
+      (is (thrown? Exception (edit {:op "unset" :path [":settings" "5"]})))
+      (is (thrown? Exception (edit {:op "unset" :path [":settings" "-1"]})))
+      (is (thrown? Exception (edit {:op "unset" :path [":settings" "5" ":model"]}))))
+    (testing "a row index steps into a vector only; into a map it is refused, not written as a key"
+      (is (thrown? Exception (edit {:op "set" :path [":agents" "0"] :type "edn" :value "{}"})))
+      (is (thrown? Exception (edit {:op "set" :path [":agents" "0" ":in"] :type "edn" :value ":all"})))
+      (is (thrown? Exception (edit {:op "unset" :path [":agents" "0"]})))
+      (is (thrown? Exception (edit {:op "set" :path [":settings" ":model"] :type "scalar" :value "x"}))
+          "a vector takes no map key"))
+    (testing "a row goes with the comment ending its line; the next row takes its place"
+      (is (= (str/replace text "[{:model \"a\" :in :all} ; first\n  {:in" "[{:in")
+             (edit {:op "unset" :path [":settings" "0"]})))
+      (let [three (str "{:settings\n [{:a 1} ; one\n  {:b 2} ; two\n  {:c 3}]}\n")]
+        (is (= "{:settings\n [{:a 1} ; one\n  {:c 3}]}\n"
+               (edit/apply-ops three [{:op :unset :path [:settings 1]}])))
+        (is (= "{:settings\n [{:b 2} ; two\n  {:c 3}]}\n"
+               (edit/apply-ops three [{:op :unset :path [:settings 0]}])))))))
 
 (deftest entity-partial-settings-prune
   (let [root (temp-dir) file (str root "/config.toml")]

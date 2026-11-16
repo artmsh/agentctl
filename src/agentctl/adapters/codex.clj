@@ -65,7 +65,7 @@
                                        :http_headers (get t "http_headers")
                                        :bearer_token_env_var (get t "bearer_token_env_var")}
                            :enabled (get t "enabled" true)}]))
-            (get (toml/read-toml-lenient config-file) "mcp_servers")))))
+            (get (toml/read-toml config-file) "mcp_servers")))))
 
 ;; ---------------------------------------------------------------- settings
 
@@ -143,7 +143,7 @@
    declared fields (`whole-table?`). Codex writes its own state into `[tui]`
    (`model_availability_nux`), so nothing above the slot is replaced."
   [presets file]
-  (let [current (toml/read-toml-lenient file)]
+  (let [current (toml/read-toml file)]
     (for [[k p] (sort-by (comp str key) presets)
           :let [n (schema/preset-slot k)
                 table ["tui" "presets" n]
@@ -208,7 +208,7 @@
    anything agentctl did not write, and under the legacy `:executors` form,
    which never prunes, everything."
   [settings st entity-dsl? file]
-  (let [current (toml/read-toml-lenient file)
+  (let [current (toml/read-toml file)
         owned (if entity-dsl? (vec (owned-paths st file)) [])
         owned? (fn [leaf] (some #(and (<= (count %) (count leaf)) (= % (subvec leaf 0 (count %)))) owned))
         declared (set (map u/key-str (keys (:permission-profiles settings))))
@@ -262,8 +262,12 @@
   (let [settings (common/settings-for cfg tool)
         _ (when-let [e (schema/errors settings [:executors :codex])]
             (throw (ex-info (str "codex settings: " e) {:path [:executors :codex]})))
-        _ (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg) file)))]
-            (throw (ex-info (str/join "; " (map last es)) {:path [:executors :codex :sandbox]})))
+        ;; a run that writes codex settings is refused on these; any other
+        ;; run only warns (`core/gate-codex-permissions`)
+        gate (when-let [es (seq (filter #(= :error (first %)) (permission-findings settings st (:entity-dsl? cfg) file)))]
+               (plan/op {:action :noop :warn true :tool tool :kind :settings :id :permissions
+                         :refuse-if-settings-change true
+                         :summary (str/join "; " (map last es))}))
         ;; Claude's status line is a command object; in a unified settings
         ;; row it reaches codex too, and stays an unsupported setting here
         footer? (schema/status-line? (:status-line settings))
@@ -280,6 +284,7 @@
      (preset-ops (:presets settings) file)
      (when footer? (keep identity [(status-line-op (:status-line settings) file)]))
      (permission-profile-ops (:permission-profiles settings) file)
+     (when gate [gate])
      (for [k unsupported]
        (plan/op {:action :noop :tool tool :kind :settings :id k
                  :summary (str "unsupported setting " k " for codex — ignored")
@@ -317,18 +322,18 @@
   (let [declared (:hooks (common/settings-for cfg tool))
         managed (into #{} (map keyword) (state/managed-ids st tool :hooks))]
     (concat
-     (for [[id decl] declared
-           :let [path (hook-path decl)
-                 op (plan/json-array-merge-op
-                     {:tool tool :kind :hooks :id id
-                      :file hooks-file :path path
-                      :old (:value (state/entry st tool :hooks id)) :value (hook-group decl)
-                      :report-converged? true :in-place? true
-                      :note "codex asks to review a new or changed hook before it runs"
-                      :summary (str "hooks.json hooks." (name (last path))
-                                    (when-let [m (:matcher decl)] (str " [" m "]")))})]
-           :when op]
-       op)
+     (mapcat (fn [[id decl]]
+               (let [path (hook-path decl)
+                     entry (state/entry st tool :hooks id)]
+                 (plan/json-array-place-ops
+                  {:tool tool :kind :hooks :id id
+                   :file hooks-file :path path :old (:value entry) :old-path (:path entry)
+                   :value (hook-group decl)
+                   :report-converged? true :in-place? true
+                   :note "codex asks to review a new or changed hook before it runs"
+                   :summary (str "hooks.json hooks." (name (last path))
+                                 (when-let [m (:matcher decl)] (str " [" m "]")))})))
+             declared)
      (for [id managed
            :when (not (contains? declared id))
            :let [entry (state/entry st tool :hooks id)
@@ -440,12 +445,12 @@
    trust is the one `project-ops` writes."
   [proj]
   (or (true? (:trusted proj))
-      (= "trusted" (get-in (toml/read-toml-lenient config-file)
+      (= "trusted" (get-in (toml/read-toml config-file)
                            ["projects" (:path proj) "trust_level"]))))
 
 (defn- project-mcp-ops [cfg pid proj]
   (let [file (project-config-file proj)
-        servers (get (toml/read-toml-lenient file) "mcp_servers")
+        servers (get (toml/read-toml file) "mcp_servers")
         ms (common/project-mcps cfg proj tool)]
     (concat
      (when (and (seq ms) (not (trusted? proj)))
@@ -509,7 +514,7 @@
     (for [[id p] desired
           :let [key-ref (:key p)
                 env-var (when (= :env (:ref/kind key-ref)) (:ref/var key-ref))
-                current-name (get-in (toml/read-toml-lenient config-file)
+                current-name (get-in (toml/read-toml config-file)
                                      ["model_providers" (u/kw->str id) "name"])
                 kvs (u/prune-nils
                      {"base_url" (:url p)

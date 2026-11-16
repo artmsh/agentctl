@@ -484,4 +484,33 @@ EDN
   [ -L "$SB/.claude/agents/reviewer.md" ] || fail "the link was touched"
 )
 
+echo "22. a github page URL is that repository's git remote: switching [:gh …] to [:uri \"https://github.com/…\"] keeps the ref"
+(
+  SB="$SB/gh-url"; stub_home "$SB"
+  export AGENTCTL_HOME="$SB" HOME="$SB" GIT_CONFIG_GLOBAL="$SB/.gitconfig" PATH="$SB/bin:$PATH"
+  market "$SB" 1.0.0
+  market "$SB" 1.0.0 dev
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme"}}}
+EDN
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "install from [:gh …] failed: exit $code"; }
+  cat > "$SB/agents.edn" <<EDN
+{:plugins {[:uri "https://github.com/acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme" :ref "dev"}}}
+EDN
+  apply
+  [ "$code" = 0 ] || { cat "$SB/apply.txt" "$SB/claude-calls.log"; fail "switching to the github URL failed: exit $code"; }
+  src=$(setting "$SB/.claude/plugins/known_marketplaces.json" "s['acme']['source']")
+  [ "$(setting "$SB/.claude/plugins/known_marketplaces.json" "s['acme']['source']['source']")" = git ] \
+    || fail "Claude registered the github URL as a hosted marketplace.json: $src"
+  [ "$(setting "$SB/.claude/plugins/known_marketplaces.json" "s['acme']['source'].get('ref')")" = dev ] \
+    || fail "the ref was dropped: $src"
+  [ "$(git -C "$SB/.claude/plugins/marketplaces/acme" rev-parse HEAD)" = "$(git -C "$SB/remotes/acme/market.git" rev-parse dev)" ] \
+    || fail "the clone is not at the ref"
+  [ "$(record 'rows[0]["gitCommitSha"]')" = "$(git -C "$SB/remotes/acme/market.git" rev-parse dev)" ] \
+    || fail "the plugin does not come from the ref"
+  plan
+  [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after the switch: exit $code"; }
+)
+
 echo "all plugin e2e checks passed"

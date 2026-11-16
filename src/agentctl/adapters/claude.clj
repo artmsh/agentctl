@@ -216,18 +216,17 @@
   (let [declared (:hooks (common/settings-for cfg tool))
         managed (into #{} (map keyword) (state/managed-ids st tool :hooks))]
     (concat
-     (for [[id decl] declared
-           :let [path (hook-path decl)
-                 value (hook-group decl)
-                 old (:value (state/entry st tool :hooks id))
-                 op (plan/json-array-merge-op
-                     {:tool tool :kind :hooks :id id
-                      :file settings-file :path path :old old :value value
-                      :report-converged? true
-                      :summary (str "settings.json hooks." (name (last path))
-                                    (when-let [m (:matcher decl)] (str " [" m "]")))})]
-           :when op]
-       op)
+     (mapcat (fn [[id decl]]
+               (let [path (hook-path decl)
+                     entry (state/entry st tool :hooks id)]
+                 (plan/json-array-place-ops
+                  {:tool tool :kind :hooks :id id
+                   :file settings-file :path path :old (:value entry) :old-path (:path entry)
+                   :value (hook-group decl)
+                   :report-converged? true
+                   :summary (str "settings.json hooks." (name (last path))
+                                 (when-let [m (:matcher decl)] (str " [" m "]")))})))
+             declared)
      (for [id managed
            :when (not (contains? declared id))
            :let [entry (state/entry st tool :hooks id)
@@ -336,7 +335,7 @@
    would uninstall the server. Says what happened, for the failure message."
   [nm prev]
   (try
-    (u/write-json! runtime-file (assoc-in (or (u/read-json runtime-file) {}) [:mcpServers (keyword nm)] prev))
+    (u/write-json! runtime-file (assoc-in (plan/read-json-strict runtime-file) [:mcpServers (keyword nm)] prev))
     "the previous definition was restored"
     (catch Exception e
       (str "restoring the previous definition failed too (" (ex-message e) "); ~/.claude.json is backed up in "
@@ -579,6 +578,7 @@
                                            :after (or (cp/wanted-version want offer nil) "latest")})
                  vdiff (conj vdiff))
         :exec! (fn []
+                 (plan/read-json-strict file)
                  (let [before (u/slurp-safe file)]
                    (try
                      ;; Claude refuses to re-point a marketplace whose
@@ -586,7 +586,7 @@
                      ;; entry is written first
                      (when desired-m
                        (u/backup! file)
-                       (u/write-json! file (update-in (or (u/read-json file) {})
+                       (u/write-json! file (update-in (plan/read-json-strict file)
                                                       [:extraKnownMarketplaces (keyword mname)]
                                                       merge want-marketplace)))
                      (run argv-add)
@@ -602,7 +602,7 @@
                  ;; ordering than the settings file expects.
                  (u/backup! file)
                  (u/write-json! file
-                                (-> (or (u/read-json file) {})
+                                (-> (plan/read-json-strict file)
                                     ;; `marketplace add` rewrites the entry whole, dropping
                                     ;; keys such as autoUpdate: put back what was there
                                     (update-in [:extraKnownMarketplaces (keyword mname)] merge
@@ -621,12 +621,13 @@
         :cmds [argv] :summary "removed from agents.edn" :risk :medium
         :diffs [{:key :enabledPlugins :before before :after nil}]
         :exec! (fn []
+                 (plan/read-json-strict file)
                  ;; a plugin enabled in settings but never installed is
                  ;; already gone as far as the CLI is concerned
                  (let [r (if cwd (claude-sh-in cwd argv) (claude-sh argv))]
                    (when-not (not-installed? r) (ok! r argv)))
                  (u/backup! file)
-                 (let [s (or (u/read-json file) {})
+                 (let [s (plan/read-json-strict file)
                        eps (dissoc (or (:enabledPlugins s) {}) (keyword key))]
                    (u/write-json! file (assoc s :enabledPlugins eps))))}))))
 

@@ -300,7 +300,7 @@
 
 (defn provider-ops [cfg]
   (let [desired (common/for-tool-resources (:providers cfg) tool)
-        current (toml/read-toml-lenient config-file)]
+        current (toml/read-toml config-file)]
     (mapcat
      (fn [[id p]]
        (let [type* (provider-type p)]

@@ -75,7 +75,7 @@
                                     :diffs [{:key :api_key :before (when cur "<set>") :after "<set>"}]
                                     :exec! (fn []
                                              (u/backup! (keys-file))
-                                             (let [m (or (u/read-json (keys-file)) {})]
+                                             (let [m (plan/read-json-strict (keys-file))]
                                                (u/write-json! (keys-file) (assoc m (keyword kname) value))))}))))
              enumerate-warn (when (and d (= :all (:models p)))
                               (plan/op {:action :noop :tool tool :kind :providers :id id
