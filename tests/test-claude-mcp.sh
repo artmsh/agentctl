@@ -52,8 +52,11 @@ if legacy is not None:
     s["enabledMcpjsonServers"] = cur + [x for x in legacy if x not in cur]
     os.makedirs(os.path.dirname(local), exist_ok=True)
     json.dump(s, open(local, "w"), indent=2)
-if a[:2] == ["mcp", os.environ.get("STUB_REFUSE")]:
-    print("Error: refused by the stub", file=sys.stderr); sys.exit(1)
+refuse = os.path.join(os.environ["HOME"], "stub-refuse")
+refused = os.environ.get("STUB_REFUSE") or (open(refuse).read().strip() if os.path.exists(refuse) else None)
+if a[:2] == ["mcp", refused]:
+    # a CLI may echo what it was given, values and all
+    print("Error: refused by the stub: " + " ".join(a), file=sys.stderr); sys.exit(1)
 if a[:2] == ["mcp", "remove"]:
     d.get("mcpServers", {}).pop(a[-1], None)
 elif a[:2] == ["mcp", "add"]:
@@ -94,6 +97,25 @@ export PATH="$SB/bin:$PATH"
 
 git init -q "$SB/proj"
 SECRET=sk-test-0123456789abcdef
+
+# one GUI for the whole suite, started before any step locks the vault. It
+# caches what a ref resolves to for its lifetime, so each GUI check reads a
+# vault item no other step changes
+printf '{}\n' > "$SB/agents.edn"
+"$ROOT/agentctl" gui -f "$SB/agents.edn" --port 0 --no-open > "$SB/gui.log" 2>&1 &
+GUI_PID=$!
+trap 'kill "$GUI_PID" 2>/dev/null || true; rm -rf "$SB"' EXIT
+for _ in $(seq 1 100); do grep -q 'http://127.0.0.1' "$SB/gui.log" && break; sleep 0.1; done
+URL=$(grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$SB/gui.log" | head -1)
+[ -n "$URL" ] || { cat "$SB/gui.log"; fail "gui did not print a URL to open"; }
+BASE=${URL%%/\?t=*}
+TOK=${URL##*t=}
+gui() { # gui <plan|apply> <kind> -> the response, for agents.edn and claude alone
+  python3 -c 'import json,sys; print(json.dumps({"text": open(sys.argv[1]).read(), "tools": ["claude"], "kinds": [sys.argv[2]], "confirm": True}))' \
+    "$SB/agents.edn" "$2" > "$SB/gui-body.json"
+  curl -sS -X POST -H "X-Agentctl-Token: $TOK" -H 'content-type: application/json' \
+    --data-binary "@$SB/gui-body.json" "$BASE/api/$1"
+}
 
 # ---------------------------------------------------------------- unresolved secrets
 
@@ -464,18 +486,30 @@ plan
 [ "$(json "$SB/.claude/settings.json" "d['\$schema']")" = https://json.schemastore.org/claude-code-settings.json ] \
   || fail "settings.json lost its \$schema"
 
-echo "22. a refused claude mcp add fails the op, and the server is not owned"
+echo "22. a refused claude mcp add fails the op, the server is not owned, and its secret is not printed"
 cat > "$SB/agents.edn" <<EDN
-{:mcps [{:id :refused :cmd "/bin/echo refused" :in :all :acli [:claude]}
+{:mcps [{:id :refused :cmd "/bin/echo refused" :env {"DOCS_KEY" "!bw://refuse/KEY"} :in :all :acli [:claude]}
         {:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}]}
 EDN
+vault '{"refuse": {"KEY": "'$PLAIN'"}}'
 STUB_REFUSE=add apply -k mcps
 [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused mcp add exited $code"; }
 grep -q "1 failed" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the refused add is not counted as failed"; }
-grep -q "claude mcp add --scope user refused.*failed: Error: refused by the stub" "$SB/apply.txt" \
-  || { cat "$SB/apply.txt"; fail "the CLI's error is not reported"; }
+grep -q "claude mcp add --scope user refused -e DOCS_KEY=plai…34 -- /bin/echo refused failed: Error: refused by the stub: mcp add --scope user refused -e DOCS_KEY=plai…34" "$SB/apply.txt" \
+  || { cat "$SB/apply.txt"; fail "the CLI's error is not reported, masked"; }
+grep -q "$PLAIN" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the secret the command carried"; }
 [ "$(json "$SB/.claude.json" "'refused' in d.get('mcpServers', {})")" = False ] || fail "the stub wrote a refused server"
 grep -q '\[:claude :mcps "refused"\]' "$SB/.config/agentctl/state.edn" && fail "ownership claimed for a server the CLI refused"
+echo add > "$SB/stub-refuse"
+gui apply mcps > "$SB/gui.out"
+rm "$SB/stub-refuse"
+python3 - "$SB/gui.out" <<'PY' || { cat "$SB/gui.out"; fail "the gui does not report the refused add, masked"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [f["id"] for f in d["failed"]] == ["refused"], d
+assert "DOCS_KEY=plai…34" in d["failed"][0]["error"], d
+PY
+grep -q "$PLAIN" "$SB/gui.out" && { cat "$SB/gui.out"; fail "the gui served the secret the command carried"; }
 apply -k mcps
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "the retry after a refused add exited $code"; }
 grep -q '\[:claude :mcps "refused"\]' "$SB/.config/agentctl/state.edn" || fail "the server added on retry is not owned"

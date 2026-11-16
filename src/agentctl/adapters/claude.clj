@@ -31,21 +31,36 @@
   [dir & args]
   (u/sh-env-in dir {:HOME u/home} args))
 
+(defn- hide
+  "`s` with each of `values` replaced by its mask, the longest first so a
+   value that contains another is not left half shown."
+  [s values]
+  (reduce (fn [s v] (str/replace s v (refs/mask v)))
+          (str s)
+          (sort-by (comp - count) (distinct (remove str/blank? (map str values))))))
+
 (defn- ok!
   "Turn a non-zero CLI exit into a real failure, so apply! reports the op as
    failed and claims no ownership of what the CLI never wrote — a server it
-   refused to add, a plugin it never installed."
-  [{:keys [exit err out]} argv]
-  (when-not (zero? exit)
-    (throw (ex-info (str (str/join " " argv) " failed: "
-                         (first (remove str/blank? [err out])))
-                    {:exit exit :argv argv})))
-  true)
+   refused to add, a plugin it never installed.
+
+   The message names the command, and `claude mcp add` carries its env and
+   header values on the command line, where the CLI may echo them back:
+   `secrets` are masked wherever they appear, since the message is printed,
+   and served to the GUI."
+  ([result argv] (ok! result argv nil))
+  ([{:keys [exit err out]} argv secrets]
+   (when-not (zero? exit)
+     (let [argv (mapv #(hide % secrets) argv)]
+       (throw (ex-info (str (str/join " " argv) " failed: "
+                            (hide (first (remove str/blank? [err out])) secrets))
+                       {:exit exit :argv argv}))))
+   true))
 
 (defn- claude-ok!
   "Run the claude CLI and fail on a non-zero exit."
-  [argv]
-  (ok! (claude-sh argv) argv))
+  ([argv] (claude-ok! argv nil))
+  ([argv secrets] (ok! (claude-sh argv) argv secrets)))
 
 (def setting-keys
   {:model :model
@@ -285,7 +300,8 @@
                                             (mapcat (fn [[k v]] ["--header" (str k ": " v)]) (:values headers)))
                                     (concat ["claude" "mcp" "add" "--scope" "user" nm]
                                             (mapcat (fn [[k v]] ["-e" (str k "=" v)]) (:values env))
-                                            ["--"] [(:command m)] (:args m))))))})))
+                                            ["--"] [(:command m)] (:args m))))
+                             (concat (vals (:values env)) (vals (:values headers)))))})))
      ;; only user-wide servers: a namespaced id is a project's server, which
      ;; lives in that project's .mcp.json and is not ours to uninstall globally
      (for [id managed
