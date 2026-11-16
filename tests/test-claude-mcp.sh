@@ -492,4 +492,42 @@ apply -k mcps
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "the retried prune exited $code"; }
 [ "$(json "$SB/.claude.json" "'refused' in d['mcpServers']")" = False ] || fail "the retried prune left the server"
 
+# ---------------------------------------------------------------- validate
+
+validate() { set +e; run validate -f "$SB/agents.edn" > "$SB/validate.txt" 2>&1; code=$?; set -e; }
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :hdocs :type :http :url "https://mcp.example.com/h" :headers {"api-key" "!bw://vendor/KEY"} :in :all :acli [:claude]}]
+ :settings [{:env {"DOCS_KEY" "!bw://vendor/KEY"} :acli [:claude] :in :all}
+            {:env {"DOCS_KEY" "!bw://vendor/KEY" "BROKEN" "!bw://"} :acli [:claude] :in "proj"}]}
+EDN
+
+echo "24. validate reports header and settings env refs a locked vault keeps"
+export BW_STATE=locked
+validate
+grep -q "? bitwarden *vault locked" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "a header-only bw ref does not report the locked vault"; }
+grep -q "? hdocs.headers.api-key *bw:vendor/KEY — bitwarden vault locked" "$SB/validate.txt" \
+  || { cat "$SB/validate.txt"; fail "the header ref is not reported"; }
+grep -q "? claude.env.DOCS_KEY *bw:vendor/KEY — bitwarden vault locked" "$SB/validate.txt" \
+  || { cat "$SB/validate.txt"; fail "the user settings env ref is not reported"; }
+grep -q "? ~/proj.claude.env.DOCS_KEY *bw:vendor/KEY — bitwarden vault locked" "$SB/validate.txt" \
+  || { cat "$SB/validate.txt"; fail "the project settings env ref is not reported"; }
+grep -q "✗ ~/proj.claude.env.BROKEN *<invalid reference> — invalid reference" "$SB/validate.txt" \
+  || { cat "$SB/validate.txt"; fail "a malformed settings env ref is not reported"; }
+[ "$code" = 1 ] || { cat "$SB/validate.txt"; fail "the malformed ref is an error: exit $code"; }
+
+echo "25. validate reports an emptied vault field under a header or settings env as an error"
+unset BW_STATE
+sed -i.bak 's/ "BROKEN" "!bw:\/\/"//' "$SB/agents.edn"
+vault '{"vendor": {"KEY": "null"}}'
+validate
+[ "$code" = 1 ] || { cat "$SB/validate.txt"; fail "an emptied vault field is not an error: exit $code"; }
+for where in hdocs.headers.api-key claude.env.DOCS_KEY "~/proj.claude.env.DOCS_KEY"; do
+  grep -qF "✗ $where" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "$where: the emptied field is not reported"; }
+done
+grep -q "field is empty on bw item: vendor/KEY" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "the reason is not given"; }
+vault '{"vendor": {"KEY": "'$SECRET'"}}'
+validate
+grep -qE "✗ (hdocs|claude|~/proj)" "$SB/validate.txt" && { cat "$SB/validate.txt"; fail "a resolved ref is still reported"; }
+grep -q "$SECRET" "$SB/validate.txt" && fail "validate printed a resolved secret"
+
 echo "all claude mcp e2e checks passed"

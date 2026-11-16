@@ -85,6 +85,41 @@
          :else [(f :ok [:skills id] (u/tilde src))])))
    (:skills cfg)))
 
+(defn- parse-ref
+  "`[ref nil]`, or `[nil message]` for a malformed one. An MCP server's values
+   are parsed when the config loads; a settings `env` is parsed only here and
+   when it is planned."
+  [v]
+  (try [(refs/parse v) nil]
+       (catch clojure.lang.ExceptionInfo e [nil (ex-message e)])))
+
+(defn- ref-findings
+  "One finding per value of `m` that does not resolve, under `where` + its
+   key: unknown when the answer cannot be had right now (a locked vault), an
+   error otherwise. apply! holds back whatever carries one of these."
+  [where m]
+  (for [[k v] m
+        :let [[r err] (parse-ref v)
+              {:keys [status message]} (if err {:status :error :message err} (refs/resolve-ref r))]
+        :when (not= :ok status)]
+    (f (if (= :unknown status) :unknown :error) (conj (vec where) k)
+       (str (if err "<invalid reference>" (refs/describe r)) " — " (or message (name status))))))
+
+(defn- settings-envs
+  "`[where env]` for every settings `env` agentctl writes — Claude's, user-wide
+   and per project. No other adapter maps one."
+  [cfg]
+  (concat
+   (when-let [env (get-in cfg [:tools :claude :env])] [[[:settings :claude :env] env]])
+   (for [[pid p] (:projects cfg)
+         :let [env (get-in p [:tools :claude :env])]
+         :when env]
+     ;; a DSL project's id is a digest of its path; the path is its name
+     [[:projects (if (:entity-dsl? cfg) (u/tilde (:path p)) pid) :claude :env] env])))
+
+(defn check-settings-refs [cfg]
+  (mapcat (fn [[where env]] (ref-findings where env)) (settings-envs cfg)))
+
 (defn check-mcps [cfg deep?]
   (mapcat
    (fn [[id m]]
@@ -104,11 +139,8 @@
                    relative? (f :warn [:mcps id]
                                 (str "relative command resolved by the tool: " cmd))
                    :else (f :error [:mcps id] (str "command not executable: " cmd)))]))
-      (for [[k r] (:env m)
-            :let [{:keys [status message]} (refs/resolve-ref r)]
-            :when (not= :ok status)]
-        (f (if (= :unknown status) :unknown :error) [:mcps id :env k]
-           (str (refs/describe r) " — " (or message (name status)))))
+      (ref-findings [:mcps id :env] (:env m))
+      (ref-findings [:mcps id :headers] (:headers m))
       (when (and deep? (= :http (:transport m)))
         (let [{:keys [exit]} (u/sh "curl" "-sS" "-o" "/dev/null" "--max-time" "8" (:url m))]
           [(if (zero? exit)
@@ -147,7 +179,10 @@
 (defn check-vault [cfg]
   (let [needs-bw (some #(= :bw (:ref/kind %))
                        (concat (map :key (vals (:providers cfg)))
-                               (mapcat (comp vals :env) (vals (:mcps cfg)))))]
+                               (mapcat (comp vals :env) (vals (:mcps cfg)))
+                               (mapcat (comp vals :headers) (vals (:mcps cfg)))
+                               (for [[_ env] (settings-envs cfg) [_ v] env]
+                                 (first (parse-ref v)))))]
     (when needs-bw
       [(case @refs/bw-state
          :absent (f :error [:vault :bitwarden] "bw CLI not installed but !bw:// refs are used")
@@ -415,6 +450,7 @@
                          (check-packs cfg deep?)
                          (check-skills cfg)
                          (check-mcps cfg deep?)
+                         (check-settings-refs cfg)
                          (check-providers cfg deep?)
                          (check-vault cfg)
                          (check-claude-settings cfg opts)

@@ -255,6 +255,11 @@ For a user-wide server, whose secret `claude mcp add` stores and agentctl does
 not read back, drift is decided by the env and header *names*: a name missing
 from `~/.claude.json` is drift, a changed value is not.
 
+`validate` checks the same references before anything runs: every MCP server's
+`:env` and `:headers` and Claude's settings `:env`, user-wide and per project.
+One a locked vault keeps is reported `?` (unknown, not a failure); one that is
+missing, emptied or malformed is an error (`✗`) and makes `validate` exit 1.
+
 ## Kimi Code
 
 Kimi Code CLI keeps its configuration in `$KIMI_CODE_HOME`, or `~/.kimi-code`
