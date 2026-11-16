@@ -668,8 +668,12 @@
                                      (for [[_ p] (:skill-packs cfg) d (sources/skill-dirs p)]
                                        (fs/file-name d))))))]
     (for [[kind id :as sel] only
-          :when (not (field-kinds kind))
-          :when (not-any? #(contains? (id-names %) id) (declared kind))]
+          :when (if (= :statusline kind)
+                  ;; the one file: named when declared, or owned to be pruned
+                  (and (nil? (:statusline cfg))
+                       (not-any? (fn [[[_ k]]] (= :statusline k)) (:managed st)))
+                  (and (not (field-kinds kind))
+                       (not-any? #(contains? (id-names %) id) (declared kind))))]
       (str (name kind) "/" (second sel)))))
 
 (declare op-keys)

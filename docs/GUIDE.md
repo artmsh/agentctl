@@ -580,7 +580,9 @@ at an owned path on removal is left in place. `import` reads an existing file ba
 `:statusline`, so `import! --replace` does not drop the declaration and with it the file.
 
 The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it,
-whatever `-t` says.
+whatever `-t` says. `--only statusline/config` names it the same way. `config` is its only
+id: any other is refused, and `--only statusline/config` with neither a declaration nor an
+owned file warns that it names nothing, as any `--only` that matches nothing does.
 A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
 well, as it does every user-wide resource; `--all` includes it. Codex does not read this
 file: its status line is a native setting, and the `codex` override only feeds the

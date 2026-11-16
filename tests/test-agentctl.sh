@@ -1853,4 +1853,32 @@ for pair in "dsl projects entity-DSL" "old trust old-format"; do
     || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
 done
 
+echo "41. --only statusline/ID: config is its one id, and it is named like -k statusline"
+SO="$SB/statusline-only"
+mkdir -p "$SO"
+so() { (cd "$SO" && AGENTCTL_HOME="$SO" run "$@"); }
+cat > "$SO/sl.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+printf '{}\n' > "$SO/empty.edn"
+# an id other than config names nothing: refused, not a silent empty plan
+set +e
+so apply -f "$SO/sl.edn" --only statusline/conf > "$SO/typo.txt" 2>&1; code=$?
+set -e
+[ "$code" = 1 ] && grep -q '^error: --only statusline/conf: .*config' "$SO/typo.txt" \
+  || { cat "$SO/typo.txt"; fail "--only statusline/conf was not refused"; }
+# -t narrows CLIs; an --only that names the file still plans it
+set +e
+so apply -f "$SO/sl.edn" --only statusline/config -t claude --json > "$SO/t.json"; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SO/t.json"; fail "--only statusline/config -t claude exited $code"; }
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(0 if any(o["kind"]=="statusline" and o["action"]=="create" for o in ops) else 1)' "$SO/t.json" \
+  || { cat "$SO/t.json"; fail "--only statusline/config -t claude planned no write"; }
+# nothing declared or owned: said, like any --only naming nothing
+set +e
+so apply -f "$SO/empty.edn" --only statusline/config > "$SO/none.txt" 2>&1; code=$?
+set -e
+[ "$code" = 0 ] && grep -q -- '--only statusline/config — nothing declared or owned' "$SO/none.txt" \
+  || { cat "$SO/none.txt"; fail "--only statusline/config with nothing declared was silent"; }
+
 echo "all agentctl e2e checks passed"

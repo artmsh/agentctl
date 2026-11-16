@@ -348,12 +348,13 @@
                                    (last where) "` in the JSON — keep one"))))))
 
 (defn selected?
-  "Does a run with these options plan the file? `-k statusline` asks for it
-   by name, so `-t` — which names CLIs, none of which owns this file — does
-   not take it away again. A run narrowed to projects, to `--only` entities
-   of other kinds, or aimed at a host, never touches it."
+  "Does a run with these options plan the file? `-k statusline` and
+   `--only statusline/config` ask for it by name, so `-t` — which names CLIs,
+   none of which owns this file — does not take it away again. A run
+   narrowed to projects, to `--only` entities of other kinds, or aimed at a
+   host, never touches it."
   [{:keys [tools kinds projects host only]}]
-  (let [named? (contains? (set kinds) kind)]
+  (let [named? (or (contains? (set kinds) kind) (some #(= kind (first %)) only))]
     (boolean (and (not host) (empty? projects)
                   (or (empty? only) (some #(= kind (first %)) only))
                   (or (empty? kinds) named?)

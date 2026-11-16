@@ -230,7 +230,16 @@
     (is (not (sl/selected? {:only [[:mcps "x"]]})))
     (is (sl/selected? {:user true}) "user scope is where the file lives")
     (is (empty? (core/unmatched-only c state/empty-state {:only [[:statusline "config"]]}))
-        "its id names a file, not a declaration")
+        "declared: its id names the file")
+    (is (sl/selected? {:only [[:statusline "config"]] :tools [:claude]})
+        "--only names it as -k does, so -t does not take it away")
+    (let [none (config/parse-config (pr-str {}) (str u/home "/agents.edn"))]
+      (is (= ["statusline/config"]
+             (core/unmatched-only none state/empty-state {:only [[:statusline "config"]]}))
+          "neither declared nor owned: it names nothing")
+      (is (empty? (core/unmatched-only none (core/sync-state! state/empty-state c)
+                                       {:only [[:statusline "config"]]}))
+          "owned: the run prunes it"))
     (testing "a run narrowed to other entities neither forgets nor rewrites its ownership"
       (let [st (core/sync-state! state/empty-state c)
             gone (config/parse-config (pr-str {}) (str u/home "/agents.edn"))]

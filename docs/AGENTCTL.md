@@ -747,8 +747,9 @@ The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
 resource by path. Keys are the renderer's JSON keys in kebab-case, keyword values
 become strings and `nil` becomes `null` (shown `∅` in a plan). Nothing else is
 interpreted: the renderer's `--check` decides what is valid. Its ops are
-`agentctl statusline/config`, selected by `-k statusline` (which `-t` does not
-narrow) and never by `-t` alone. A symlinked file is replaced, never written through,
+`agentctl statusline/config`, selected by `-k statusline` or `--only statusline/config`
+(which `-t` does not narrow) and never by `-t` alone. `config` is the only id `--only`
+accepts for it. A symlinked file is replaced, never written through,
 and `import` reads the file back. An `:awl` override plans nothing for awl,
 which reads the same file only when built with `-Dstatusline`. `validate` and
 `apply` report whether the `awl` on `PATH` was built that way. See
