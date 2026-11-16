@@ -1881,4 +1881,87 @@ set -e
 [ "$code" = 0 ] && grep -q -- '--only statusline/config — nothing declared or owned' "$SO/none.txt" \
   || { cat "$SO/none.txt"; fail "--only statusline/config with nothing declared was silent"; }
 
+echo "42. :statusline :acli derives Claude's statusLine and Pi's extension; a hand-written one wins"
+SD="$SB/statusline-derive"
+mkdir -p "$SD/bin" "$SD/renderer/adapters/pi-extension"
+printf 'export default function () {}\n' > "$SD/renderer/adapters/pi-extension/index.ts"
+# the derived build runs `zig build` in the checkout; this one records where
+printf '#!/bin/sh\npwd -P > "%s/built-in"\n' "$SD" > "$SD/bin/zig"
+chmod +x "$SD/bin/zig"
+sd() { (cd "$SD" && PATH="$SD/bin:$PATH" AGENTCTL_HOME="$SD" run "$@"); }
+sd_cfg() {
+  cat > "$SD/agents.edn" <<EDN
+{$2
+ :statusline {:acli $1 :source "$SD/renderer" :defaults {:color :never}}}
+EDN
+}
+status_line() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("statusLine",{}).get("command",""))' "$SD/.claude/settings.json"; }
+LINK="$SD/.pi/agent/extensions/agent-statusline"
+
+sd_cfg "[:cc :pi]" ""
+set +e
+sd apply -f "$SD/agents.edn" > "$SD/plan.txt" 2>&1; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SD/plan.txt"; fail "a derived status line planned nothing (exit $code)"; }
+grep -q "derived from :statusline :acli" "$SD/plan.txt" || { cat "$SD/plan.txt"; fail "a derived op did not say where it came from"; }
+sd apply! -y -f "$SD/agents.edn" > "$SD/apply.txt" 2>&1 || { cat "$SD/apply.txt"; fail "apply! of a derived status line failed"; }
+[ "$(status_line)" = "'$SD/renderer/zig-out/bin/agent-statusline' --agent cc" ] \
+  || fail "derived statusLine is '$(status_line)'"
+[ "$(readlink "$LINK")" = "$SD/renderer/adapters/pi-extension" ] || fail "the Pi extension was not linked"
+[ "$(cat "$SD/built-in")" = "$(cd "$SD/renderer" && pwd -P)" ] || fail "the renderer was not built in its checkout"
+sd apply -f "$SD/agents.edn" > "$SD/again.txt" 2>&1 || { cat "$SD/again.txt"; fail "a derived status line did not converge"; }
+
+# the file somewhere the renderer would not look unasked: Claude is told where
+set +e
+XDG_CONFIG_HOME="$SD/xdg" sd apply -f "$SD/agents.edn" -t claude > "$SD/xdg.txt" 2>&1
+set -e
+grep -q -- "--config '$SD/xdg/agent-statusline/config.json'" "$SD/xdg.txt" \
+  || { cat "$SD/xdg.txt"; fail "a moved config file did not reach Claude's command"; }
+
+# dropping :cc takes only the statusLine it wrote
+sd_cfg "[:pi]" ""
+sd apply! -y -f "$SD/agents.edn" > "$SD/drop-cc.txt" 2>&1 || { cat "$SD/drop-cc.txt"; fail "apply! dropping :cc failed"; }
+[ -z "$(status_line)" ] || fail "dropping :cc left statusLine '$(status_line)'"
+grep -q '"\$schema"' "$SD/.claude/settings.json" || fail "dropping :cc took more than statusLine"
+[ -L "$LINK" ] || fail "dropping :cc removed the Pi extension"
+
+# a hand-written Claude :status-line wins, and dropping :cc leaves it
+sd_cfg "[:cc :pi]" ':executors {:claude {:status-line {:type "command" :command "my-line"}}}'
+sd apply! -y -f "$SD/agents.edn" > "$SD/mine.txt" 2>&1 || { cat "$SD/mine.txt"; fail "apply! with a hand-written statusLine failed"; }
+[ "$(status_line)" = "my-line" ] || fail "the derived statusLine beat the hand-written one: '$(status_line)'"
+sd_cfg "[:pi]" ':executors {:claude {:status-line {:type "command" :command "my-line"}}}'
+sd apply! -y -f "$SD/agents.edn" > "$SD/mine2.txt" 2>&1 || { cat "$SD/mine2.txt"; fail "apply! dropping :cc failed"; }
+[ "$(status_line)" = "my-line" ] || fail "dropping :cc took a hand-written statusLine"
+
+# dropping :pi unlinks the extension
+sd_cfg "[]" ""
+sd apply! -y -f "$SD/agents.edn" > "$SD/drop-pi.txt" 2>&1 || { cat "$SD/drop-pi.txt"; fail "apply! dropping :pi failed"; }
+[ ! -e "$LINK" ] && [ ! -L "$LINK" ] || fail "dropping :pi left the extension linked"
+
+# entity DSL beside another user-wide Claude row: the derived statusLine is
+# the :statusline's alone, removed once, and kept once edited by hand
+rm -f "$SD/.claude/settings.json"
+dsl_cfg() {
+  cat > "$SD/agents.edn" <<EDN
+{:settings [{:id :base :in :all :acli [:cc] :model "m"}]
+ :statusline {:acli $1 :source "$SD/renderer"}}
+EDN
+}
+dsl_cfg "[:cc]"
+sd apply! -y -f "$SD/agents.edn" > "$SD/dsl.txt" 2>&1 || { cat "$SD/dsl.txt"; fail "DSL apply! of a derived statusLine failed"; }
+[ "$(status_line)" = "'$SD/renderer/zig-out/bin/agent-statusline' --agent cc" ] || fail "DSL derived statusLine is '$(status_line)'"
+dsl_cfg "[]"
+set +e
+sd apply -f "$SD/agents.edn" --json > "$SD/dsl-drop.json"; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SD/dsl-drop.json"; fail "DSL dropping :cc exited $code"; }
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; d=[o for o in ops if o["action"]=="delete"]; sys.exit(0 if len(d)==1 and d[0]["id"]=="status-line" else 1)' "$SD/dsl-drop.json" \
+  || { cat "$SD/dsl-drop.json"; fail "DSL dropping :cc did not plan exactly one statusLine removal"; }
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["statusLine"]["command"]="edited"; json.dump(d, open(p,"w"))' "$SD/.claude/settings.json"
+set +e
+sd apply -f "$SD/agents.edn" --json > "$SD/dsl-edited.json"; code=$?
+set -e
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(1 if any(o["action"]=="delete" for o in ops) else 0)' "$SD/dsl-edited.json" \
+  || { cat "$SD/dsl-edited.json"; fail "a hand-edited derived statusLine was planned for removal"; }
+
 echo "all agentctl e2e checks passed"

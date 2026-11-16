@@ -9,6 +9,7 @@
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.antigravity :as antigravity]
             [agentctl.scope :as scope]
+            [agentctl.statusline :as statusline]
             [agentctl.plan :as plan]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
@@ -50,6 +51,8 @@
          (let [triple ((juxt :tool :kind :id) o) k (write-key o)]
            (cond
              (or (failed triple) (and (some? done) (not (done triple)))) s
+             ;; owned by the `:statusline` that derived it, and pruned there
+             (statusline/derived? cfg o) s
              (= :delete (:action o))
              (let [remaining (when (:pruned-keys o)
                                (vec (remove #(contains? (set (:pruned-keys o)) (:key %))

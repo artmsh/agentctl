@@ -10,6 +10,7 @@
             [agentctl.statusline :as sl]
             [agentctl.util :as u]
             [babashka.fs :as fs]
+            [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests testing]]))
@@ -279,6 +280,91 @@
       (let [{:keys [config]} (imports/scan {:existing existing})]
         (is (= decl (:statusline config)))
         (is (= decl (:statusline (clojure.edn/read-string (imports/render config)))))))))
+
+
+(defn- raw-cfg [m] (config/parse-config (pr-str m) (str u/home "/agents.edn")))
+
+(deftest acli-derives-claude-and-pi-from-the-declaration
+  (let [src (str u/home "/renderer")
+        c (cfg {:acli [:cc :pi] :source src :defaults {:color :never}})]
+    (testing ":acli and :source are agentctl's and never written"
+      (is (not (str/includes? (get-in c [:statusline :text]) "acli")))
+      (is (not (str/includes? (get-in c [:statusline :text]) "source"))))
+    (testing "Claude runs the renderer the checkout builds, quoted for a shell"
+      (is (= {:type "command" :command (str "'" src "/zig-out/bin/agent-statusline' --agent cc")}
+             (get-in c [:tools :claude :status-line]))))
+    (testing "Pi links the adapter and builds the renderer first"
+      (is (= {:root (str src "/adapters/pi-extension") :build sl/pi-build :for-tools #{:pi} :type :file}
+             (select-keys (get-in c [:extensions sl/ext-id]) [:root :build :for-tools :type]))))
+    (is (= #{:claude :pi} (get-in c [:statusline :derived])))
+    (testing "each derived op says where it came from"
+      (let [ops (sl/mark-derived c [{:tool :claude :kind :settings :id :status-line :action :create}
+                                    {:tool :pi :kind :extensions :id sl/ext-id :action :create}
+                                    {:tool :claude :kind :settings :id :theme :action :create}])]
+        (is (nil? (:note (last ops))) "a declared setting is not marked")
+        (is (some #(and (= [:claude :settings :status-line] [(:tool %) (:kind %) (:id %)])
+                        (str/includes? (str (:note %)) "derived from :statusline")) ops))
+        (is (some #(and (= [:pi :extensions sl/ext-id] [(:tool %) (:kind %) (:id %)])
+                        (str/includes? (str (:note %)) "derived from :statusline")) ops))))
+    (testing "only what was derived is owned"
+      (is (some #(= [:claude :settings :status-line] (vec (take 3 %))) (core/inventory c))))))
+
+(deftest acli-is-opt-in
+  (let [c (cfg {:source "/r" :bin "/r/x/agent-statusline"})]
+    (is (nil? (get-in c [:tools :claude :status-line])))
+    (is (empty? (:extensions c)))
+    (is (not-any? #(= [:claude :settings :status-line] (vec (take 3 %))) (core/inventory c)))))
+
+(deftest bin-wins-over-the-source-build-and-quotes-survive
+  (let [c (cfg {:acli [:cc] :source "/r" :bin "/opt/it's here/agent-statusline"})
+        cmd (get-in c [:tools :claude :status-line :command])]
+    (is (= "'/opt/it'\\''s here/agent-statusline' --agent cc" cmd))
+    (is (= "[/opt/it's here/agent-statusline][--agent][cc]"
+           (:out (p/shell {:out :string} "sh" "-c" (str "printf '[%s]' " cmd))))
+        "the path is one word to a shell, whatever it holds")))
+
+(deftest a-hand-written-declaration-wins
+  (testing "a user-wide Claude :status-line, legacy form"
+    (let [c (raw-cfg {:executors {:claude {:status-line {:type "command" :command "mine"}}}
+                      :statusline {:acli [:cc] :source "/r"}})]
+      (is (= "mine" (get-in c [:tools :claude :status-line :command])))
+      (is (empty? (get-in c [:statusline :derived])))))
+  (testing "a user-wide Claude :status-line, entity DSL form"
+    (let [c (raw-cfg {:settings [{:id :mine :in :all :acli [:cc]
+                                  :status-line {:type "command" :command "mine"}}]
+                      :statusline {:acli [:cc] :source "/r"}})]
+      (is (= "mine" (get-in c [:tools :claude :status-line :command])))))
+  (testing "an extension from the same directory, under any id"
+    (let [c (raw-cfg {:extensions {[:uri "file:///r/adapters/pi-extension"] {:alias 'shared :acli [:pi]}}
+                      :statusline {:acli [:pi] :source "/r"}})]
+      (is (= #{:shared} (set (keys (:extensions c)))))
+      (is (empty? (get-in c [:statusline :derived]))))))
+
+(deftest acli-names-only-what-can-be-derived
+  (let [msgs (fn [decl] (into {} (for [f (sl/shape-findings (cfg decl))] [(:message f) (:level f)])))]
+    (is (empty? (sl/shape-findings (cfg {:acli [:cc :pi] :source "/r"}))))
+    (is (some (fn [[m l]] (and (= :warn l) (str/includes? m ":awl"))) (msgs {:acli [:awl]})))
+    (is (some (fn [[m l]] (and (= :error l) (str/includes? m ":zz"))) (msgs {:acli [:zz]})))
+    (is (some (fn [[m l]] (and (= :error l) (str/includes? m ":cc needs"))) (msgs {:acli [:cc]})))
+    (is (some (fn [[m l]] (and (= :error l) (str/includes? m ":pi needs"))) (msgs {:acli [:pi] :bin "/b"})))))
+
+(deftest a-derived-status-line-is-pruned-only-while-it-is-what-was-written
+  (let [settings (str u/home "/.claude/settings.json")
+        c (cfg {:acli [:cc] :bin "/b/agent-statusline"})
+        st (core/sync-state! state/empty-state c)
+        derived (get-in c [:tools :claude :status-line])
+        gone (cfg {:bin "/b/agent-statusline"})
+        prune (fn [] (sl/derived-prune-ops gone st settings))]
+    (try
+      (u/write-text! settings (json/generate-string {:statusLine derived :theme "dark"}))
+      (is (= [[:delete [:claude :settings :status-line]]]
+             (map (juxt :action (juxt :tool :kind :id)) (prune))))
+      (is (empty? (sl/derived-prune-ops c st settings)) "still derived: nothing to prune")
+      (u/write-text! settings (json/generate-string {:statusLine {:type "command" :command "edited"}}))
+      (is (= [:noop] (map :action (prune))) "edited by hand: left, with a warning")
+      (fs/delete settings)
+      (is (empty? (prune)) "already gone")
+      (finally (fs/delete-if-exists settings)))))
 
 (let [{:keys [fail error]} (run-tests 'statusline-test)]
   (System/exit (if (pos? (+ fail error)) 1 0)))

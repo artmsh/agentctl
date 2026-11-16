@@ -739,7 +739,9 @@ stdin in the OEM codepage. An operation that does not end with a final `OK` line
 {:statusline {:defaults {:segments [:model :context] :context-style :full
                          :warning-percent 50 :critical-percent 80}
               :agents {:pi {:segments [:model :context :cost]}}
-              :bin "~/.local/bin/agent-statusline"}}  ; optional, agentctl's own
+              :bin "~/.local/bin/agent-statusline"     ; optional, agentctl's own
+              :source "~/src/agent-statusline" ; optional: the renderer's checkout
+              :acli [:cc :pi]}}                        ; optional: derive Claude's and Pi's hooks
 ```
 
 The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
@@ -752,7 +754,17 @@ interpreted: the renderer's `--check` decides what is valid. Its ops are
 accepts for it. A symlinked file is replaced, never written through,
 and `import` reads the file back. An `:awl` override plans nothing for awl,
 which reads the same file only when built with `-Dstatusline`. `validate` and
-`apply` report whether the `awl` on `PATH` was built that way. See
+`apply` report whether the `awl` on `PATH` was built that way.
+
+`:acli` derives each listed CLI's own hook into the renderer. For `:cc`, that is Claude's
+user `statusLine`, `'<bin>' --agent cc`, plus `--config` when the file is not at the
+renderer's default path. `<bin>` is `:bin`, else `<source>/zig-out/bin/agent-statusline`.
+For `:pi`, it is the extension `agent-statusline`, linked from
+`<source>/adapters/pi-extension` and built with `zig build` in the checkout. Precedence: a
+hand-written user-wide Claude `:status-line` wins, and so does an extension with that id
+or from the same directory. Derived ops are `settings` and `extensions`, selected by `-t`
+and `-k` like any other. Removing a CLI from `:acli` prunes only what was derived for it,
+and a `statusLine` edited since it was written is kept. See
 [the guide](GUIDE.md#shared-status-line) for validation, paths, ownership and awl.
 
 ### Secret references

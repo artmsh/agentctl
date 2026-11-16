@@ -9,6 +9,7 @@
    one place, and a key agentctl has never heard of is written as given and
    judged there."
   (:require [agentctl.plan :as plan]
+            [agentctl.scope :as scope]
             [agentctl.state :as state]
             [agentctl.util :as u]
             [babashka.fs :as fs]
@@ -24,8 +25,9 @@
 (def id :config)
 
 (def ^:private own-keys
-  "Keys under `:statusline` that tell agentctl something and are never written."
-  #{:bin})
+  "Keys under `:statusline` that tell agentctl something and are never written:
+   the renderer's JSON is closed, so any of these in the file would fail it."
+  #{:bin :source :acli})
 
 ;; ---------------------------------------------------------------- where
 
@@ -151,6 +153,8 @@
           agents (get data "agents")]
       (u/prune-nils
        {:bin (:bin decl)
+        :source (some-> (:source decl) str u/abs-path)
+        :acli (scope/acli (:acli decl))
         :data data
         :text (str (json/generate-string data {:pretty true}) "\n")
         :clashes (not-empty @clashes)
@@ -184,14 +188,22 @@
     (let [bin (some-> (first (u/split-cmd cmd)) u/expand u/abs-path)]
       (when (and bin (= "agent-statusline" (str (fs/file-name bin)))) bin))))
 
-(defn renderer-bin
-  "The renderer to check with: `:bin`, else `AGENT_STATUSLINE_BIN` (the
-   variable the renderer's own adapters honour), else `agent-statusline` on
-   PATH, else the one a Claude `:status-line` command names."
+(defn source-bin
+  "The renderer a `:source` checkout builds."
   [sl]
-  (let [env-bin (System/getenv "AGENT_STATUSLINE_BIN")]
+  (some-> (:source sl) (str "/zig-out/bin/agent-statusline")))
+
+(defn renderer-bin
+  "The renderer to check with: `:bin`, else the one `:source` built, else
+   `AGENT_STATUSLINE_BIN` (the variable the renderer's own adapters honour),
+   else `agent-statusline` on PATH, else the one a Claude `:status-line`
+   command names."
+  [sl]
+  (let [env-bin (System/getenv "AGENT_STATUSLINE_BIN")
+        built (source-bin sl)]
     (cond
       (:bin sl) {:path (u/abs-path (str (:bin sl))) :via ":statusline :bin"}
+      (and built (fs/executable? built)) {:path built :via ":statusline :source"}
       (not (str/blank? env-bin)) {:path (u/abs-path env-bin) :via "AGENT_STATUSLINE_BIN"}
       :else (or (when-let [p (u/which "agent-statusline")] {:path p :via "PATH"})
                 (when-let [p (:claude-bin sl)]
@@ -331,6 +343,130 @@
         [:warn (str (u/tilde path) " is not a native executable, so whether awl was built with"
                     " -Dstatusline is unknown; only such a build reads " target)]))))
 
+;; ---------------------------------------------------------------- derived
+
+(declare finding)
+
+;; `:acli` under `:statusline` names the CLIs whose own hook into the renderer
+;; agentctl derives from this declaration: Claude's `statusLine` command and
+;; Pi's extension. Both are ordinary declarations once derived — a settings
+;; key and an extension — so they plan, select (`-t`, `-k settings`,
+;; `-k extensions`) and converge as hand-written ones do. A hand-written one
+;; always wins.
+
+(def derivable
+  "The CLIs a status line is derived for. Others read the file themselves
+   (awl) or draw their own (codex)."
+  #{:claude :pi})
+
+(def ext-id
+  "The id the derived Pi extension is linked under."
+  :agent-statusline)
+
+(def pi-build
+  "The renderer's own build, run from the extension directory inside it."
+  "cd ../.. && zig build -Doptimize=ReleaseFast")
+
+(defn- sh-quote [s] (str "'" (str/replace (str s) "'" "'\\''") "'"))
+
+(defn claude-status-line
+  "Claude's `statusLine` for this declaration: the renderer with `--agent cc`,
+   and `--config` when agentctl writes the file somewhere the renderer would
+   not look unasked. Claude runs the command through a shell."
+  [sl]
+  (when-let [bin (or (some-> (:bin sl) str u/abs-path) (source-bin sl))]
+    (let [target (config-path)]
+      {:type "command"
+       :command (str (sh-quote bin) " --agent cc"
+                     (when-not (same-file? target (str (normal u/home) "/.config/agent-statusline/config.json"))
+                       (str " --config " (sh-quote target))))})))
+
+(defn pi-extension
+  "Pi's extension for this declaration: the adapter directory in the
+   renderer's checkout, built there first. Shaped as `:extensions` entries are."
+  [sl]
+  (when-let [src (:source sl)]
+    (let [root (str src "/adapters/pi-extension")]
+      {:id ext-id :kind :extensions :uri (str "file://" root) :type :file :build pi-build
+       :acli [:pi] :for-tools #{:pi} :root root :derived true})))
+
+(defn derive-integrations
+  "`cfg` with the integrations `:acli` asks for, each only where nothing is
+   declared by hand: a user-wide Claude `:status-line`, or an extension with
+   the derived id or the same directory. `[:statusline :derived]` says which
+   ones were added."
+  [cfg]
+  (let [sl (:statusline cfg)
+        want (set (:acli sl))]
+    (if (or (:problem sl) (empty? want))
+      cfg
+      (let [claude (when (and (want :claude) (nil? (get-in cfg [:tools :claude :status-line])))
+                     (claude-status-line sl))
+            ext (when (want :pi) (pi-extension sl))
+            ext (when-not (and ext (or (contains? (:extensions cfg) ext-id)
+                                       (some #(and (:root %) (same-file? (:root %) (:root ext)))
+                                             (vals (:extensions cfg)))))
+                  ext)]
+        (cond-> (assoc-in cfg [:statusline :derived] (cond-> #{} claude (conj :claude) ext (conj :pi)))
+          claude (assoc-in [:tools :claude :status-line] claude)
+          ext (assoc-in [:extensions ext-id] ext))))))
+
+(defn derived?
+  "Was this op's declaration derived from `:statusline`?"
+  [cfg {:keys [tool kind id]}]
+  (let [d (set (get-in cfg [:statusline :derived]))]
+    (or (and (d :claude) (= [:claude :settings :status-line] [tool kind id]))
+        (and (d :pi) (= :extensions kind) (= ext-id id)))))
+
+(defn mark-derived
+  "Say where a derived op came from: nothing in agents.edn spells it."
+  [cfg ops]
+  (if (empty? (get-in cfg [:statusline :derived]))
+    ops
+    (map (fn [o]
+           (if (and (derived? cfg o) (plan/mutating? o))
+             (update o :note #(str/join "; " (remove str/blank? ["derived from :statusline :acli" %])))
+             o))
+         ops)))
+
+(defn derived-prune-ops
+  "The Claude `statusLine` agentctl derived, once nothing derives or declares
+   it: removed while it still holds what agentctl wrote, left alone once
+   edited. (A derived Pi extension is an extension, owned and pruned as one.)"
+  [cfg st claude-settings]
+  (let [{:keys [value]} (state/entry st :claude :settings :status-line)]
+    (when (and value
+               (not (contains? (get-in cfg [:statusline :derived]) :claude))
+               (nil? (get-in cfg [:tools :claude :status-line])))
+      (let [current (get (u/read-json claude-settings) :statusLine)]
+        (cond
+          (nil? current) nil
+          (= (u/norm current) (u/norm value))
+          [(plan/json-unset-op {:tool :claude :kind :settings :id :status-line
+                                :file claude-settings :path [:statusLine]
+                                :summary "settings.json statusLine — no longer derived from :statusline"})]
+          :else
+          [(plan/op {:action :noop :warn true :tool :claude :kind :settings :id :status-line
+                     :target claude-settings
+                     :summary "settings.json statusLine was edited since agentctl derived it — left as it is"})])))))
+
+(defn- derive-findings
+  "What keeps `:acli` from deriving what it names."
+  [sl]
+  (concat
+   (for [t (:acli sl) :when (not (derivable t))]
+     (finding (if (or (some #{t} [:codex :omp :llm :antigravity :kimi :dsh]) (scope/consumers t)) :warn :error)
+              [:acli]
+              (str (pr-str t) ": agentctl derives a status line only for :cc and :pi"
+                   (case t
+                     :awl " — awl reads the shared file itself when built with -Dstatusline"
+                     :codex " — codex draws its own"
+                     ""))))
+   (when (and (some #{:claude} (:acli sl)) (not (:bin sl)) (not (:source sl)))
+     [(finding :error [:acli] ":cc needs :bin or :source under :statusline: the renderer it runs")])
+   (when (and (some #{:pi} (:acli sl)) (not (:source sl)))
+     [(finding :error [:acli] ":pi needs :source under :statusline: the checkout its extension is built in")])))
+
 ;; ---------------------------------------------------------------- findings
 
 (defn- finding [level where message]
@@ -343,9 +479,11 @@
   (when-let [sl (:statusline cfg)]
     (if-let [problem (:problem sl)]
       [(finding :error [] problem)]
-      (for [{:keys [where keys]} (:clashes sl)]
-        (finding :error where (str (str/join " and " (map pr-str keys)) " both name `"
-                                   (last where) "` in the JSON — keep one"))))))
+      (concat
+       (for [{:keys [where keys]} (:clashes sl)]
+         (finding :error where (str (str/join " and " (map pr-str keys)) " both name `"
+                                    (last where) "` in the JSON — keep one")))
+       (derive-findings sl)))))
 
 (defn selected?
   "Does a run with these options plan the file? `-k statusline` and
@@ -510,6 +648,10 @@
   "The ownership record: where the file went, and a digest of what was
    written, so a later removal can say the file was edited since."
   [cfg]
-  (when-let [{:keys [text clashes]} (:statusline cfg)]
-    (when (and text (not clashes))
-      [[tool kind id {:path (config-path) :sha256 (u/sha256 text)}]])))
+  (when-let [{:keys [text clashes derived]} (:statusline cfg)]
+    (concat
+     (when (and text (not clashes))
+       [[tool kind id {:path (config-path) :sha256 (u/sha256 text)}]])
+     ;; what it wrote, so a later removal takes only that
+     (when (contains? derived :claude)
+       [[:claude :settings :status-line {:value (get-in cfg [:tools :claude :status-line])}]]))))

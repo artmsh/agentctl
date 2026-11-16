@@ -556,6 +556,7 @@
                 ;; after the user-wide installs they check for
                 (:ops dups)
                 (statusline/plan-ops cfg st opts)
+                (filter #(selected (:tool %)) (statusline/derived-prune-ops cfg st claude/settings-file))
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
@@ -563,6 +564,7 @@
         (keep-projects cfg opts)
         (keep-only cfg opts)
         (keep-user opts)
+        (->> (statusline/mark-derived cfg))
         defer-unmet-removals
         (->> (annotate-skill-ops cfg))
         same-command

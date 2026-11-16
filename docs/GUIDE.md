@@ -539,8 +539,50 @@ which in an agent's override means "inherit the default"; the plan shows it as `
 translation knows no option or value. A key agentctl has never heard of is written as
 given, and the renderer judges it, so new renderer options need no agentctl release. Two
 spellings that land on one JSON key (`:context-style` and `:context_style`) are a config
-error. `:bin` is agentctl's own and is not written. Each override lands under its own agent
-only.
+error. `:bin`, `:source` and `:acli` are agentctl's own and are not written. Each override
+lands under its own agent only.
+
+**Claude and Pi, derived.** Claude runs the renderer as its `statusLine` command and Pi
+loads it as an extension. `:acli` asks agentctl to declare those from this one place, so
+they never drift from the file:
+
+```clojure
+{:statusline {:acli [:cc :pi]
+              :source "~/src/agent-statusline"   ; the renderer's checkout
+              :defaults {:segments [:model :context]}}}
+```
+
+- `:cc` sets Claude's user `statusLine` to `'<bin>' --agent cc`, where `<bin>` is `:bin`,
+  else `<source>/zig-out/bin/agent-statusline`. When agentctl writes the file somewhere the
+  renderer does not look unasked (an `XDG_CONFIG_HOME` other than `~/.config`), the command
+  adds `--config '<path>'`. Without `:bin` or `:source` it is a config error.
+- `:pi` declares the extension `agent-statusline`, linked from
+  `<source>/adapters/pi-extension` and built first with
+  `cd ../.. && zig build -Doptimize=ReleaseFast`, as a hand-written `:extensions` entry is.
+  Without `:source` it is a config error.
+- Any other CLI is a warning, since awl reads the file itself and codex draws its own status
+  line. A name that is no CLI is a config error.
+- `:source` is also where the renderer comes from for `--check`, after `:bin` and once it is
+  built.
+
+Derivation is opt-in. Without `:acli`, `:statusline` writes the file and nothing else.
+
+A hand-written declaration always wins:
+
+- A user-wide Claude `:status-line`, in either config format, is written as declared, and
+  nothing is derived for Claude. Derivation is user-wide only, so a project's
+  `:status-line` is never touched.
+- An `:extensions` entry with the id `agent-statusline`, or from the same directory under
+  any id (such as `shared-statusline`), is the one Pi loads, and no second copy is linked.
+
+The derived ops are ordinary Claude settings and Pi extensions. `-t claude`, `-t pi`,
+`-k settings` and `-k extensions` select them, and `-k statusline` does not. Each planned
+change is marked "derived from :statusline :acli". Dropping `:cc` from `:acli` removes the
+`statusLine` agentctl wrote, but only while it still holds that value. One edited by hand
+is left in place with a warning, and the Pi extension stays. Dropping `:pi` unlinks the
+extension the same way any removed extension is unlinked. `import` reads a derived
+`statusLine` back as a hand-written `:status-line`, and it does not recover `:acli` or
+`:source`.
 
 **Validation** is the renderer's. `validate` and `apply` write the candidate JSON to a
 temporary file and run `agent-statusline --check --config <tmp>`, which reads no stdin and
