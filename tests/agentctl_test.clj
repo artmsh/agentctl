@@ -69,6 +69,83 @@
     (is (= "[\"a\", \"b\"]" (toml/encode-value ["a" "b"])))
     (is (= "\"say \\\"hi\\\"\"" (toml/encode-value "say \"hi\"")))))
 
+(def multiline-toml
+  (str "[tui]\n"
+       "theme = \"x\"\n"
+       "status_line = [\n"
+       "    \"model\",\n"
+       "    \"context-used\", # trailing comment ]\n"
+       "]\n"
+       "note = \"\"\"\n"
+       "status_line = 1\n"
+       "\"\"\"\n"
+       "after = 1\n"))
+
+(deftest toml-surgery-replaces-and-removes-a-whole-multi-line-value
+  (testing "a value Codex writes one item per line is replaced as one"
+    (let [out (toml/set-key multiline-toml ["tui"] "status_line" ["a" "b"])]
+      (is (nil? (toml/parse-error out)) out)
+      (is (= {"theme" "x" "status_line" ["a" "b"] "note" "status_line = 1\n" "after" 1}
+             (get (json/parse-string (:out (u/sh "python3" "-c" "import sys,tomllib,json;print(json.dumps(tomllib.loads(sys.argv[1])))" out))) "tui")))))
+  (testing "and removed as one; a look-alike line inside a string is not a key"
+    (let [out (toml/remove-key multiline-toml ["tui"] "status_line")]
+      (is (nil? (toml/parse-error out)) out)
+      (is (str/includes? out "status_line = 1"))
+      (is (not (str/includes? out "context-used")))))
+  (testing "a dotted or quoted key is told apart from a bare one"
+    (is (str/includes? (toml/set-key "[t]\n\"a.b\" = 1\na = 2\n" ["t"] "a" 3) "\"a.b\" = 1\na = 3")))
+  (testing "a table emptied by a prune loses its header; one that still holds keys keeps it"
+    (is (= "[a]\nk = 1\n" (toml/remove-table-if-empty "[a]\nk = 1\n[a.b]\n\n" ["a" "b"])))
+    (is (= "[a]\nk = 1\n" (toml/remove-table-if-empty "[a]\nk = 1\n" ["a"]))))
+  (testing "update-file! refuses an edit that would leave the file unparseable"
+    (let [f (str (temp-dir) "/c.toml")]
+      (u/write-text! f "a = 1\n")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid TOML"
+                            (toml/update-file! f (fn [t] (str t "b = [\n")))))
+      (is (= "a = 1\n" (slurp f)))))
+  (testing "a header with a trailing comment or a quoted part is the table it names"
+    (let [out (toml/set-key "[tui] # footer\ntheme = \"x\"\n" ["tui"] "status_line" ["model"])]
+      (is (= 1 (count (re-seq #"(?m)^\[tui\]" out))) out)
+      (is (= {"theme" "x" "status_line" ["model"]} (get (toml/parse-text out) "tui"))))
+    (let [out (toml/set-key "[permissions.\"local-dev\".x]\na = 1\n" ["permissions" "local-dev" "x"] "b" 2)]
+      (is (= "[permissions.\"local-dev\".x]\na = 1\nb = 2\n" out))))
+  (testing "an [[array]] element is never taken for the table of the same name"
+    (let [out (toml/set-key "[[t]]\na = 1\n" ["t"] "b" 2)]
+      (is (= {"t" [{"a" 1}]} (toml/parse-text "[[t]]\na = 1\n")))
+      (is (str/includes? out "[[t]]\na = 1\n"))))
+  (testing "a header-looking line inside a multi-line string or array is part of that value"
+    (let [text (str "developer_instructions = \"\"\"\nBe brief.\n[rules]\nNo emoji.\n\"\"\"\n"
+                    "paths = [\n  \"a\",\n[\"x\"]\n]\n\n[tui]\ntheme = \"x\"\n")]
+      (is (= [nil "tui"] (map :header (toml/segments text))))
+      (let [out (-> text (toml/set-key [] "model" "m-b") (toml/set-key ["rules"] "k" 1))
+            t (toml/parse-text out)]
+        (is (= "m-b" (get t "model")) "a new root key lands at the root")
+        (is (= "Be brief.\n[rules]\nNo emoji.\n" (get t "developer_instructions")))
+        (is (= {"k" 1} (get t "rules")) "and a real [rules] table is a table of its own")
+        (is (= {"theme" "x"} (get t "tui"))))))
+  (testing "a file that did not parse before is written unchecked, not refused, and the reason is said"
+    (let [f (str (temp-dir) "/c.toml") err (java.io.StringWriter.)]
+      (u/write-text! f "a = 1\na = 2\n")
+      (binding [*err* err]
+        (toml/update-file! f (fn [t] (str t "b = 3\n"))))
+      (is (= "a = 1\na = 2\nb = 3\n" (slurp f)))
+      (is (str/includes? (str err) "not TOML 1.0"))))
+  (testing "an interpreter without tomllib is never picked, and AGENTCTL_PYTHON gets no fallback"
+    (let [dir (temp-dir) old-py (str dir "/python-without-tomllib")]
+      (u/write-text! old-py "#!/bin/sh\nexit 1\n")
+      (u/sh "chmod" "+x" old-py)
+      (is (nil? (toml/find-python old-py)))
+      (is (nil? (toml/find-python (str dir "/no-such-python"))))
+      (is (some? (toml/find-python nil)) "this suite runs with a python3 3.11+ on PATH")))
+  (testing "a file that does not parse reads as nil leniently, but a missing interpreter is never swallowed"
+    (let [f (str (temp-dir) "/c.toml")]
+      (u/write-text! f "a = 1\na = 2\n")
+      (is (nil? (toml/read-toml-lenient f)))
+      (is (nil? (toml/read-toml-lenient (str f ".absent"))))
+      (with-redefs [toml/python! (fn [] (throw (ex-info "no python" {:type :agentctl.toml/no-python})))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no python" (toml/read-toml-lenient f)))
+        (is (nil? (toml/read-toml-lenient (str f ".absent"))) "an absent file needs no interpreter")))))
+
 (deftest toml-reads-back-what-it-writes
   (let [dir (temp-dir)
         f (str dir "/config.toml")]
@@ -607,7 +684,7 @@
     (testing "keys kimi already stores survive a rewrite"
       (is (= "keep" (:someNativeKey (entry local {:someNativeKey "keep"})))))
     (testing "a transport change leaves no stdio keys behind"
-      ;; the bug agentctl already fixed for claude (#18): merging onto the old
+      ;; the bug agentctl already fixed for claude: merging onto the old
       ;; entry would keep `command` next to `url`, and both transports would
       ;; then be on record at once
       (let [e (entry remote {:command "/bin/echo" :args ["hi"] :transport "stdio"})]
@@ -953,6 +1030,551 @@
         (doseq [op (codex/settings-ops cfg)] ((:exec! op)))
         (is (= [] (get-in (toml/read-toml f) ["tui" "keymap" "global" "copy"])))
         (is (empty? (codex/settings-ops cfg)))))))
+
+(defn converge-codex
+  "Plan, run and record one entity-DSL apply! for codex, the way `main` does:
+   ownership only takes part through `:planned-ops` and `sync-state!`."
+  [raw st]
+  (let [cfg (config/normalize raw "test")
+        ops (core/build-plan cfg st {:tools #{:codex}})
+        {:keys [failed]} (core/execute! ops)]
+    (is (empty? failed) (pr-str (map :error failed)))
+    {:ops ops :cfg cfg :st (core/sync-state! st (assoc cfg :planned-ops ops))}))
+
+(defn codex-drift [raw st]
+  (filter plan/mutating? (core/build-plan (config/normalize raw "test") st {:tools #{:codex}})))
+
+(deftest codex-keymap-stays-owned-in-the-entity-dsl
+  ;; ownership used to know only root setting names, so the next run read
+  ;; `[tui.keymap.chat] open_presets` as a removed setting and pruned it, and
+  ;; the run after that wrote it back
+  (let [f (str (temp-dir) "/config.toml")
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b"
+                         :keymap {:chat {:open_presets "alt-t"}}}]}]
+    (u/write-text! f "model = \"m-a\"\n[tui]\ntheme = \"x\"\n")
+    (with-redefs [codex/config-file f]
+      (let [{st1 :st} (converge-codex raw state/empty-state)]
+        (is (= "alt-t" (get-in (toml/read-toml f) ["tui" "keymap" "chat" "open_presets"])))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (let [{st2 :st} (converge-codex raw st1)]
+          (is (empty? (codex-drift raw st2)) "and stays converged"))
+        (testing "a dropped binding is pruned, and its emptied table with it"
+          (let [less (update-in raw [:settings 0] dissoc :keymap)
+                {st3 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["tui" "keymap"])))
+            (is (= "x" (get-in t ["tui" "theme"])))
+            (is (not (str/includes? (slurp f) "[tui.keymap.chat]")))
+            (is (empty? (codex-drift less st3)))))))))
+
+(def codex-tui-state
+  "What Codex itself keeps in `[tui]` between sessions: must survive any write."
+  (str "model = \"m-a\"\n"
+       "[tui]\ntheme = \"x\"\nstatus_line_use_colors = true\n"
+       "[tui.model_availability_nux]\n\"m-a\" = 4\n"
+       "[tui.presets.7]\ninput = \"hand-written\"\nlabel = \"\"\n"
+       "[hooks.state]\nopaque = \"do-not-touch\"\n"))
+
+(deftest codex-presets-plan-write-converge-and-round-trip
+  (let [f (str (temp-dir) "/config.toml")
+        presets {0 {:input "/model" :label "model picker"}
+                 1 {:input "/model m-b --reasoning=low"}}
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all
+                         :keymap {:chat {:open_presets "alt-t"}}
+                         :presets presets}]}]
+    (u/write-text! f codex-tui-state)
+    (with-redefs [codex/config-file f]
+      (testing "each slot is its own table op, next to the binding that opens the browser"
+        (let [ops (codex-drift raw state/empty-state)]
+          (is (= #{:keymap/chat :preset-0 :preset-1} (set (map :id ops))))
+          (is (= ["tui" "presets" "0"] (:path (first (filter #(= :preset-0 (:id %)) ops)))))
+          (is (= codex-tui-state (slurp f)) "planning does not write")))
+      (let [{st1 :st} (converge-codex raw state/empty-state)
+            t (toml/read-toml f)]
+        (is (= {"input" "/model" "label" "model picker"} (get-in t ["tui" "presets" "0"])))
+        (is (= {"input" "/model m-b --reasoning=low"} (get-in t ["tui" "presets" "1"])))
+        (is (= "alt-t" (get-in t ["tui" "keymap" "chat" "open_presets"])))
+        (testing "Codex's own [tui] keys and counters are untouched"
+          (is (= {"m-a" 4} (get-in t ["tui" "model_availability_nux"])))
+          (is (= "x" (get-in t ["tui" "theme"])))
+          (is (true? (get-in t ["tui" "status_line_use_colors"])))
+          (is (= "do-not-touch" (get-in t ["hooks" "state" "opaque"]))))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (testing "import reads the presets back, and the import plans nothing"
+          (let [imported (:codex (imports/scan-settings))]
+            (is (= {:input "/model" :label "model picker"} (get-in imported [:presets 0])))
+            (is (empty? (codex/settings-ops (config/normalize {:executors {:codex imported}} nil))))))
+        (testing "dropping a slot removes that table only; an unowned slot stays"
+          (let [less (assoc-in raw [:settings 0 :presets] (dissoc presets 1))
+                {st2 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["tui" "presets" "1"])))
+            (is (not (str/includes? (slurp f) "[tui.presets.1]")) "no bare header left behind")
+            (is (= "/model" (get-in t ["tui" "presets" "0" "input"])))
+            (is (= "hand-written" (get-in t ["tui" "presets" "7" "input"])))
+            (is (empty? (codex-drift less st2)))))))))
+
+(deftest codex-plan-lines-name-the-table-a-field-is-in
+  (let [f (str (temp-dir) "/config.toml")
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-b"
+                         :keymap {:chat {:open_presets "alt-t"}}
+                         :presets {5 {:input "/review"}}
+                         :sandbox "dev" :permission-profiles {:dev {:network {:domains {"example.test" "allow"}}}}}]}]
+    (u/write-text! f "model = \"m-a\"\n\n[tui.presets.5]\ninput = \"/status\"\nlabel = \"saved\"\n")
+    (with-redefs [codex/config-file f]
+      (let [ops (codex-drift raw state/empty-state)
+            preset (filter #(= :preset-5 (:id %)) ops)]
+        (testing "alone, an update shows its fields"
+          (let [out (plan/render-plan preset {})]
+            (is (str/includes? out "presets.5.input: \"/status\" -> \"/review\"") out)
+            (is (str/includes? out "presets.5.label") out)))
+        (testing "grouped with the rest of config.toml"
+          (let [out (plan/render-plan ops {})]
+            (is (str/includes? out "presets.5.input") out)
+            (is (str/includes? out "keymap.chat.open_presets") out)
+            (is (str/includes? out "permission-profiles.dev.network.domains.example.test") out)
+            (is (not (re-find #"(?m)^\s+[~+-] input:" out)) out)))
+        (testing "and as data"
+          (let [rows (mapcat :rows (mapcat :groups (plan/plan-data ops {})))]
+            (is (some #(= "presets.5.input" (:key %)) rows))
+            (is (some #(= "\"alt-t\"" (:after %)) rows) "a binding is no credential: shown")))
+        (is (str/includes? (plan/render-plan ops {}) "keymap.chat.open_presets: \"alt-t\""))
+        (testing "masking goes by the native key, never by the prefix"
+          (let [o {:action :update :tool :codex :kind :settings :id :x :target f
+                   :field-prefix "permission-profiles.token-dev"
+                   :diffs [{:key "extends" :before ":read-only" :after ":workspace"}
+                           {:key "api_key" :before "old-pass" :after "new-pass"}]}
+                out (plan/render-plan [o] {})]
+            (is (str/includes? out "permission-profiles.token-dev.extends: \":read-only\" -> \":workspace\"") out)
+            (is (str/includes? out "permission-profiles.token-dev.api_key") out)
+            (is (not (str/includes? out "new-pass")) out)))
+        (is (= #{"input" "label"} (set (map :key (:diffs (first preset)))))
+            "the diff keys stay native: ownership prunes by them")))))
+
+(deftest codex-preset-slot-is-owned-whole
+  ;; Codex saves presets into the same slots; owning only `input` would leave
+  ;; `[tui.presets.5] label = …` behind on a prune, and Codex then refuses
+  ;; the whole config: missing field `input`
+  (let [f (str (temp-dir) "/config.toml")
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :presets {5 {:input "/review"}}}]}
+        less {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]}]
+    (u/write-text! f (str "model = \"m-a\"\n\n[tui.presets.5]\ninput = \"/status\"\nlabel = \"saved in codex\"\n\n"
+                          "[tui.presets.6]\ninput = \"/diff\"\n"))
+    (with-redefs [codex/config-file f]
+      (testing "the plan shows the saved label going"
+        (let [[op] (codex-drift raw state/empty-state)]
+          (is (= #{["input" "/status" "/review"] ["label" "saved in codex" nil]}
+                 (set (map (juxt :key :before :after) (:diffs op)))))))
+      (let [{st1 :st} (converge-codex raw state/empty-state)]
+        (is (= {"input" "/review"} (get-in (toml/read-toml f) ["tui" "presets" "5"])))
+        (is (str/index-of (slurp f) "[tui.presets.5]\ninput = \"/review\"\n\n[tui.presets.6]")
+            "rewritten where it stands")
+        (is (empty? (codex-drift raw st1)) "converged, and the dropped label plans no prune")
+        (let [{st2 :st} (converge-codex raw st1)]
+          (is (empty? (codex-drift raw st2))))
+        (testing "dropping the slot removes it whole; the slot Codex saved stays"
+          (let [{st3 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["tui" "presets" "5"])))
+            (is (not (str/includes? (slurp f) "[tui.presets.5]")))
+            (is (= {"input" "/diff"} (get-in t ["tui" "presets" "6"])))
+            (is (empty? (codex-drift less st3)))))))))
+
+(deftest codex-presets-reject-a-bad-slot-or-a-missing-input
+  (doseq [[presets msg] [[{10 {:input "/model"}} #"single digit"]
+                         [{:p {:input "/model"}} #"single digit"]
+                         [{0 {:label "no input"}} #":input is required"]
+                         [{0 {:input :model}} #":input must be a string"]
+                         [{0 {:input "/model" :model "m-b"}} #"unknown preset field :model"]
+                         [[{:input "/model"}] #"maps a slot"]]]
+    (let [cfg (config/normalize {:executors {:codex {:presets presets}}} nil)
+          errors (filter #(= :error (:level %)) (config/structural-findings cfg))]
+      (is (some #(re-find msg (:message %)) errors) (pr-str presets))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo msg (doall (codex/settings-ops cfg))))))
+  (is (not-any? #(= :error (:level %))
+                (config/structural-findings
+                 (config/normalize {:executors {:codex {:presets {"3" {:input "x"} :4 {:input "y" :label ""}}}}} nil)))))
+
+(deftest codex-status-line-replaces-a-multi-line-footer-and-round-trips
+  (let [f (str (temp-dir) "/config.toml")
+        items [:model-with-reasoning :five-hour-limit :weekly-limit :used-tokens
+               :context-used :current-dir :git-branch]
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :status-line items}]}]
+    ;; the layout Codex itself writes: one item per line
+    (u/write-text! f (str "[tui]\ntheme = \"x\"\nstatus_line = [\n    \"model\",\n    \"context-used\",\n]\n"
+                          "status_line_use_colors = true\n\n[tui.model_availability_nux]\n\"m-a\" = 4\n"))
+    (with-redefs [codex/config-file f]
+      (testing "`apply -t codex -k settings` plans the one key"
+        (let [ops (filter plan/mutating? (core/build-plan (config/normalize raw "test") state/empty-state
+                                                         {:tools #{:codex} :kinds #{:settings}}))]
+          (is (= [[:status-line ["tui"]]] (map (juxt :id :path) ops)))
+          (is (str/includes? (plan/render-plan ops {}) "status_line"))))
+      (let [{st1 :st} (converge-codex raw state/empty-state)
+            t (toml/read-toml f)]
+        (is (= (mapv name items) (get-in t ["tui" "status_line"])))
+        (is (= {"m-a" 4} (get-in t ["tui" "model_availability_nux"])))
+        (is (true? (get-in t ["tui" "status_line_use_colors"])))
+        (is (= "x" (get-in t ["tui" "theme"])))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (testing "import round-trips it"
+          (let [imported (:codex (imports/scan-settings))]
+            (is (= items (:status-line imported)))
+            (is (empty? (codex/settings-ops (config/normalize {:executors {:codex imported}} nil))))))))))
+
+(deftest codex-status-line-names-the-items-codex-accepts
+  (let [cfg (config/normalize {:executors {:codex {:status-line [:model :app-name]}}} nil)
+        [e] (filter #(= :error (:level %)) (config/structural-findings cfg))]
+    (is (str/includes? (:message e) "unknown status-line item :app-name"))
+    (is (str/includes? (:message e) "model-with-reasoning, reasoning"))
+    (is (= [:executors :codex :status-line] (:where e)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"app-name" (doall (codex/settings-ops cfg)))))
+  (testing "aliases 0.169.0 still renders are accepted"
+    (is (empty? (config/structural-findings
+                 (config/normalize {:executors {:codex {:status-line ["project" "model-name" :git-branch]}}} nil)))))
+  (testing "Claude's command status line in a unified row is no codex error, only unsupported there"
+    (let [cfg (config/normalize {:settings [{:status-line {:type "command" :command "x"} :in :all}]} "test")]
+      (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
+      (is (= [[:noop :status-line]] (map (juxt :action :id) (codex/settings-ops cfg)))))))
+
+(def codex-profile-on-disk
+  "A hand-written profile in the layout Codex and people write: sub-tables."
+  (str "default_permissions = \"dev\"\n\n"
+       "[permissions.dev]\nextends = \":workspace\"\n\n"
+       "[permissions.dev.network]\nallow_local_binding = true\nenabled = true\n\n"
+       "[permissions.dev.network.domains]\n\"127.0.0.1\" = \"allow\"\n\"localhost\" = \"allow\"\n"
+       "\"internal.example\" = \"allow\"\n\n"
+       "[hooks.state]\nopaque = \"do-not-touch\"\n"))
+
+(deftest codex-permission-profiles-write-key-by-key-converge-and-prune
+  (let [f (str (temp-dir) "/config.toml")
+        grant "~/Library/Application Support/Example/Profiles"
+        dev {:extends ":workspace"
+             :network {:enabled true :domains {"localhost" "allow"}}
+             :filesystem {grant :write ":project_roots" {"." "write"}}}
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "dev"
+                         :permission-profiles {:dev dev :net {:extends ":read-only"}}}]}]
+    (u/write-text! f codex-profile-on-disk)
+    (with-redefs [codex/config-file f]
+      (testing "one op per table; existing sub-tables are written into, not redefined"
+        (let [ops (codex-drift raw state/empty-state)]
+          (is (= #{["permissions" "dev" "filesystem"] ["permissions" "dev" "filesystem" ":project_roots"]
+                   ["permissions" "net"]}
+                 (set (map :path ops))))
+          (is (every? #(= :settings (:kind %)) ops))))
+      (let [{st1 :st} (converge-codex raw state/empty-state)
+            t (toml/read-toml f)]
+        (is (= {"extends" ":workspace"
+                "network" {"allow_local_binding" true "enabled" true
+                           "domains" {"127.0.0.1" "allow" "localhost" "allow" "internal.example" "allow"}}
+                "filesystem" {grant "write" ":project_roots" {"." "write"}}}
+               (get-in t ["permissions" "dev"]))
+            "declared keys added, hand-written rules kept")
+        (is (= {"extends" ":read-only"} (get-in t ["permissions" "net"])))
+        (is (= "do-not-touch" (get-in t ["hooks" "state" "opaque"])))
+        (is (empty? (codex-drift raw st1)) "second apply is converged")
+        (testing "dropping a profile removes only what agentctl wrote"
+          (let [less (update-in raw [:settings 0 :permission-profiles] dissoc :net)
+                {st2 :st} (converge-codex less st1)
+                t (toml/read-toml f)]
+            (is (nil? (get-in t ["permissions" "net"])))
+            (is (not (str/includes? (slurp f) "[permissions.net]")))
+            (is (= "allow" (get-in t ["permissions" "dev" "network" "domains" "internal.example"])))
+            (is (empty? (codex-drift less st2)))
+            (testing "and dropping a rule inside a kept profile removes that rule only"
+              (let [fewer (update-in less [:settings 0 :permission-profiles :dev :filesystem] dissoc ":project_roots")
+                    {st3 :st} (converge-codex fewer st2)
+                    t (toml/read-toml f)]
+                (is (nil? (get-in t ["permissions" "dev" "filesystem" ":project_roots"])))
+                (is (= "write" (get-in t ["permissions" "dev" "filesystem" grant])))
+                (is (empty? (codex-drift fewer st3)))))))))))
+
+(deftest codex-permission-profiles-merge-into-an-inline-table-and-prune-by-subtraction
+  (let [f (str (temp-dir) "/config.toml")
+        on-disk (str "default_permissions = \"local-dev\"\n\n"
+                     "[permissions.local-dev]\nextends = \":workspace\"\n\n"
+                     "[permissions.local-dev.network]\nenabled = true\n"
+                     "domains = { \"127.0.0.1\" = \"allow\", localhost = \"allow\" }\n")
+        raw (fn [domains] {:settings [{:id :user-codex :acli [:codex] :in :all :sandbox "local-dev"
+                                       :permission-profiles {:local-dev {:network {:domains domains}}}}]})
+        domains #(get-in (toml/read-toml f) ["permissions" "local-dev" "network" "domains"])]
+    (u/write-text! f on-disk)
+    (with-redefs [codex/config-file f]
+      (let [{st1 :st} (converge-codex (raw {"example.test" "allow"}) state/empty-state)]
+        (is (= {"127.0.0.1" "allow" "localhost" "allow" "example.test" "allow"} (domains))
+            "the declared rule joins the hand-written ones")
+        (is (= 1 (count (re-seq #"(?m)^domains = " (slurp f)))) "still one inline table, where it was")
+        (is (not (str/includes? (slurp f) "[permissions.local-dev.network.domains]")))
+        (is (empty? (codex-drift (raw {"example.test" "allow"}) st1)) "converged")
+        (testing "dropping the declared rule removes it alone"
+          (let [{st2 :st} (converge-codex (raw {"other.test" "deny"}) st1)]
+            (is (= {"127.0.0.1" "allow" "localhost" "allow" "other.test" "deny"} (domains)))
+            (is (empty? (codex-drift (raw {"other.test" "deny"}) st2)))))))
+    (testing "an inline table nested in an inline table is written into the same way"
+      (u/write-text! f (str "default_permissions = \"local-dev\"\n[permissions.local-dev]\n"
+                            "network = { enabled = true, domains = { localhost = \"allow\" } }\n"))
+      (with-redefs [codex/config-file f]
+        (let [{st1 :st} (converge-codex (raw {"example.test" "allow"}) state/empty-state)
+              t (toml/read-toml f)]
+          (is (= {"enabled" true "domains" {"localhost" "allow" "example.test" "allow"}}
+                 (get-in t ["permissions" "local-dev" "network"])))
+          (is (not (str/includes? (slurp f) "[permissions.local-dev.network")))
+          (is (empty? (codex-drift (raw {"example.test" "allow"}) st1))))))
+    (testing "a rule removed from an inline table it alone filled takes the emptied table with it"
+      (is (= "[t]\na = 1\n" (toml/remove-key "[t]\na = 1\nd = { x = 1 }\n" ["t" "d"] "x")))
+      (is (= "[t]\nn = {e = true}\n"
+             (toml/remove-key "[t]\nn = { e = true, d = { x = 1 } }\n" ["t" "n" "d"] "x"))))
+    (testing "a key holding a value or an array is refused, not overwritten with a table"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds a value, not a table"
+                            (toml/set-key "[t]\nd = \"x\"\n" ["t" "d"] "k" 1)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds an array"
+                            (toml/set-key "[t]\nd = [1]\n" ["t" "d"] "k" 1))))))
+
+(deftest codex-permission-profiles-import-without-loss
+  (let [f (str (temp-dir) "/config.toml")]
+    (u/write-text! f codex-profile-on-disk)
+    (with-redefs [codex/config-file f]
+      (let [imported (:codex (imports/scan-settings))]
+        (is (= "dev" (:sandbox imported)))
+        (is (= {:extends ":workspace"
+                :network {:allow_local_binding true :enabled true
+                          :domains {"127.0.0.1" "allow" "localhost" "allow" "internal.example" "allow"}}}
+               (get-in imported [:permission-profiles :dev])))
+        (is (not (str/includes? (imports/render {:executors {:codex imported}}) ":127.0.0.1"))
+            "hosts and paths stay strings: `:127.0.0.1` is no EDN keyword")
+        (is (empty? (codex/settings-ops (config/normalize {:executors {:codex imported}} nil)))
+            "the imported profile plans nothing")))))
+
+(deftest codex-permission-profiles-validate-and-need-a-default
+  (doseq [[profiles msg] [[{:p {:extends :workspace}} #"extends must be a string"]
+                          [{:p {:extends ":danger-full-access"}} #"no built-in profile"]
+                          [{:p {:filesystem {"rel/path" "write"}}} #"must be absolute"]
+                          [{:p {:filesystem {"/x" "rw"}}} #"read, write, none or deny"]
+                          [{:p {:filesystem {"/x" {"." "rw"}}}} #"read, write, none or deny"]
+                          [{:p {:network {:enabled "yes"}}} #"true or false"]
+                          [{:p {:network {:domains {"h" "maybe"}}}} #"allow or deny"]
+                          [{:p {:writable_roots ["/x"]}} #"unknown profile field"]
+                          [{":workspace" {}} #"built-ins"]]]
+    (let [cfg (config/normalize {:executors {:codex {:sandbox "p" :permission-profiles profiles}}} nil)]
+      (is (some #(re-find msg (:message %)) (filter #(= :error (:level %)) (config/structural-findings cfg)))
+          (pr-str profiles))
+      (is (thrown? clojure.lang.ExceptionInfo (doall (codex/settings-ops cfg))))))
+  (testing "a valid profile passes; without :sandbox it is refused unless config.toml already names a default"
+    (let [f (str (temp-dir) "/config.toml")
+          cfg (config/normalize {:executors {:codex {:permission-profiles
+                                                     {:p {:extends ":read-only" :description "d"
+                                                          :workspace_roots {"/w" true}
+                                                          :filesystem {"/x" "write" "glob_scan_max_depth" 3}}}}}} nil)]
+      (is (empty? (config/structural-findings cfg)))
+      (with-redefs [codex/config-file f]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no default_permissions"
+                              (doall (codex/settings-ops cfg))))
+        (is (not (u/exists? f)))
+        (u/write-text! f "default_permissions = \"p\"\n")
+        (is (seq (filter plan/mutating? (codex/settings-ops cfg))) "a default already on disk is enough"))))
+  (testing ":sandbox naming an unknown built-in is a config error"
+    (let [cfg (config/normalize {:executors {:codex {:sandbox ":full-access"}}} nil)
+          [e] (filter #(= :error (:level %)) (config/structural-findings cfg))]
+      (is (re-find #":danger-full-access, :read-only, :workspace" (:message e)))
+      (is (empty? (config/structural-findings
+                   (config/normalize {:executors {:codex {:sandbox ":danger-full-access"}}} nil)))))))
+
+(deftest codex-sandbox-must-name-a-profile-config-toml-will-hold
+  ;; codex 0.169.0 refuses to start on [permissions] profiles with no
+  ;; default_permissions, and on a default naming no profile; agentctl must
+  ;; not plan its way into either by pruning what it wrote
+  (let [f (str (temp-dir) "/config.toml")
+        dev {:extends ":read-only" :filesystem {"/tmp/x" "write"}}
+        row (fn [m] {:settings [(merge {:id :user-codex :acli [:codex] :in :all :model "m-a"} m)]})
+        full (row {:sandbox "dev" :permission-profiles {:dev dev}})
+        refused (fn [raw st re]
+                  (let [before (slurp f)]
+                    (is (thrown-with-msg? clojure.lang.ExceptionInfo re (codex-drift raw st)))
+                    (is (some #(and (= :error (:level %)) (re-find re (:message %)))
+                              (:findings (validate/run (config/normalize raw "test") {})))
+                        "validate reports it as an error")
+                    (is (= before (slurp f)))))]
+    (u/write-text! f "model = \"m-a\"\n")
+    (with-redefs [codex/config-file f
+                  state/load-state (fn [] state/empty-state)]
+      (let [{st :st} (converge-codex full state/empty-state)]
+        (is (= "dev" (get (toml/read-toml f) "default_permissions")))
+        (with-redefs [state/load-state (constantly st)]
+          (testing "dropping :sandbox while the profile stays: the default agentctl wrote would go"
+            (refused (row {:permission-profiles {:dev dev}}) st #"no default_permissions"))
+          (testing "dropping the profile :sandbox names: the profile agentctl wrote would go"
+            (refused (row {:sandbox "dev"}) st #"\"dev\" names no profile"))
+          (testing "a name nothing defines lists what could be named"
+            (refused (row {:sandbox "nope" :permission-profiles {:dev dev}}) st
+                     #"names no profile.*declared profiles: dev; built-in: :danger-full-access, :read-only, :workspace"))
+          (testing "dropping both is fine: nothing is left that needs a default"
+            (is (seq (codex-drift (row {}) st))))
+          (testing "a built-in default with the profile gone is fine too"
+            (is (seq (codex-drift (row {:sandbox ":workspace"}) st)))))))
+    (testing "a profile written by hand stays, so a default may name it"
+      (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
+      (with-redefs [codex/config-file f]
+        (is (= ["default_permissions"]
+               (map :key (mapcat :diffs (codex-drift (row {:sandbox "mine"}) state/empty-state))))
+            "no error, and only the default to write")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"left in config.toml: mine"
+                              (codex-drift (row {:sandbox "other"}) state/empty-state)))))
+    (testing "a file broken by hand does not block a setting that does not touch permissions"
+      (u/write-text! f "model = \"m-a\"\n[permissions.mine]\nextends = \":workspace\"\n")
+      (with-redefs [codex/config-file f]
+        (is (seq (codex-drift (row {:model "m-b"}) state/empty-state)))))))
+
+(def vendor-codex-hooks
+  "A hooks.json a vendor installer wrote: one SessionStart and one Stop hook."
+  {:hooks {:SessionStart [{:hooks [{:type "command" :command "vendor-session" :timeout 10}]}]
+           :Stop [{:hooks [{:type "command" :command "vendor-stop"}]}]}})
+
+(deftest codex-hooks-own-only-their-elements-and-keep-trust-positions
+  (let [dir (temp-dir) hooks (str dir "/hooks.json") conf (str dir "/config.toml")
+        trust (str "[hooks.state.\"" hooks ":session_start:0:0\"]\n"
+                   "trusted_hash = \"sha256:0000\"\nenabled = true\n")
+        decl (fn [cmd] {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+                        :hooks [{:id :note :event :SessionStart :command cmd :timeout 5
+                                 :status-message "noting" :acli [:codex] :in :all}
+                                {:id :lint :event :PostToolUse :matcher "apply_patch"
+                                 :command "lint-hook" :acli [:codex] :in :all}]})]
+    (u/write-json! hooks vendor-codex-hooks)
+    (u/write-text! conf (str "model = \"m-a\"\n\n" trust))
+    (with-redefs [codex/hooks-file hooks codex/config-file conf]
+      (let [{ops1 :ops st1 :st} (converge-codex (decl "note-v1") state/empty-state)
+            j (u/read-json hooks)]
+        (is (= #{[:create :note] [:create :lint]}
+               (set (map (juxt :action :id) (filter #(= :hooks (:kind %)) ops1)))))
+        (testing "a new hook goes after the vendor's, which keeps index 0 and its trust key"
+          (is (= ["vendor-session" "note-v1"] (map #(get-in % [:hooks 0 :command]) (get-in j [:hooks :SessionStart]))))
+          (is (= {:type "command" :command "note-v1" :timeout 5 :statusMessage "noting"}
+                 (get-in j [:hooks :SessionStart 1 :hooks 0])))
+          (is (= [{:matcher "apply_patch" :hooks [{:type "command" :command "lint-hook"}]}]
+                 (get-in j [:hooks :PostToolUse])))
+          (is (= (:Stop (:hooks vendor-codex-hooks)) (get-in j [:hooks :Stop]))))
+        (testing "[hooks.state] in config.toml is never touched"
+          (is (str/includes? (slurp conf) trust)))
+        (testing "a second plan reports both hooks converged"
+          (let [again (codex/hook-ops (config/normalize (decl "note-v1") "test") st1)]
+            (is (= #{[:noop :note] [:noop :lint]} (set (map (juxt :action :id) again))))
+            (is (empty? (codex-drift (decl "note-v1") st1)))))
+        (testing "a changed command is replaced at its own index"
+          (u/write-json! hooks (update-in (u/read-json hooks) [:hooks :SessionStart] conj
+                                          {:hooks [{:type "command" :command "vendor-late"}]}))
+          (let [{st2 :st} (converge-codex (decl "note-v2") st1)
+                cmds (map #(get-in % [:hooks 0 :command]) (get-in (u/read-json hooks) [:hooks :SessionStart]))]
+            (is (= ["vendor-session" "note-v2" "vendor-late"] cmds) "vendor-late keeps index 2")
+            (testing "dropping a hook prunes only that element"
+              (let [less (update (decl "note-v2") :hooks #(vec (remove (comp #{:note} :id) %)))
+                    {st3 :st} (converge-codex less st2)
+                    j (u/read-json hooks)]
+                (is (= ["vendor-session" "vendor-late"]
+                       (map #(get-in % [:hooks 0 :command]) (get-in j [:hooks :SessionStart]))))
+                (is (= (:Stop (:hooks vendor-codex-hooks)) (get-in j [:hooks :Stop])))
+                (is (str/includes? (slurp conf) trust))
+                (is (empty? (codex-drift less st3)))
+                (testing "import rebuilds the owned hook and leaves vendor hooks out"
+                  (with-redefs [state/load-state (constantly st3)]
+                    (reset! imports/notes [])
+                    (let [imported (:codex (imports/scan-settings))]
+                      (is (= {:lint {:event :PostToolUse :matcher "apply_patch" :command "lint-hook"}}
+                             (:hooks imported)))
+                      (is (some #(str/includes? % "3 codex hook group(s)") @imports/notes))
+                      (is (every? #(= :noop (:action %))
+                                  (codex/hook-ops (config/normalize {:executors {:codex imported}} nil) st3))
+                          "the imported hook plans as converged"))))))))))))
+
+(deftest codex-hooks-adopt-a-vendor-group-with-a-null-matcher
+  ;; vendor installers write `"matcher": null`; agentctl leaves the key out.
+  ;; Compared as written they were two hooks, so declaring the vendor's own
+  ;; command appended a duplicate that ran twice and needed review again
+  (let [dir (temp-dir) hooks (str dir "/hooks.json") conf (str dir "/config.toml")
+        vendor {:hooks {:SessionStart [{:matcher nil :hooks [{:type "command" :command "vendor-session" :timeout 10}]}]}}
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+             :hooks [{:id :vendor-session :event :SessionStart :command "vendor-session" :timeout 10
+                      :acli [:codex] :in :all}]}]
+    (u/write-json! hooks vendor)
+    (u/write-text! conf "model = \"m-a\"\n")
+    (with-redefs [codex/hooks-file hooks codex/config-file conf]
+      (is (empty? (filter plan/mutating? (codex-drift raw state/empty-state))) "already there: nothing to write")
+      (let [{st1 :st} (converge-codex raw state/empty-state)]
+        (is (= 1 (count (get-in (u/read-json hooks) [:hooks :SessionStart]))))
+        (is (empty? (codex-drift raw st1)))
+        (testing "the adopted group is agentctl's now: dropping the declaration removes it"
+          (converge-codex (update raw :hooks empty) st1)
+          (is (empty? (get-in (u/read-json hooks) [:hooks :SessionStart]))))))
+    (testing "Claude's array ops compare the same way"
+      (let [f (str dir "/settings.json")]
+        (u/write-json! f {:hooks {:Stop [{:matcher nil :hooks [{:type "command" :command "x"}]}]}})
+        (is (nil? (plan/json-array-merge-op {:tool :claude :kind :hooks :id :x :file f :path [:hooks :Stop]
+                                            :value {:hooks [{:type "command" :command "x"}]}})))))))
+
+(deftest codex-hooks-refuse-a-hooks-json-that-does-not-parse
+  ;; read as nil, an unparseable hooks.json was replaced by one holding only
+  ;; agentctl's hook: every vendor hook in it deleted
+  (let [dir (temp-dir) hooks (str dir "/hooks.json") conf (str dir "/config.toml")
+        broken "{\"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"vendor-stop\"}]},]}}\n"
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+             :hooks [{:id :note :event :SessionStart :command "note" :acli [:codex] :in :all}]}]
+    (u/write-text! hooks broken)
+    (u/write-text! conf "model = \"m-a\"\n")
+    (with-redefs [codex/hooks-file hooks codex/config-file conf]
+      (let [ops (filter #(= :hooks (:kind %)) (codex-drift raw state/empty-state))]
+        (is (= 1 (count ops)))
+        (is (:warn (first ops)))
+        (is (re-find #"hooks.json is not valid JSON" (:summary (first ops))))
+        (let [{:keys [failed]} (core/execute! ops)]
+          (is (= 1 (count failed)))
+          (is (re-find #"not valid JSON" (:error (first failed))))))
+      (is (= broken (slurp hooks)) "byte for byte")
+      (testing "the prune of a hook it wrote is refused the same way"
+        (let [st (state/record state/empty-state :codex :hooks :note
+                                       {:path [:hooks :SessionStart] :value (codex/hook-group (first (:hooks raw)))})
+              ops (filter #(= :hooks (:kind %)) (codex-drift (update raw :hooks empty) st))]
+          (is (= [:update] (map :action ops)))
+          (is (seq (:failed (core/execute! ops))))
+          (is (= broken (slurp hooks))))))))
+
+(deftest codex-hooks-validate-events-and-stay-opt-in
+  (testing "validate accepts codex hooks and rejects an event codex never fires"
+    (is (empty? (config/structural-findings
+                 (config/normalize {:executors {:codex {:hooks {:a {:event :SessionStart :command "x"}
+                                                                :b {:event "PreToolUse" :command "y" :matcher "shell"
+                                                                    :async false :additional-context-limit 0}}}}} nil))))
+    (doseq [[h msg] [[{:event :Notification :command "x"} #"unknown event :Notification"]
+                     [{:event :SessionStart} #"needs :command"]
+                     [{:command "x"} #"needs :event"]
+                     [{:event :Stop :command "x" :timeout "5"} #"whole seconds"]
+                     [{:event :Stop :command "x" :type "prompt"} #"command hooks"]
+                     [{:event :Stop :command "x" :shell "bash"} #"unknown hook field :shell"]]]
+      (let [cfg (config/normalize {:executors {:codex {:hooks {:h h}}}} nil)]
+        (is (some #(re-find msg (:message %)) (filter #(= :error (:level %)) (config/structural-findings cfg)))
+            (pr-str h)))))
+  (testing "a :hooks row without :acli stays Claude's; naming :codex places it in codex"
+    (let [row {:id :h :event :SessionStart :command "x" :in :all}
+          plain (config/normalize {:hooks [row]} "test")
+          both (config/normalize {:hooks [(assoc row :acli [:claude :codex])]} "test")]
+      (is (contains? (get-in plain [:tools :claude :hooks]) :h))
+      (is (nil? (get-in plain [:tools :codex :hooks])))
+      (is (not (contains? (config/active-tools plain) :codex)))
+      (is (contains? (get-in both [:tools :codex :hooks]) :h))
+      (is (contains? (get-in both [:tools :claude :hooks]) :h))))
+  (testing "a Claude-only hook reaching codex through :acli :all or a unified row is no codex error"
+    (doseq [raw [{:hooks [{:id :n :event :Notification :command "x" :shell "bash" :acli :all :in :all}]}
+                 {:settings [{:hooks {:n {:event :Notification :command "x"}} :in :all}]}]
+            :let [cfg (config/normalize raw "test")]]
+      (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)) (pr-str raw))
+      (is (nil? (get-in cfg [:tools :codex :hooks])) (pr-str raw))
+      (is (contains? (get-in cfg [:tools :claude :hooks]) :n) (pr-str raw))))
+  (testing "a settings row that names codex does carry its hooks there"
+    (let [cfg (config/normalize {:settings [{:hooks {:n {:event :Stop :command "x"}} :acli [:codex] :in :all}]} "test")]
+      (is (contains? (get-in cfg [:tools :codex :hooks]) :n))))
+  (testing "a project-placed codex hook is reported, not written"
+    (let [repo (temp-dir)
+          _ (fs/create-dirs (str repo "/.git"))
+          cfg (config/normalize {:hooks [{:id :h :event :SessionStart :command "x" :acli [:codex] :in repo}]} "test")
+          ops (core/build-plan cfg state/empty-state {:tools #{:codex}})]
+      (is (some #(and (:warn %) (str/includes? (str (:summary %)) "project-scoped hooks")) ops))
+      (is (not-any? #(and (= :hooks (:kind %)) (plan/mutating? %)) ops)))))
 
 (deftest codex-keymap-is-editable-as-edn
   (let [keymap {:global {:open_transcript "alt-t"}}
@@ -3245,10 +3867,31 @@
         host {:id :w :ssh "h" :os :windows}
         ascii? #(every? (fn [c] (< (int c) 128)) %)]
     (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
-      (remote/write-tree! host "skill" [{:rel "dïr/fïle ünï.md" :bytes (.getBytes "ünï" "UTF-8") :sha "00"}])
-      (is (ascii? @script))
-      (is (not (str/includes? @script "fïle")))
-      (is (str/includes? @script (remote/b64-str "dïr/fïle ünï.md"))))))
+      (doseq [root remote/roots]
+        (testing (name root)
+          (remote/write-tree! host root "skïll" [{:rel "dïr/fïle ünï.md" :bytes (.getBytes "ünï" "UTF-8") :sha "00"}])
+          (is (ascii? @script))
+          (is (not (str/includes? @script "fïle")))
+          (is (str/includes? @script (remote/b64-str "dïr/fïle ünï.md")))
+          (remote/park! host root "skïll")
+          (is (ascii? @script))))
+      (remote/inventory host [:codex] ["skïll"])
+      (is (ascii? @script)))))
+
+(deftest each-root-has-its-own-place-and-backup-name
+  ;; a run that moves a skill between roots parks the same id from both
+  (let [script (atom nil)]
+    (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
+      (doseq [[os sep] [[:linux "/"] [:windows "\\"]]
+              :let [host {:id :w :ssh "h" :os os}]]
+        (testing (name os)
+          (remote/park! host :codex "x")
+          (is (str/includes? @script (str "$C" sep "skills" sep "$id")))
+          (is (str/includes? @script "_.codex_skills_$id"))
+          (remote/park! host :awl "x")
+          (is (str/includes? @script (str "$H" sep ".agents" sep "skills" sep "$id")))
+          (is (str/includes? @script "_.agents_skills_$id"))
+          (is (not (str/includes? @script (str "$C" sep "skills")))))))))
 
 (deftest a-file-name-cannot-climb-out-of-a-windows-skill
   (doseq [bad ["..\\..\\x.bat" "C:x.bat" "a:b.txt" "dir/CON" "dir/nul.txt" "trail." "trail " "q?.md"]]
@@ -3258,21 +3901,70 @@
   (testing "write-tree! refuses before anything leaves this machine"
     (with-redefs [remote/exec (fn [& _] (throw (Exception. "must not be reached")))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot exist on Windows"
-                            (remote/write-tree! {:os :windows :id :w} "s"
+                            (remote/write-tree! {:os :windows :id :w} :codex "s"
                                                 [{:rel "..\\x" :bytes (.getBytes "") :sha ""}]))))))
 
 (deftest an-inventory-tolerates-a-chatty-login-shell
   (let [e #(remote/b64-str %)
         inv (remote/parse-inventory
-             ["Welcome to Ubuntu" (str "H\t" (e "C:\\Users\\a")) (str "R\t" (e "C:\\Users\\a\\.codex\\skills"))
-              "T\tcodex\t1" "T\tpi\t0"
-              "S\talpha\tD" (str "M\talpha\t" (e "sub dir/ünï.md") "\tabc")
-              "S\tgone\tA" "S\tjn\tL" "OK"])]
+             ["Welcome to Ubuntu" (str "H\t" (e "C:\\Users\\a"))
+              (str "R\tcodex\t" (e "C:\\Users\\a\\.codex\\skills"))
+              (str "R\tawl\t" (e "C:\\Users\\a\\.agents\\skills"))
+              "T\tcodex\t1" (str "V\tcodex\t" (e "codex-cli 0.169.0\n")) "T\tpi\t0"
+              "S\tcodex\talpha\tD" (str "M\tcodex\talpha\t" (e "sub dir/ünï.md") "\tabc")
+              "S\tawl\talpha\tA"
+              "S\tcodex\tgone\tA" "S\tcodex\tjn\tL" "OK"])]
     (is (= "C:\\Users\\a" (:home inv)))
+    (is (= {:codex "C:\\Users\\a\\.codex\\skills" :awl "C:\\Users\\a\\.agents\\skills"} (:roots inv)))
     (is (= #{:codex} (:tools inv)))
-    (is (= {:state :dir :files {"sub dir/ünï.md" "abc"}} (get-in inv [:entries "alpha"])))
-    (is (= :absent (get-in inv [:entries "gone" :state])))
-    (is (= :link (get-in inv [:entries "jn" :state])))))
+    (is (= {:codex "codex-cli 0.169.0"} (:versions inv)))
+    (is (= {:state :dir :files {"sub dir/ünï.md" "abc"}} (get-in inv [:entries :codex "alpha"])))
+    (is (= :absent (get-in inv [:entries :awl "alpha" :state])))
+    (is (= :absent (get-in inv [:entries :codex "gone" :state])))
+    (is (= :link (get-in inv [:entries :codex "jn" :state]))))
+  (testing "a tool that printed no version, its line trimmed of the empty field"
+    (is (= {:codex ""} (:versions (remote/parse-inventory ["V\tcodex" "OK"]))))))
+
+(deftest codex-reads-the-shared-root-from-0-95
+  (is (true? (hosts/codex-reads-agents? "codex-cli 0.169.0")))
+  (is (true? (hosts/codex-reads-agents? "codex-cli 0.95.0")))
+  (is (true? (hosts/codex-reads-agents? "codex-cli 1.0.0-alpha.1")))
+  (is (false? (hosts/codex-reads-agents? "codex-cli 0.94.9")))
+  (is (false? (hosts/codex-reads-agents? "codex-cli 0.9.100")))
+  (is (nil? (hosts/codex-reads-agents? "")))
+  (is (nil? (hosts/codex-reads-agents? nil))))
+
+(deftest a-skill-both-want-goes-where-both-read-it
+  (testing "codex reads ~/.agents/skills: one copy, there"
+    (is (= [:awl] (hosts/roots-for #{:codex :awl} true))))
+  (testing "it does not, or may not: a copy in each"
+    (is (= [:codex :awl] (hosts/roots-for #{:codex :awl} false)))
+    (is (= [:codex :awl] (hosts/roots-for #{:codex :awl} nil))))
+  (testing "one tool: its own root, whatever codex reads"
+    (is (= [:codex] (hosts/roots-for #{:codex} true)))
+    (is (= [:awl] (hosts/roots-for #{:awl} false))))
+  (is (= [] (hosts/roots-for #{} true))))
+
+(deftest a-host-carries-awl-onto-what-it-selects
+  (let [d (temp-dir)
+        _ (doseq [s ["a" "b"]]
+            (fs/create-dirs (str d "/pack/skills/" s))
+            (spit (str d "/pack/skills/" s "/SKILL.md") "x"))
+        pack [:uri (str "file://" d "/pack")]
+        raw {:skill-packs {pack {:alias 'kit :acli [:awl]}}
+             :skills {['kit "a"] {:acli [:claude :awl]}}}
+        local (config/normalize raw "/x")
+        hosted (get-in (config/normalize {:hosts {:box (assoc raw :ssh "h" :os :linux)}} "/x")
+                       [:hosts :box :cfg])]
+    (testing "a host places awl's skills: the pack's and its own"
+      (is (= #{:awl} (get-in hosted [:skill-packs :kit :consumers])))
+      (is (= #{:awl} (get-in hosted [:skills :b :consumers])))
+      (is (= #{:awl} (get-in hosted [:skills :a :consumers])))
+      (is (= #{} (get-in hosted [:skills :b :tools])))
+      (is (= #{:claude} (get-in hosted [:skills :a :tools]))))
+    (testing "locally awl reads agents.edn itself: nothing carries it"
+      (is (nil? (get-in local [:skill-packs :kit :consumers])))
+      (is (every? (comp nil? :consumers) (vals (:skills local)))))))
 
 (deftest a-skills-build-output-is-not-drift
   (let [d (temp-dir)]
@@ -3294,16 +3986,28 @@
            (:sha (first (hosts/source-files d)))))))
 
 (deftest a-failed-host-write-is-not-owned
-  (let [st (state/record {:managed {}} :codex :skills :old {})
-        planned {:desired {:a {:source "/a" :target "T\\a"} :b {:source "/b" :target "T\\b"}}
-                 :gone #{:vanished}}
+  (let [st (-> {:managed {}}
+               (state/record :codex :skills :old {})
+               (state/record :codex :skills :vanished {})
+               (state/record :codex :skills :moved {}))
+        planned {:desired {[:codex :a] {:source "/a" :target "T\\a"}
+                           [:codex :b] {:source "/b" :target "T\\b"}
+                           [:awl :b] {:source "/b" :target "A\\b"}
+                           [:awl :moved] {:source "/m" :target "A\\moved"}}
+                 :gone #{[:codex :vanished]}}
         failed [{:tool :codex :kind :skills :id :b}]
-        done [{:tool :codex :kind :skills :id :old :action :delete}]
-        out (hosts/sync-host-state (state/record st :codex :skills :vanished {}) planned done failed)]
+        done [{:tool :codex :kind :skills :id :old :action :delete}
+              {:tool :codex :kind :skills :id :moved :action :delete}]
+        out (hosts/sync-host-state st planned done failed)]
     (is (state/managed? out :codex :skills :a))
     (is (not (state/managed? out :codex :skills :b)))
+    (testing "ownership is per root: a failure in one leaves the other's"
+      (is (state/managed? out :awl :skills :b)))
     (is (not (state/managed? out :codex :skills :old)))
-    (is (not (state/managed? out :codex :skills :vanished)))))
+    (is (not (state/managed? out :codex :skills :vanished)))
+    (testing "a skill moved between roots is owned where it now is"
+      (is (state/managed? out :awl :skills :moved))
+      (is (not (state/managed? out :codex :skills :moved))))))
 
 (deftest a-host-section-survives-import
   (let [decl {:ssh "example.com" :os :windows :skill-packs {[:uri "file:///p"] {:acli [:codex]}}}

@@ -8,6 +8,7 @@
             [agentctl.adapters.claude :as claude]
             [agentctl.adapters.codex :as codex]
             [agentctl.adapters.dsh :as dsh]
+            [agentctl.codex-schema :as codex-schema]
             [agentctl.config :as config]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
@@ -15,6 +16,7 @@
             [agentctl.adapters.pi :as pi]
             [agentctl.refs :as refs]
             [agentctl.scope :as scope]
+            [agentctl.state :as state]
             [agentctl.statusline :as statusline]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
@@ -63,6 +65,54 @@
 
 ;; ---------------------------------------------------------------- settings
 
+(def ^:private keyed-by-data
+  "Profile tables whose keys are data (paths, hosts), not field names."
+  #{"filesystem" "domains" "workspace_roots" "unix_sockets"})
+
+(defn- import-profile
+  "A `[permissions.<name>]` table as agents.edn declares it: field names as
+   keywords, paths and hosts as the strings they are."
+  ([m] (import-profile m false))
+  ([m data-keys?]
+   (into {} (map (fn [[k v]]
+                   [(if data-keys? k (keyword k))
+                    (if (map? v) (import-profile v (or data-keys? (contains? keyed-by-data k))) v)]))
+         m)))
+
+(def ^:private codex-hook-fields
+  (into {} (map (fn [[k v]] [v k])) (merge codex-schema/hook-entry-keys {:type :type})))
+
+(defn- codex-hook-decl
+  "A `hooks[event]` element as the declaration that would write it."
+  [event group]
+  (let [h (first (:hooks group))]
+    (u/prune-nils
+     (merge {:event (keyword (name event)) :matcher (:matcher group)}
+            (into {} (keep (fn [[k v]] (when-let [dk (get codex-hook-fields k)]
+                                         (when (not= :type dk) [dk v]))))
+                  h)))))
+
+(defn scan-codex-hooks
+  "Codex hooks agentctl owns (recorded in its state, still in hooks.json),
+   rebuilt as declarations. Everything else in hooks.json was installed by a
+   vendor or by hand; import leaves it out and says how much, since
+   declaring it would make agentctl prune it later."
+  []
+  (let [file (u/read-json codex/hooks-file)
+        st (state/load-state)
+        groups (for [[event gs] (:hooks file) g gs] [event g])
+        owned (into {} (for [id (state/managed-ids st :codex :hooks)
+                             :let [{:keys [path value]} (state/entry st :codex :hooks id)]
+                             :when (some (fn [[event g]] (and (= (name (last path)) (name event))
+                                                              (= (u/norm g) (u/norm value))))
+                                         groups)]
+                         [(keyword id) (codex-hook-decl (last path) value)]))
+        vendor (- (count groups) (count owned))]
+    (when (pos? vendor)
+      (note! (str vendor " codex hook group(s) in " (u/tilde codex/hooks-file)
+                  " are not agentctl's — left out; declare one under :hooks to own it")))
+    owned))
+
 (defn scan-settings []
   (u/prune-nils
    {:claude (let [s (u/read-json claude/settings-file)
@@ -80,14 +130,29 @@
                                                         (map? v) nil
                                                         :else [dk v]))))
                                s)))
-    :codex (let [t (try (toml/read-toml codex/config-file) (catch Exception _ nil))
-                 inv (invert codex/setting-keys)]
+    :codex (let [t (toml/read-toml-lenient codex/config-file)
+                 inv (invert codex/setting-keys)
+                 hooks (scan-codex-hooks)]
              (not-empty
               (cond-> (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
                                                   (when (string? v) [dk v]))))
                             t)
                 (seq (get-in t ["tui" "keymap"]))
-                (assoc :keymap (get-in t ["tui" "keymap"])))))
+                (assoc :keymap (get-in t ["tui" "keymap"]))
+                (seq hooks) (assoc :hooks hooks)
+                (map? (get t "permissions"))
+                (assoc :permission-profiles (into (sorted-map-by #(compare (str %1) (str %2)))
+                                                  (for [[nm p] (get t "permissions") :when (map? p)]
+                                                    [(if (re-matches #"[A-Za-z][A-Za-z0-9_-]*" nm) (keyword nm) nm)
+                                                     (import-profile p)])))
+                (sequential? (get-in t ["tui" "status_line"]))
+                (assoc :status-line (mapv keyword (get-in t ["tui" "status_line"])))
+                ;; slots are digits; EDN reads best with them as numbers
+                (seq (get-in t ["tui" "presets"]))
+                (assoc :presets (into (sorted-map-by #(compare (str %1) (str %2)))
+                                      (for [[n p] (get-in t ["tui" "presets"])]
+                                        [(or (parse-long n) n)
+                                         (into {} (map (fn [[k v]] [(keyword k) v])) p)]))))))
     :pi (let [s (u/read-json pi/settings-file)
               inv (invert pi/setting-keys)]
           (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
@@ -105,7 +170,7 @@
                    (not-empty (into {} (keep (fn [[k v]] (when-let [dk (get inv (name k))]
                                                            (when (or (string? v) (boolean? v)) [dk v]))))
                                     s)))
-    :kimi (let [t (try (toml/read-toml kimi/config-file) (catch Exception _ nil))
+    :kimi (let [t (toml/read-toml-lenient kimi/config-file)
                 inv (invert kimi/setting-keys)]
             (not-empty
              (into {} (keep (fn [[k v]] (when-let [dk (get inv k)]
@@ -248,8 +313,8 @@
        models))))
 
 (defn scan-providers []
-  (let [codex-cfg (try (toml/read-toml codex/config-file) (catch Exception _ nil))
-        kimi-cfg (try (toml/read-toml kimi/config-file) (catch Exception _ nil))
+  (let [codex-cfg (toml/read-toml-lenient codex/config-file)
+        kimi-cfg (toml/read-toml-lenient kimi/config-file)
         kimi-models (kimi-provider-models kimi-cfg)
         entries (concat
                  (for [[nm p] (get codex-cfg "model_providers")]
@@ -496,7 +561,7 @@
              {:in (if (some #{:all} ins) :all (vec (sort (distinct ins)))) :acli [:claude]}]))))
 
 (defn scan-projects []
-  (let [codex-cfg (try (toml/read-toml codex/config-file) (catch Exception _ nil))
+  (let [codex-cfg (toml/read-toml-lenient codex/config-file)
         codex-projects (for [[path v] (get codex-cfg "projects")]
                          [path (= "trusted" (get v "trust_level")) :codex])
         pi-trust (for [[k v] (u/read-json pi/trust-file)] [(u/key-str k) (boolean v) :pi])

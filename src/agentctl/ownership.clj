@@ -18,9 +18,10 @@
   (into {}
         (for [{:keys [kind id in targets decl]} (:entities cfg)
               t (let [ts (:tools decl)]
-                  (if (or (nil? ts) (= :all ts))
-                    (config/tools-for (case kind :trust :projects :skill-packs :skills kind))
-                    (if (keyword? ts) [ts] ts)))
+                  (cond
+                    (and (or (nil? ts) (= :all ts)) (= :hooks kind)) scope/default-hook-tools
+                    (or (nil? ts) (= :all ts)) (config/tools-for (case kind :trust :projects :skill-packs :skills kind))
+                    :else (if (keyword? ts) [ts] ts)))
               p (if (= :all in) [u/home] targets)]
           [[kind id t p] {:entity-id id :tool t :kind kind :resolved-path p}])))
 
@@ -31,19 +32,37 @@
 
 (defn write-key [o] [(:tool o) (:target o) (:path o) (when (:array-element o) (:project-path o))])
 
-(defn- desired-fields [cfg o]
+(defn- desired-fields
+  "Native keys the config still declares in the table or object `o` wrote.
+   Codex writes nested tables (`[tui.keymap.<ctx>]`, …) whose keys are not
+   setting names, so its adapter answers per table path."
+  [cfg o]
   (let [settings (if (:project o) (get-in cfg [:projects (:project o) :tools (:tool o)])
                      (get-in cfg [:tools (:tool o)]))
         mapping (case (:tool o) :claude claude/setting-keys :codex codex/setting-keys
                       :pi pi/setting-keys :antigravity antigravity/setting-keys
                       :kimi kimi/setting-keys :omp omp/setting-paths {})]
-    (set (keep (fn [k] (when-let [native (get mapping k)]
-                        (u/kw->str (if (vector? native) (last native) native)))) (keys settings)))))
+    (if (= :codex (:tool o))
+      (codex/owned-keys settings (vec (:path o)))
+      (set (keep (fn [k] (when-let [native (get mapping k)]
+                          (u/kw->str (if (vector? native) (last native) native)))) (keys settings))))))
+
+(defn- tracked?
+  "Does `cfg` answer for the writes recorded here? An entity-DSL config does:
+   its placements say what it still declares. So does a config that declares
+   nothing in either format (`{}`, only format-neutral keys): it is read the
+   old way, but it declares none of what a DSL config wrote, and every such
+   write is one to prune. An old-format config has no placements to compare
+   with — it would disown everything, including what it declares the old
+   way — so it leaves them alone."
+  [cfg]
+  (or (:entity-dsl? cfg)
+      (and (contains? cfg :format) (nil? (:format cfg)))))
 
 (defn record
   "Keep the exact destinations of successful writes; planning never claims ownership."
   [st cfg failed done]
-  (if-not (:entity-dsl? cfg) st
+  (if-not (tracked? cfg) st
     (let [st (assoc st :placements (merge (:placements st) (placements cfg)))]
       (reduce
        (fn [s o]
@@ -68,7 +87,7 @@
              :else s))) st (:planned-ops cfg)))))
 
 (defn prune-ops [cfg st]
-  (when (:entity-dsl? cfg)
+  (when (tracked? cfg)
     (keep
      (fn [[_ o]]
        (when (or (empty? (owners cfg o))
@@ -90,7 +109,9 @@
                              ;; file's $schema whenever it runs: pruned here, it
                              ;; came straight back on the next apply!
                              (= target claude/settings-file))) nil
-                    (and (= :settings kind) ((desired-fields cfg o) (last path))) nil
+                    ;; a JSON setting is one key at `[native]`; a codex table
+                    ;; path's last element is a table name, not a key
+                    (and (= :settings kind) (not= :codex tool) ((desired-fields cfg o) (last path))) nil
                     (str/ends-with? target ".json")
                     ;; Trust arrays contain unmanaged members too: subtract only
                     ;; members this write added, preserving the rest.
@@ -101,15 +122,26 @@
                           (plan/json-set-op (assoc args :value (vec (remove (set added) current)))))
                         (plan/json-unset-op args)))
                     (str/ends-with? target ".toml")
-                    (let [current (toml/read-toml target)
-                          ks (remove #((desired-fields cfg o) (u/kw->str %)) (map :key diffs))
+                    (let [current (toml/read-toml-lenient target)
+                          desired (desired-fields cfg o)
+                          ;; a table owned whole goes whole once nothing in it
+                          ;; is declared — keys Codex saved there included
+                          whole? (and (= :codex tool) (codex/whole-table? path) (empty? desired))
+                          ks (if whole? (map :key diffs) (remove #(desired (u/kw->str %)) (map :key diffs)))
                           table (get-in current path)]
-                      (when (some #(contains? table (u/kw->str %)) ks)
+                      (when (if whole? (some? table) (some #(contains? table (u/kw->str %)) ks))
                         (plan/op {:tool tool :kind kind :id id :target target :path path :project project
                                   :action :delete :summary "removed from agents.edn" :pruned-keys (vec ks)
+                                  ;; a table left with no keys goes too: a bare
+                                  ;; `[tui.presets.N]` header is a codex load error
                                   :exec! #(do (u/backup! target)
                                               (toml/update-file! target
-                                                                (fn [text] (reduce (fn [s k] (toml/remove-key s path k)) text ks))))})))
+                                                                (fn [text]
+                                                                  (if whole?
+                                                                    (toml/remove-table text path)
+                                                                    (toml/remove-table-if-empty
+                                                                     (reduce (fn [s k] (toml/remove-key s path k)) text ks)
+                                                                     path)))))})))
                     (or (str/ends-with? target ".yaml") (str/ends-with? target ".yml"))
                     (plan/yaml-remove-op args)
                     :else nil)]

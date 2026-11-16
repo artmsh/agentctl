@@ -26,7 +26,8 @@ selects agent CLIs (`:cc`, `:codex`, `:pi`, `:omp`, `:llm`, `:agy`, `:kimi`,
 `:dsh`. `:awl` is valid on these two sections only:
 `awl` reads this file itself, so agentctl does not
 provision it and the value only decides what awl takes. An entry naming `:awl`
-alone plans nothing, and a git pack is not cloned for it.
+alone plans nothing, and a git pack is not cloned for it. A remote host is the
+exception, because it has no copy of this file ([Remote hosts](#remote-hosts)).
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
@@ -141,7 +142,9 @@ format has, `--help` marks `projects` as legacy, `--host` runs are held to the
 same rule, and the GUI refuses the same kinds for the buffer it plans. A
 config with nothing that decides the format yet — `{}`, or only `:statusline`,
 `:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
-and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+and is reported with `⚠`, naming no format. Such a config declares nothing,
+so a DSL config emptied to `{}` prunes what it wrote — trust, settings,
+permissions — as `{:mcps []}` does. An `--only` or `-p` that nothing
 declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
 because a run narrowed to a typo plans nothing and would otherwise read as
 converged.
@@ -157,6 +160,74 @@ Claude Code session retention can be declared in days:
 This writes the integer `cleanupPeriodDays` to `~/.claude/settings.json`.
 `validate` checks its type and minimum against the cached SchemaStore schema;
 use `validate --deep` to fetch the current schema.
+
+## Codex TUI
+
+Codex keeps its TUI settings in nested `[tui.*]` tables of
+`~/.codex/config.toml`, next to state it writes for itself. Each declared
+setting below is written key by key into its own table, so that state survives.
+
+A model switch two keys away: bind the presets browser and put `/model` in slot 0.
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :keymap {:chat {:open_presets "alt-t"}}
+             :presets {0 {:input "/model" :label "model picker"}}}]}
+```
+
+alt-t opens the browser and 0 runs `/model`, which opens the model picker. A
+preset is `{:input "…" :label "…"}` in slots 0-9; `:input` is required and runs
+as typed. `validate` rejects other slots and fields. A declared slot is
+agentctl's whole: a preset Codex saved in that slot is replaced, its label
+included, and removing the slot from the config removes the table. Presets
+saved from the Codex browser in other slots stay.
+
+Codex has no external status command; its footer is a list of built-in items:
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :status-line [:model-with-reasoning :five-hour-limit :weekly-limit
+                           :used-tokens :context-used :current-dir :git-branch]}]}
+```
+
+This writes `[tui] status_line` and nothing else in `[tui]`. Codex loads an
+unknown item silently and drops it at startup, so `validate` reports one by name
+and lists the items codex-cli 0.169.0 renders. A map value is Claude Code's
+command status line; codex reports it as unsupported rather than as an error.
+
+## Codex permission profiles
+
+`:sandbox` picks Codex's active profile (`default_permissions`);
+`:permission-profiles` declares the profiles themselves, as
+`[permissions.<name>]` tables in Codex's own spelling:
+
+```clojure
+{:settings [{:acli [:codex] :in :all
+             :sandbox "local-dev"
+             :permission-profiles
+             {:local-dev {:extends ":workspace"
+                          :filesystem {"~/Library/Application Support/Example" "write"}
+                          :network {:enabled true :allow_local_binding true
+                                    :domains {"localhost" "allow" "127.0.0.1" "allow"}}}}}]}
+```
+
+Each table is written key by key, so a rule added to the profile by hand stays,
+and removing a declared rule or profile removes only what agentctl wrote. Paths
+and hosts are strings; field names are keywords. `extends` names `:read-only`,
+`:workspace` or another profile. Filesystem keys must be absolute, start with
+`~/` or name a `:special` root, and map to `read`, `write`, `none` or `deny`, or
+to a map of subpaths. Codex refuses to start when profiles exist without a
+default, or when the default names neither a profile nor a built-in
+(`:read-only`, `:workspace`, `:danger-full-access`). `validate` and `apply`
+therefore check `config.toml` as it would be after the apply: declared
+profiles, plus those agentctl will not prune. A plan that breaks either rule
+is refused before anything is written, for example dropping `:sandbox` while
+a profile stays, or dropping the profile `:sandbox` names. Drop both together.
+Import brings existing profiles in.
+
+`codex sandbox -P local-dev -- touch <path>/x` checks a grant without a model or
+login. `:workspace` already allows the temp directories, so test an undeclared
+path outside them, or extend `:read-only`.
 
 ## GUI
 
@@ -430,9 +501,10 @@ instead of being silently dropped.
 
 ## Hooks
 
-Claude Code hooks. In the entity DSL a hook is a `:hooks` row placed like any other entity:
-`:in :all` writes `~/.claude/settings.json`, and a project selector writes that
-repository's `.claude/settings.json`:
+Claude Code and Codex hooks (Codex's are covered after Claude's). In the entity
+DSL a hook is a `:hooks` row placed like any other entity: `:in :all` writes
+`~/.claude/settings.json`, and a project selector writes that repository's
+`.claude/settings.json`:
 
 ```clojure
 :hooks [{:id :lock-acquire :event :PreToolUse :matcher "Write|Edit"
@@ -476,6 +548,25 @@ several share one:
 — it is still what the ownership manifest tracks, so it stays mandatory
 there; a missing one is a structural error, not a guess. Both forms normalize
 to the same thing and can be mixed in one `:hooks` map.
+
+Codex hooks go to `~/.codex/hooks.json`, with the same ownership: vendor hooks
+in that file are left alone. A `:hooks` row reaches Codex only when its `:acli`
+names it; without `:acli`, or with `:acli :all`, a row stays Claude's, and so do
+`:hooks` inside a `:settings` row that does not name `:codex`:
+
+```clojure
+{:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"
+          :timeout 10 :acli [:codex] :in :all}]}
+```
+
+`validate` rejects an event codex-cli 0.169.0 does not fire and any field
+other than `:command`, `:timeout`, `:async`, `:status-message`,
+`:command-windows` and `:additional-context-limit`. Codex runs a new or changed
+hook only after you review it (at startup, or `/hooks`); agentctl never
+pre-trusts one. Trust is recorded by position in `config.toml`'s
+`[hooks.state]`, which agentctl never edits. A changed hook keeps its place, so
+only it needs review again, but removing one moves the later hooks of that
+event up, and Codex asks to review those again too.
 
 ## Extensions
 
@@ -862,9 +953,23 @@ Declare one host for each side you want provisioned; neither sees the other's sk
 
 Host sections take the keyed `:skills` and `:skill-packs` forms, and a pack there
 defaults to `:in :all`. A source already placed at the top level can be placed
-again on a host, for different tools. Only codex's user-wide skills are provisioned
-so far: other tools and kinds are reported in the plan and by `validate`, never
-dropped silently. `:home` overrides the remote home, for a scratch tree.
+again on a host, for different tools. User-wide skills for codex and awl are
+provisioned so far: other tools and kinds are reported in the plan and by
+`validate`, never dropped silently. `:home` overrides the remote home, for a
+scratch tree.
+
+Locally awl reads its skills out of `agents.edn`, but a host has none, so there
+`:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
+not awl's alone: codex 0.95.0 and later read it as well, and list a skill once
+for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
+when the host's `codex --version` is 0.95.0 or later. An older codex gets its own
+copy in `~/.codex/skills`, and so does a codex whose version can't be read, with a
+warning. Changing the declaration or the codex version moves the copy on the next
+apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
+since it is often a shell alias, so an awl skill is placed whether or not `awl` is
+on the host's `PATH`. When codex reads both directories and one holds a hand-made
+copy of a skill agentctl places in the other, the plan warns that codex lists the
+skill twice. `-t awl` selects `~/.agents/skills`; it is valid only with `--host`.
 
 Skills are copied, not linked: sources are read on this machine (a git pack is
 fetched here) and sent over SSH. Drift is a per-file comparison of byte hashes,
@@ -872,7 +977,9 @@ ignoring `.git`, `__pycache__` and `.DS_Store`; a file mode change alone is not
 drift. An identical copy already on the host is adopted without a write. What a run
 replaces or prunes moves to `.config/agentctl/backups/<stamp>` in the remote home,
 and ownership is kept per host in `~/.config/agentctl/hosts/<name>.edn`, apart from
-local state. An unreachable host exits 1 from `apply` and `apply!`.
+local state, under `codex` for `~/.codex/skills` and `awl` for `~/.agents/skills`.
+Dropping a skill from `agents.edn`, even the host's last, prunes it. An unreachable
+host exits 1 from `apply` and `apply!`.
 
 ## Reading a plan
 
@@ -920,7 +1027,8 @@ stdout with that document, so `apply! --json` needs `-y`. An error is
 `{"error": …}` with exit 1 instead — a config with errors carries its
 `findings` too; an unknown command or option, or a config file missing,
 unreadable or not a file, only the message. Without `--json` the same errors
-are one `error: …` line.
+are one `error: …` line. `--debug`, or `AGENTCTL_DEBUG=1`, also prints the error's
+stack trace to stderr, leaving stdout as it is.
 
 A skill whose source is not on disk, such as a `:per-tool :path` into a
 project copy that has since gone, is not linked: the plan says `source

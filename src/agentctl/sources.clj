@@ -471,13 +471,16 @@
   "A pack agentctl itself links from: placed user-wide, or the source of a
    user-wide skill, for some tool. A pack only projects use is fetched by the
    `skills` CLI. An old-format config keeps every pack — a project's bare skill
-   name is resolved by scanning them."
+   name is resolved by scanning them. A host's config also carries
+   `:consumers`, which a host places like tools; a local one never does."
   [cfg id]
   (or (not (:entity-dsl? cfg))
       (some #(and (= :skill-packs (:kind %)) (= id (:id %)) (= :all (:in %))
-                  (not= [] (get-in % [:decl :tools])))
+                  (or (not= [] (get-in % [:decl :tools]))
+                      (seq (get-in cfg [:skill-packs id :consumers]))))
             (:entities cfg))
-      (some #(and (= id (:from %)) (= :global (:scope %)) (seq (:tools %))) (vals (:skills cfg)))
+      (some #(and (= id (:from %)) (= :global (:scope %)) (or (seq (:tools %)) (seq (:consumers %))))
+            (vals (:skills cfg)))
       ;; a Claude subagent is linked by agentctl, user-wide or into a project
       (some #(and (= id (:pack %)) (seq (:tools %))) (vals (:agents cfg)))))
 

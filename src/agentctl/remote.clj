@@ -76,6 +76,23 @@
       (not= "OK" (last (remove str/blank? lines))) (fail :failed host "gave a truncated answer")
       :else lines)))
 
+;; ---------------------------------------------------------------- roots
+
+(def roots
+  "Where a host keeps user-wide skills, each named by the key its ownership is
+   recorded under: codex's own `$CODEX_HOME/skills`, and `~/.agents/skills`,
+   which awl reads (and codex too, from 0.95.0 on)."
+  [:codex :awl])
+
+(defn- sh-root [root] (case root :codex "$C/skills" :awl "$H/.agents/skills"))
+(defn- ps-root [root] (case root :codex "$C\\skills" :awl "$H\\.agents\\skills"))
+
+(defn- parked-as
+  "A backup's name prefix. Per root, because a run that moves a skill from one
+   root to the other parks the same id from both under one stamp."
+  [root]
+  (case root :codex "_.codex_skills_" :awl "_.agents_skills_"))
+
 ;; ---------------------------------------------------------------- powershell
 
 (defn- ps-str [s] (str "(D '" (b64-str s) "')"))
@@ -105,29 +122,34 @@
 (defn- ps-inventory [host tools ids]
   (ps-wrap host
            (str "Say (\"H`t\"+(E $H))\n"
-                "Say (\"R`t\"+(E \"$C\\skills\"))\n"
+                (str/join (for [r roots]
+                            (str "Say (\"R`t" (name r) "`t\"+(E \"" (ps-root r) "\"))\n")))
                 (str/join (for [t tools]
-                            (str "Say (\"T`t" t "`t\"+[int][bool](Get-Command " t
-                                 " -ErrorAction SilentlyContinue))\n")))
+                            (str "if(Get-Command " t " -ErrorAction SilentlyContinue){Say \"T`t" t "`t1\"\n"
+                                 ;; under 'Stop', PowerShell 5.1 turns a native
+                                 ;; command's stderr into a terminating error
+                                 "try{$v=[string](& " t " --version 2>$null | Select-Object -First 1)}catch{$v=''}\n"
+                                 "Say (\"V`t" t "`t\"+(E $v))}else{Say \"T`t" t "`t0\"}\n")))
                 (str/join
-                 (for [id ids]
+                 (for [r roots id ids
+                       :let [tag (str "`t" (name r) "`t$id`t")]]
                    (str "$id=" (ps-str id) "\n"
-                        "$d=\"$C\\skills\\$id\"\n"
+                        "$d=\"" (ps-root r) "\\$id\"\n"
                         "$a=Attr $d\n"
-                        "if($a -eq $null){Say (\"S`t$id`tA\")}\n"
-                        "elseif(IsLink $a){Say (\"S`t$id`tL\")}\n"
-                        "elseif(-not (IsDir $a)){Say (\"S`t$id`tF\")}\n"
-                        "else{Say (\"S`t$id`tD\")\n"
+                        "if($a -eq $null){Say (\"S" tag "A\")}\n"
+                        "elseif(IsLink $a){Say (\"S" tag "L\")}\n"
+                        "elseif(-not (IsDir $a)){Say (\"S" tag "F\")}\n"
+                        "else{Say (\"S" tag "D\")\n"
                         "foreach($f in @(Get-ChildItem -LiteralPath $d -Recurse -File -Force)){\n"
                         "$r=$f.FullName.Substring($d.Length+1).Replace('\\','/')\n"
-                        "Say (\"M`t$id`t\"+(E $r)+\"`t\"+(Sha $f.FullName))}}\n"))))))
+                        "Say (\"M" tag "\"+(E $r)+\"`t\"+(Sha $f.FullName))}}\n"))))))
 
 (defn- ps-move-helpers []
   (str "function Mv($a,$b){if(IsDir (Attr $a)){[IO.Directory]::Move($a,$b)}else{[IO.File]::Move($a,$b)}}\n"
        "function Park($d,$b){if((Attr $b) -ne $null){throw \"backup exists: $b\"}\n"
        "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($b));Mv $d $b}\n"))
 
-(defn- ps-write-tree [host stamp id files]
+(defn- ps-write-tree [host stamp root id files]
   (ps-wrap host
            (str (ps-move-helpers)
                 "function W($r,$b,$h){$p=[IO.Path]::Combine($s,$r.Replace('/','\\'))\n"
@@ -135,27 +157,27 @@
                 "[IO.File]::WriteAllBytes($p,[Convert]::FromBase64String($b))\n"
                 "if((Sha $p) -ne $h){throw \"checksum mismatch: $r\"}}\n"
                 "$id=" (ps-str id) "\n"
-                "$d=\"$C\\skills\\$id\"\n"
-                "$b=\"$H\\.config\\agentctl\\backups\\" stamp "\\_.codex_skills_$id\"\n"
-                "$s=\"$H\\.config\\agentctl\\staging\\" stamp "-$id\"\n"
+                "$d=\"" (ps-root root) "\\$id\"\n"
+                "$b=\"$H\\.config\\agentctl\\backups\\" stamp "\\" (parked-as root) "$id\"\n"
+                "$s=\"$H\\.config\\agentctl\\staging\\" stamp "-" (name root) "-$id\"\n"
                 "try{\n"
                 (str/join (for [{:keys [rel bytes sha]} files]
                             (str "W " (ps-str rel) " '" (b64 bytes) "' '" sha "'\n")))
                 ;; two names differing only in case collapse into one file here
                 "if(@(Get-ChildItem -LiteralPath $s -Recurse -File -Force).Count -ne " (count files)
                 "){throw 'file count differs after writing'}\n"
-                "[void][IO.Directory]::CreateDirectory(\"$C\\skills\")\n"
+                "[void][IO.Directory]::CreateDirectory(\"" (ps-root root) "\")\n"
                 "$had=(Attr $d) -ne $null\n"
                 "if($had){Park $d $b}\n"
                 "try{Mv $s $d}catch{if($had){Mv $b $d};throw}\n"
                 "}finally{Remove-Item -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue}\n")))
 
-(defn- ps-park [host stamp id]
+(defn- ps-park [host stamp root id]
   (ps-wrap host
            (str (ps-move-helpers)
                 "$id=" (ps-str id) "\n"
-                "$d=\"$C\\skills\\$id\"\n"
-                "if((Attr $d) -ne $null){Park $d \"$H\\.config\\agentctl\\backups\\" stamp "\\_.codex_skills_$id\"}\n")))
+                "$d=\"" (ps-root root) "\\$id\"\n"
+                "if((Attr $d) -ne $null){Park $d \"$H\\.config\\agentctl\\backups\\" stamp "\\" (parked-as root) "$id\"}\n")))
 
 ;; ---------------------------------------------------------------- posix sh
 
@@ -170,20 +192,24 @@
 (defn- sh-inventory [host tools ids]
   (str (sh-prelude host)
        "printf 'H\\t%s\\n' \"$(e \"$H\")\"\n"
-       "printf 'R\\t%s\\n' \"$(e \"$C/skills\")\"\n"
+       (str/join (for [r roots]
+                   (str "printf 'R\\t" (name r) "\\t%s\\n' \"$(e \"" (sh-root r) "\")\"\n")))
        (str/join (for [t tools]
-                   (str "if command -v " t " >/dev/null 2>&1; then v=1; else v=0; fi; "
-                        "printf 'T\\t" t "\\t%s\\n' \"$v\"\n")))
+                   (str "if command -v " t " >/dev/null 2>&1; then printf 'T\\t" t "\\t1\\n'\n"
+                        ;; stdin is the rest of this script: a CLI reading it would eat it
+                        "printf 'V\\t" t "\\t%s\\n' \"$(e \"$(" t " --version </dev/null 2>/dev/null | head -n 1 || true)\")\"\n"
+                        "else printf 'T\\t" t "\\t0\\n'; fi\n")))
        (str/join
-        (for [id ids]
+        (for [r roots id ids
+              :let [tag (str "\\t" (name r) "\\t%s\\t")]]
           (str "id=" (sh-quote id) "\n"
-               "d=\"$C/skills/$id\"\n"
-               "if [ -L \"$d\" ]; then printf 'S\\t%s\\tL\\n' \"$id\"\n"
-               "elif [ -d \"$d\" ]; then printf 'S\\t%s\\tD\\n' \"$id\"\n"
+               "d=\"" (sh-root r) "/$id\"\n"
+               "if [ -L \"$d\" ]; then printf 'S" tag "L\\n' \"$id\"\n"
+               "elif [ -d \"$d\" ]; then printf 'S" tag "D\\n' \"$id\"\n"
                "find -L \"$d\" -type f | while IFS= read -r f; do\n"
-               "printf 'M\\t%s\\t%s\\t%s\\n' \"$id\" \"$(e \"${f#\"$d\"/}\")\" \"$(sha \"$f\")\"; done\n"
-               "elif [ -e \"$d\" ]; then printf 'S\\t%s\\tF\\n' \"$id\"\n"
-               "else printf 'S\\t%s\\tA\\n' \"$id\"; fi\n")))
+               "printf 'M" tag "%s\\t%s\\n' \"$id\" \"$(e \"${f#\"$d\"/}\")\" \"$(sha \"$f\")\"; done\n"
+               "elif [ -e \"$d\" ]; then printf 'S" tag "F\\n' \"$id\"\n"
+               "else printf 'S" tag "A\\n' \"$id\"; fi\n")))
        "echo OK\n"))
 
 (defn- mime [^bytes bs]
@@ -193,13 +219,13 @@
   (str "park() { [ ! -e \"$2\" ] && [ ! -L \"$2\" ] || { echo \"backup exists: $2\" >&2; exit 1; }\n"
        "mkdir -p \"$(dirname \"$2\")\"; mv \"$1\" \"$2\"; }\n"))
 
-(defn- sh-write-tree [host stamp id files]
+(defn- sh-write-tree [host stamp root id files]
   (str (sh-prelude host)
        (sh-park-fn)
        "id=" (sh-quote id) "\n"
-       "d=\"$C/skills/$id\"\n"
-       "b=\"$H/.config/agentctl/backups/" stamp "/_.codex_skills_$id\"\n"
-       "s=\"$H/.config/agentctl/staging/" stamp "-$id\"\n"
+       "d=\"" (sh-root root) "/$id\"\n"
+       "b=\"$H/.config/agentctl/backups/" stamp "/" (parked-as root) "$id\"\n"
+       "s=\"$H/.config/agentctl/staging/" stamp "-" (name root) "-$id\"\n"
        "trap 'rm -rf \"$s\"' EXIT\n"
        (str/join
         (for [{:keys [rel bytes sha exec?]} files]
@@ -211,17 +237,17 @@
                  (when exec? "chmod +x \"$p\"\n")))))
        "[ \"$(find \"$s\" -type f | wc -l | tr -d ' ')\" = " (count files)
        " ] || { echo 'file count differs after writing' >&2; exit 1; }\n"
-       "mkdir -p \"$C/skills\"\n"
+       "mkdir -p \"" (sh-root root) "\"\n"
        "had=0; if [ -e \"$d\" ] || [ -L \"$d\" ]; then had=1; park \"$d\" \"$b\"; fi\n"
        "mv \"$s\" \"$d\" || { [ $had = 0 ] || mv \"$b\" \"$d\"; exit 1; }\n"
        "echo OK\n"))
 
-(defn- sh-park [host stamp id]
+(defn- sh-park [host stamp root id]
   (str (sh-prelude host)
        (sh-park-fn)
        "id=" (sh-quote id) "\n"
-       "d=\"$C/skills/$id\"\n"
-       "if [ -e \"$d\" ] || [ -L \"$d\" ]; then park \"$d\" \"$H/.config/agentctl/backups/" stamp "/_.codex_skills_$id\"; fi\n"
+       "d=\"" (sh-root root) "/$id\"\n"
+       "if [ -e \"$d\" ] || [ -L \"$d\" ]; then park \"$d\" \"$H/.config/agentctl/backups/" stamp "/" (parked-as root) "$id\"; fi\n"
        "echo OK\n"))
 
 ;; ---------------------------------------------------------------- primitives
@@ -249,40 +275,45 @@
   [lines]
   (reduce
    (fn [acc line]
-     (let [[tag a b c] (str/split line #"\t" -1)]
+     (let [[tag a b c d] (str/split line #"\t" -1)]
        (case tag
          "H" (assoc acc :home (unb64-str a))
-         "R" (assoc acc :root (unb64-str a))
+         "R" (assoc-in acc [:roots (keyword a)] (unb64-str b))
          "T" (cond-> acc (= "1" b) (update :tools conj (keyword a)))
-         "S" (assoc-in acc [:entries a :state] (get state-of b :absent))
-         "M" (assoc-in acc [:entries a :files (unb64-str b)] c)
+         ;; an empty answer loses its tab separator to the line trim
+         "V" (assoc-in acc [:versions (keyword a)] (str/trim (unb64-str (str b))))
+         "S" (assoc-in acc [:entries (keyword a) b :state] (get state-of c :absent))
+         "M" (assoc-in acc [:entries (keyword a) b :files (unb64-str c)] d)
          acc)))
-   {:tools #{} :entries {}}
+   {:tools #{} :roots {} :versions {} :entries {}}
    lines))
 
 (defn inventory
-  "What is on the host: `{:home :root :tools #{…} :entries {id {:state :files}}}`.
-   `:files` maps each file below a skill, `/`-separated, to the SHA-256 of its
-   bytes. One round trip however many skills: PowerShell takes a second to start."
+  "What is on the host: `{:home :roots {root dir} :tools #{…} :versions {tool
+   line} :entries {root {id {:state :files}}}}`, every id looked up in every
+   root. `:files` maps each file below a skill, `/`-separated, to the SHA-256 of
+   its bytes; `:versions` holds the first line of each present tool's
+   `--version`. One round trip however many skills: PowerShell takes a second
+   to start."
   [host tools ids]
   (parse-inventory
    (exec host ((if (windows? host) ps-inventory sh-inventory) host (map name tools) ids))))
 
 (defn write-tree!
-  "Make `<skills>/<id>` hold exactly `files` (`{:rel :bytes :sha :exec?}`).
+  "Make `<root>/<id>` hold exactly `files` (`{:rel :bytes :sha :exec?}`).
    The tree is staged and checksummed first; what it replaces is moved into the
    host's own backup directory rather than deleted, and moved back if the swap
    fails. Moving also means no recursive delete ever walks into a junction."
-  [host id files]
+  [host root id files]
   (when (windows? host)
     (when-let [bad (first (remove (comp windows-safe-rel? :rel) files))]
       (throw (ex-info (str "file name cannot exist on Windows: " (:rel bad)) {:rel (:rel bad)}))))
-  (exec host ((if (windows? host) ps-write-tree sh-write-tree) host @run-stamp id files)))
+  (exec host ((if (windows? host) ps-write-tree sh-write-tree) host @run-stamp root id files)))
 
 (defn park!
-  "Remove `<skills>/<id>` by moving it into the host's backup directory."
-  [host id]
-  (exec host ((if (windows? host) ps-park sh-park) host @run-stamp id)))
+  "Remove `<root>/<id>` by moving it into the host's backup directory."
+  [host root id]
+  (exec host ((if (windows? host) ps-park sh-park) host @run-stamp root id)))
 
 (defn separator [host] (if (windows? host) "\\" "/"))
 
