@@ -834,4 +834,20 @@ apply -k mcps
 plan -k mcps
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after removing approvals: exit $code"; }
 
+echo "37. a refused add masks each value where it sits, and leaves a short plain one in the CLI's output alone"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :rshort :cmd "/bin/echo r" :env {"N" "s" "DOCS_KEY" "!bw://rshort/KEY"} :in :all :acli [:claude]}]}
+EDN
+vault '{"rshort": {"KEY": "'$PLAIN'"}}'
+STUB_REFUSE=add apply -k mcps
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused add exited $code"; }
+line=$(grep "✗ claude mcps rshort" "$SB/apply.txt")
+cmd=${line%% failed: *}
+out=${line#* failed: }
+case "$cmd" in *"-e N=********"*) ;; *) echo "$line"; fail "the command does not mask the value by position";; esac
+case "$cmd" in *"-e DOCS_KEY=plai…34"*) ;; *) echo "$line"; fail "the command does not mask the secret";; esac
+case "$out" in "Error: refused by the stub: mcp add --scope user rshort"*) ;; *) echo "$line"; fail "a short plain value garbled the CLI's output";; esac
+case "$out" in *"N=s"*) ;; *) echo "$line"; fail "a plain value was hidden in the CLI's output";; esac
+grep -q "$PLAIN" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the secret"; }
+
 echo "all claude mcp e2e checks passed"
