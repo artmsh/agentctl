@@ -467,8 +467,9 @@
 
 (defn cloned-for-user?
   "A pack agentctl itself links from: placed user-wide, or the source of a
-   user-wide skill, for some tool. A pack only projects use is fetched by the
-   `skills` CLI. An old-format config keeps every pack — a project's bare skill
+   user-wide skill, for some tool. A pack only projects use is installed by
+   the `skills` CLI (agentctl clones one a project takes whole only to learn
+   its names: `taken-whole?`). An old-format config keeps every pack — a project's bare skill
    name is resolved by scanning them."
   [cfg id]
   (or (not (:entity-dsl? cfg))
