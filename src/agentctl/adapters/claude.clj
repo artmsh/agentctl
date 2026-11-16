@@ -646,7 +646,11 @@
                                         :file file :path path
                                         :summary "removed from agents.edn"})]
           :when op]
-      op)))
+      ;; the entry carries resolved secrets, and the declaration that named
+      ;; them is gone: print none of its env or header values
+      (update op :diffs (partial mapv (fn [d] (update d :before #(cond-> %
+                                                                    (:env %) (update :env common/mask-all)
+                                                                    (:headers %) (update :headers common/mask-all)))))))))
 
 (defn project-local-settings-file [proj] (str (:path proj) "/.claude/settings.local.json"))
 

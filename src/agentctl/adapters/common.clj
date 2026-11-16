@@ -161,6 +161,15 @@
                                         v)]))
                a))]))
 
+(defn mask-all
+  "`m` with every value masked: an env map that is being removed, whose
+   declaration — the only thing that said which values were secrets — is
+   already gone. Anything else is returned as it is."
+  [m]
+  (if (map? m)
+    (into {} (map (fn [[k v]] [k (refs/mask v)])) m)
+    m))
+
 (def project-mcp-tools
   "Tools with a project-level MCP config. Everything else is user-wide only."
   #{:claude :codex})

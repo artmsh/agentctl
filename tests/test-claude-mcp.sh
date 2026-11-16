@@ -423,4 +423,28 @@ grep -q -- '- DOCS_KEY: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fai
 grep -qE "$PLAIN|$PLAIN2" "$SB/plan.txt" && { cat "$SB/plan.txt"; fail "the plan printed a removed secret"; }
 apply -k mcps
 
+echo "20. a pruned project MCP server and a pruned settings env print none of their secrets"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}
+        {:id :mrepo :type :http :url "https://mcp.example.com/m" :headers {"x-docs" "!bw://vendor/PLAIN"} :in "proj" :at :repo :acli [:claude]}]
+ :settings [{:env {"DOCS_KEY" "!bw://vendor/PLAIN"} :acli [:claude] :in :all}]}
+EDN
+apply
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! before the prune exited $code"; }
+[ "$(json "$SB/.claude/settings.json" "d['env']['DOCS_KEY']")" = "$PLAIN2" ] || fail "settings env not written before the prune"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :mlocal :type :http :url "https://mcp.example.com/m" :in "proj" :acli [:claude]}]}
+EDN
+plan
+set +e; run apply -f "$SB/agents.edn" --all -t claude --json > "$SB/plan.json" 2>&1; set -e
+grep -q -- '- mrepo' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the dropped .mcp.json server is not pruned"; }
+grep -q -- '- DOCS_KEY: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the pruned settings env is not listed masked"; }
+grep -q -- '- x-docs: "plai…34"' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the pruned server's header is not listed masked"; }
+for f in plan.txt plan.json; do
+  grep -qE "$PLAIN|$PLAIN2" "$SB/$f" && { cat "$SB/$f"; fail "$f printed a pruned secret"; }
+done
+apply
+[ "$(json "$SB/.claude/settings.json" "'env' in d")" = False ] || fail "the settings env was not pruned"
+[ "$(json "$SB/proj/.mcp.json" "'mrepo' in d['mcpServers']")" = False ] || fail "the .mcp.json server was not pruned"
+
 echo "all claude mcp e2e checks passed"
