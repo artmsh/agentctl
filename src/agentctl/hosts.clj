@@ -138,9 +138,10 @@
    when nothing would be planned: an unreachable one has to surface as such
    rather than as an empty plan. `:desired` is what a successful run owns,
    `:gone` what state can forget because the host no longer has it."
-  [host st {:keys [tools kinds]}]
+  [host st {:keys [tools kinds] :as opts}]
   (let [hcfg (:cfg host)
-        kind? #(or (empty? kinds) (contains? (set kinds) %))
+        ;; as locally: `-k skills` keeps the fetch of a pack its skills come from
+        kind? #(core/kind-selected? opts %)
         selected? #(or (empty? tools) (contains? (set tools) %))
         wanted (filter selected? (declared-tools hcfg))
         probe (filter supported-tools wanted)

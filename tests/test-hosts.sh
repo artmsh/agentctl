@@ -183,4 +183,15 @@ grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "not converged af
 run apply -f "$SB/dsl.edn" > "$SB/out" 2>&1 || true
 grep -q 'delta' "$SB/out" && fail "host pack leaked into the local plan of a DSL config"
 
+echo "16. -k skills keeps the fetch of a pack its skills come from"
+rm -rf "$SB/.agents/skill-packs/gitpack"
+sed "s|$SB/far2|$SB/far3|" "$SB/dsl.edn" > "$SB/k.edn"
+mkdir -p "$SB/far3"
+expect 2 apply -f "$SB/k.edn" --host box -k skills
+grep -q 'clone' "$SB/out" || fail "-k skills dropped the pack fetch: $(cat "$SB/out")"
+expect 0 apply! -f "$SB/k.edn" --host box -k skills -y
+[ -f "$SB/far3/.codex/skills/delta/SKILL.md" ] || fail "-k skills did not place the fetched pack's skill: $(cat "$SB/out")"
+expect 0 apply -f "$SB/k.edn" --host box -k skills
+grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "-k skills not converged: $(cat "$SB/out")"
+
 echo "hosts e2e OK"
