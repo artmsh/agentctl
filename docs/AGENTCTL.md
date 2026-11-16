@@ -504,7 +504,11 @@ codex-cli 0.169.0 dispatches `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
 `:command-windows` and `:additional-context-limit`; any other field is an
 error. Ownership is Claude's: each id owns one element, found by value, and
 vendor hooks in the file (installers write there) are never touched or pruned.
-The plan reports a converged hook as unchanged (`--show-noop`).
+The comparison ignores keys whose value is null, because installers write
+`"matcher": null` where agentctl omits the key. Declaring a vendor's exact hook
+therefore adopts that group instead of appending a duplicate, and dropping the
+declaration later removes it. The plan reports a converged hook as unchanged
+(`--show-noop`).
 
 Codex will not run a hook until it is reviewed: it keeps a trust hash per hook
 in `config.toml`, under `[hooks.state."<hooks.json path>:<event>:<group>:<index>"]`.

@@ -560,6 +560,21 @@
                     (u/backup! file)
                     (u/write-json! file (u/dissoc-in (or (u/read-json file) {}) (vec path))))}))))
 
+(defn- sans-nils
+  "`v` with every nil-valued map entry dropped, at any depth."
+  [v]
+  (cond
+    (map? v) (into {} (keep (fn [[k x]] (when (some? x) [k (sans-nils x)]))) v)
+    (sequential? v) (mapv sans-nils v)
+    :else v))
+
+(defn- same-element?
+  "Do two array elements say the same thing? A vendor installer writes
+   `\"matcher\": null` where agentctl leaves the key out; read back, those
+   are one hook, not two."
+  [a b]
+  (= (u/norm (sans-nils a)) (u/norm (sans-nils b))))
+
 (defn json-array-merge-op
   "Op that keeps exactly one caller-owned element inside a JSON array at
    `path`, leaving every other element untouched — the shape a hooks array
@@ -577,7 +592,7 @@
   [{:keys [tool kind id file path old value summary note risk project
            report-converged? in-place?]}]
   (let [current (vec (or (get-in (u/read-json file) path) []))
-        present? (fn [v] (some #(= (u/norm %) (u/norm v)) current))]
+        present? (fn [v] (some #(same-element? % v) current))]
     (if (present? value)
       (when report-converged?
         (op {:project project :action :noop :tool tool :kind kind :id id :target file}))
@@ -596,7 +611,7 @@
                       (u/backup! file)
                       (let [data (or (u/read-json file) {})
                             arr (vec (or (get-in data path) []))
-                            same? (fn [x] #(= (u/norm %) (u/norm x)))
+                            same? (fn [x] #(same-element? % x))
                             at (when (and in-place? (some? old) (not-any? (same? value) arr))
                                  (first (keep-indexed (fn [i x] (when ((same? old) x) i)) arr)))
                             arr'' (if at
@@ -610,7 +625,7 @@
    `path`. Nothing to remove is no op at all — mirrors `json-unset-op`."
   [{:keys [tool kind id file path old summary note risk project]}]
   (let [current (vec (or (get-in (u/read-json file) path) []))]
-    (when (some #(= (u/norm %) (u/norm old)) current)
+    (when (some #(same-element? % old) current)
       (op {:project project :action :delete :tool tool :kind kind :id id
            :target file
            :path (mapv u/kw->str path)
@@ -622,7 +637,7 @@
                     (u/backup! file)
                     (let [data (or (u/read-json file) {})
                           arr (vec (or (get-in data path) []))
-                          arr' (vec (remove #(= (u/norm %) (u/norm old)) arr))]
+                          arr' (vec (remove #(same-element? % old) arr))]
                       (u/write-json! file (assoc-in data path arr'))))}))))
 
 (defn yaml-set-op

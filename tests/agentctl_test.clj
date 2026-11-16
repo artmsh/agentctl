@@ -1419,6 +1419,31 @@
                                   (codex/hook-ops (config/normalize {:executors {:codex imported}} nil) st3))
                           "the imported hook plans as converged"))))))))))))
 
+(deftest codex-hooks-adopt-a-vendor-group-with-a-null-matcher
+  ;; vendor installers write `"matcher": null`; agentctl leaves the key out.
+  ;; Compared as written they were two hooks, so declaring the vendor's own
+  ;; command appended a duplicate that ran twice and needed review again
+  (let [dir (temp-dir) hooks (str dir "/hooks.json") conf (str dir "/config.toml")
+        vendor {:hooks {:SessionStart [{:matcher nil :hooks [{:type "command" :command "vendor-session" :timeout 10}]}]}}
+        raw {:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+             :hooks [{:id :vendor-session :event :SessionStart :command "vendor-session" :timeout 10
+                      :acli [:codex] :in :all}]}]
+    (u/write-json! hooks vendor)
+    (u/write-text! conf "model = \"m-a\"\n")
+    (with-redefs [codex/hooks-file hooks codex/config-file conf]
+      (is (empty? (filter plan/mutating? (codex-drift raw state/empty-state))) "already there: nothing to write")
+      (let [{st1 :st} (converge-codex raw state/empty-state)]
+        (is (= 1 (count (get-in (u/read-json hooks) [:hooks :SessionStart]))))
+        (is (empty? (codex-drift raw st1)))
+        (testing "the adopted group is agentctl's now: dropping the declaration removes it"
+          (converge-codex (update raw :hooks empty) st1)
+          (is (empty? (get-in (u/read-json hooks) [:hooks :SessionStart]))))))
+    (testing "Claude's array ops compare the same way"
+      (let [f (str dir "/settings.json")]
+        (u/write-json! f {:hooks {:Stop [{:matcher nil :hooks [{:type "command" :command "x"}]}]}})
+        (is (nil? (plan/json-array-merge-op {:tool :claude :kind :hooks :id :x :file f :path [:hooks :Stop]
+                                            :value {:hooks [{:type "command" :command "x"}]}})))))))
+
 (deftest codex-hooks-validate-events-and-stay-opt-in
   (testing "validate accepts codex hooks and rejects an event codex never fires"
     (is (empty? (config/structural-findings

@@ -188,4 +188,21 @@ c=$(code_of run apply! -f "$SB/e2.edn" --all -t codex -y)
 [ "$c" = 0 ] || { cat "$SB/out.txt"; fail "dropping profile and default together exited $c"; }
 toml 'assert "permissions" not in t and "default_permissions" not in t, t' || fail "profile or default left behind"
 
+echo "7. declaring a vendor's hook adopts its group instead of adding a second one"
+HOOKS="$SB/.codex/hooks.json"
+cat > "$HOOKS" <<'JSON'
+{"hooks": {"SessionStart": [{"matcher": null, "hooks": [{"type": "command", "command": "vendor-session", "timeout": 10}]}]}}
+JSON
+cat > "$SB/f.edn" <<'EDN'
+{:settings [{:id :user-codex :acli [:codex] :in :all :model "m-a"}]
+ :hooks [{:id :vendor-session :event :SessionStart :command "vendor-session" :timeout 10
+          :acli [:codex] :in :all}]}
+EDN
+c=$(code_of run apply! -f "$SB/f.edn" --all -t codex -y)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "apply! exited $c"; }
+python3 -c 'import json,sys; g=json.load(open(sys.argv[1]))["hooks"]["SessionStart"]; assert len(g) == 1, g' "$HOOKS" \
+  || fail "the vendor's SessionStart group was duplicated"
+c=$(code_of run apply -f "$SB/f.edn" --all -t codex)
+[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "not converged ($c)"; }
+
 echo "all codex e2e checks passed"
