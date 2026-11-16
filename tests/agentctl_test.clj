@@ -55,6 +55,15 @@
       (is (str/includes? out "opaque = \"do-not-touch\""))
       (is (str/includes? out "[projects.\"/Users/example/x\"]"))))
 
+  (testing "a key keeps its same-line comment when the table is written again"
+    (let [text "a = 1  # one\nb = 2\ns = \"x # not a comment\"\n[t]\nk = 'v' # kept\n"]
+      (is (= "a = 1  # one\nb = 3\ns = \"x # not a comment\"\n[t]\nk = 'v' # kept\n"
+             (toml/set-keys text [] [[:a 1] [:b 3] [:s "x # not a comment"]])))
+      (testing "an unchanged value written in another form keeps it too"
+        (is (str/ends-with? (toml/set-keys text ["t"] [[:k "v"]]) "k = \"v\" # kept\n")))
+      (testing "a changed value keeps the line's comment"
+        (is (str/starts-with? (toml/set-keys text [] [[:a 2]]) "a = 2  # one\n")))))
+
   (testing "a new table is appended, quoted where required"
     (let [out (toml/set-key sample-toml ["projects" "/Users/example/y"] :trust_level "trusted")]
       (is (str/includes? out "[projects.\"/Users/example/y\"]"))

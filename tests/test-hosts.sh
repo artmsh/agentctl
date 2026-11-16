@@ -479,6 +479,15 @@ grep -q '^model = "hand-picked"' "$GC" || fail "a key agentctl never wrote was p
 grep -q '^command = "docs-server"' "$GC" || fail "a table agentctl never wrote was pruned"
 expect 0 apply $S3
 grep -q '0 to add, 0 to change, 0 to remove' "$SB/out" || fail "not converged after a prune: $(cat "$SB/out")"
+echo "    a key written again keeps its same-line comment"
+sed -i.bak 's/^personality = "pragmatic"$/personality = "pragmatic"  # house tone/' "$GC"
+cat > "$SB/set3b.edn" <<EDN
+{:hosts {:box3 {:ssh "box" :os :linux :home "$G"
+                :settings [{:acli [:codex] :personality "pragmatic" :thinking "high"}]}}}
+EDN
+expect 0 apply! -f "$SB/set3b.edn" --host box3 -y
+grep -q '^model_reasoning_effort = "high"' "$GC" || fail "new key not written: $(cat "$GC")"
+grep -q '^personality = "pragmatic"  # house tone$' "$GC" || fail "a comment on an unchanged key was dropped: $(cat "$GC")"
 echo "    and with the host's last setting gone too"
 cat > "$SB/set4.edn" <<EDN
 {:hosts {:box3 {:ssh "box" :os :linux :home "$G"}}}
