@@ -14,9 +14,9 @@ under `$HOME/projects` on each apply. Most sections are vectors; for example:
 {:settings [{:model "sonnet" :tools [:claude] :in :all}]
  :mcps [{:id :tracker :cmd "tracker-mcp -t stdio" :in "projects"}]
  :trust [{:in ["Brain" "projects" "!projects/vendor"]}]
- :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/clz"}}
+ :skill-packs {[:gh "obra/superpowers"] {:alias superpowers :in "projects/web"}}
  :skills {[superpowers "brainstorming"] {:in :all}
-          [:gh "cyxzdev/Uncodixfy"] {:in "projects/core-vector" :acli [:codex]}}}
+          [:gh "cyxzdev/Uncodixfy"] {:in "projects/app" :acli [:codex]}}}
 ```
 
 `:skill-packs` and `:skills` are maps keyed by source: `[:gh "owner/repo"]`,
@@ -388,7 +388,7 @@ from a marketplace. `:plugins` is keyed by `[:gh "owner/repo" "plugin"]` or
 
 ```clojure
 {:plugins {[:gh "Egonex-AI/Understand-Anything" "understand-anything"]
-           {:in "projects/barge" :at :repo :acli [:claude]}}}
+           {:in "projects/api" :at :repo :acli [:claude]}}}
 ```
 
 `apply!` runs `claude plugin marketplace add` and `claude plugin install

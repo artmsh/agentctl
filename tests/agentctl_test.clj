@@ -2892,30 +2892,30 @@
     (is (not-any? #(and (= :skills (:kind %)) (plan/mutating? %)) (plan-for)) "converged")))
 
 (deftest keyed-skills-and-packs
-  (let [root (temp-dir) local (str root "/agents-setup") core (str root "/core-vector")
-        clz (str root "/clz")]
+  (let [root (temp-dir) local (str root "/team-skills") core (str root "/app")
+        web (str root "/web")]
     (fs/create-dirs (str local "/skills/wrap-up"))
     (spit (str local "/skills/wrap-up/SKILL.md") "wrap")
-    (doseq [r [core clz]] (fs/create-dirs (str r "/.git")))
-    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias agents-setup}\n"
-                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" clz "\"]}}\n"
-                    " :skills {[agents-setup \"wrap-up\"] {:in :all}\n"
+    (doseq [r [core web]] (fs/create-dirs (str r "/.git")))
+    (let [text (str "{:skill-packs {[:uri \"file://" local "\"] {:alias team-skills}\n"
+                    "               [:gh \"obra/superpowers\"] {:alias superpowers :in [\"" web "\"]}}\n"
+                    " :skills {[team-skills \"wrap-up\"] {:in :all}\n"
                     "          [:gh \"cyxzdev/Uncodixfy\"] {:in [\"" core "\"] :acli [:codex :cc]}}}")
           cfg (config/parse-config text "test")
           pid (scope/target-id core)]
       (is (:entity-dsl? cfg))
-      (is (= :file (get-in cfg [:skill-packs :agents-setup :type])))
-      (is (= local (get-in cfg [:skill-packs :agents-setup :root])))
+      (is (= :file (get-in cfg [:skill-packs :team-skills :type])))
+      (is (= local (get-in cfg [:skill-packs :team-skills :root])))
       (is (= "https://github.com/obra/superpowers" (get-in cfg [:skill-packs :superpowers :uri])))
       (is (= :git (get-in cfg [:skill-packs :Uncodixfy :type])) "a repo-skill fetches as an implicit pack")
-      (is (= {:from :agents-setup :scope :global}
+      (is (= {:from :team-skills :scope :global}
              (select-keys (get-in cfg [:skills :wrap-up]) [:from :scope])))
       (is (= (str local "/skills/wrap-up") (sources/skill-source cfg (get-in cfg [:skills :wrap-up]))))
       (is (= #{:codex :claude} (get-in cfg [:skills :Uncodixfy :tools])) ":acli maps :cc onto :claude")
       (is (some #{:Uncodixfy} (get-in cfg [:projects pid :skills])))
-      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id clz) :skills])))
+      (is (some #{:superpowers} (get-in cfg [:projects (scope/target-id web) :skills])))
       (is (not-any? #(= :error (:level %)) (config/structural-findings cfg)))
-      (is (= "agents-setup" (get-in cfg [:skill-packs :agents-setup :alias])) "kept for the plan's [alias]")))
+      (is (= "team-skills" (get-in cfg [:skill-packs :team-skills :alias])) "kept for the plan's [alias]")))
   (testing "the key names the skill directory, so an :alias renames without moving it"
     (let [root (temp-dir) local (str root "/pack")]
       (fs/create-dirs (str local "/skills/wrap-up"))
