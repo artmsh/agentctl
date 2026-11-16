@@ -570,9 +570,21 @@
                     (not= :all in) (assoc :in in)
                     at (assoc :at at))]))})))
 
+(declare legacy-entity-config)
+
 (defn entity-config
-  "Import emits literal selectors; it cannot infer a user's intended tree."
+  "Import emits literal selectors; it cannot infer a user's intended tree.
+   Sections import already reads as keyed rows ride along unchanged, so they
+   do not hide the legacy sections beside them from the conversion."
   [config]
+  (let [rows (into {} (for [k [:plugins :agents] :let [v (get config k)] :when (scope/keyed? v)] [k v]))
+        others (apply dissoc config (keys rows))]
+    (cond
+      (empty? rows) (legacy-entity-config config)
+      (or (empty? others) (scope/dsl? others)) config
+      :else (merge (legacy-entity-config others) rows))))
+
+(defn- legacy-entity-config [config]
   (if (scope/dsl? config) config
       (let [normalized (config/normalize config "import")
             resolved (:projects normalized)

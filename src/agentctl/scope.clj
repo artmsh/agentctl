@@ -10,7 +10,7 @@
 (def keyed-kinds
   "Sections that are maps keyed by a source selector rather than vectors of rows."
   #{:skills :skill-packs :plugins})
-(defn- keyed? [v] (and (map? v) (seq v) (every? vector? (keys v))))
+(defn keyed? [v] (and (map? v) (seq v) (every? vector? (keys v))))
 (defn dsl? [raw] (some #(let [v (get raw %)] (or (vector? v) (keyed? v))) kinds))
 
 ;; ---------------------------------------------------------------- keyed sections

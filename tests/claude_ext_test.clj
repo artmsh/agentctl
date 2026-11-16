@@ -115,6 +115,16 @@
                      {:version 2 :plugins {"lint@market" [{:scope "user"}] "lp@localmkt" [{:scope "user"}]}})
       (is (empty? (claude/plugin-ops (cfg {:plugins rows}) state/empty-state))))))
 
+(deftest imported-plugins-do-not-hide-the-legacy-sections-beside-them
+  (let [discovered {:executors {:claude {:model "sonnet"}}
+                    :plugins {[:gh "acme/market" "lp"] {:in :all :acli [:claude] :marketplace "acme"}}}
+        text (imports/render discovered)
+        back (clojure.edn/read-string text)]
+    (is (not (contains? back :executors)) "legacy executors are converted, not left beside DSL rows")
+    (is (= (:plugins discovered) (:plugins back)))
+    (is (some #(= "sonnet" (:model %)) (:settings back)))
+    (is (empty? (filter #(= :error (first %)) (findings back))))))
+
 ;; ---------------------------------------------------------------- versions
 
 (defn- marketplace! [entry manifest]
