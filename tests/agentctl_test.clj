@@ -182,7 +182,11 @@
     (testing "any other name the item lacks is missing, never the login password"
       (let [r (resolve (item nil) "!bw://vendor/KEYY")]
         (is (= :missing (:status r)))
-        (is (= "field not found on bw item: vendor/KEYY" (:message r)))))
+        (is (= "field not found on bw item: vendor/KEYY — the item has a login: did you mean vendor/password?"
+               (:message r)))))
+    (testing "an item with no login gets no hint"
+      (is (= "field not found on bw item: vendor/KEYY"
+             (:message (resolve (dissoc (item nil) :login) "!bw://vendor/KEYY")))))
     (reset! @#'refs/cache {})))
 
 ;; ---------------------------------------------------------------- config

@@ -777,7 +777,9 @@ A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
 `$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
 A field name the item does not have is missing too: a misspelt field never
-falls back to the login password. Claude's
+falls back to the login password. When the item has a login, `validate` and the
+plan say so — `did you mean item/password?` — since a ref that read the
+password through that fallback now needs the field named. Claude's
 settings `:env` takes the same forms as an MCP server's `:env`. A Claude MCP
 server or settings `env` with any ref that does not resolve is held back whole,
 as [GUIDE.md](GUIDE.md#unresolved-secrets) describes; a resolved one is printed

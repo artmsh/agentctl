@@ -149,7 +149,12 @@
             ;; written out, any of them is a header that authenticates nothing
             (and named? (or (nil? v) (contains? #{"" "null"} (str/trim (str v)))))
             {:status :missing :message (str "field is empty on bw item: " item "/" field)}
-            (nil? v) {:status :missing :message (str "field not found on bw item: " item "/" field)}
+            (nil? v) {:status :missing
+                      :message (str "field not found on bw item: " item "/" field
+                                    ;; a ref that once reached the login through
+                                    ;; a fallback says where to point it now
+                                    (when (and (not named?) (:password login))
+                                      (str " — the item has a login: did you mean " item "/password?")))}
             (contains? #{"" "null"} (str/trim (str v)))
             {:status :missing :message (str "field is empty on bw item: " item "/" field)}
             :else {:status :ok :value v}))))))

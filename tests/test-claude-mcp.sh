@@ -719,9 +719,14 @@ EDN
 vault '{"login": {"KEY": "sk-test-field", "_login": {"username": "u", "password": "'$PLAIN'"}}}'
 plan -k mcps
 [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a misspelt field read as converged: exit $code"; }
-grep -qF "⚠ secret unresolved: field not found on bw item: login/KEYY (headers.x-key)" "$SB/plan.txt" \
-  || { cat "$SB/plan.txt"; fail "the misspelt field is not reported"; }
+# a ref that used to reach the login through the fallback says where to point it
+hint='field not found on bw item: login/KEYY — the item has a login: did you mean login/password?'
+grep -qF "⚠ secret unresolved: $hint (headers.x-key)" "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the misspelt field is not reported with the login hint"; }
 apply -k mcps
+grep -qF "$hint" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "apply! does not give the login hint"; }
+validate
+grep -qF "$hint" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "validate does not give the login hint"; }
 [ "$(user_entry typo)" = null ] || { user_entry typo; fail "a misspelt field was written"; }
 grep -q "$PLAIN" "$SB/.claude.json" && fail "the login password was written for a misspelt field"
 
