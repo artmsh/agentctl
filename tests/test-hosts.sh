@@ -20,6 +20,7 @@ mkdir -p "$SB/bin"
 # to answer another one, or nothing
 cat > "$SB/bin/codex" <<'STUB'
 #!/bin/sh
+[ -n "${CODEX_HANG:-}" ] && exec sleep 60
 [ "${1:-}" = --version ] && printf '%s\n' "${CODEX_VERSION-codex-cli 0.169.0}"
 exit 0
 STUB
@@ -265,10 +266,10 @@ grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "old codex not gi
 CODEX_VERSION='codex-cli 0.94.0' expect 0 apply! $W -y
 for s in alpha beta gamma; do [ -d "$CX/$s" ] && [ -d "$AG/$s" ] || fail "$s not in both roots"; done
 CODEX_VERSION='codex-cli 0.94.0' converged
-echo "    and loses it once codex reads the shared root"
-expect 2 apply $W
-grep -q '0 to add, 0 to change, 3 to remove' "$SB/out" || fail "codex copies not dropped: $(cat "$SB/out")"
-expect 0 apply! $W -y
+echo "    and loses it once codex reads the shared root, under -t awl too"
+expect 2 apply $W -t awl
+grep -q '0 to add, 0 to change, 3 to remove' "$SB/out" || fail "-t awl leaves codex its second copies: $(cat "$SB/out")"
+expect 0 apply! $W -t awl -y
 [ -e "$CX/alpha" ] && fail "codex copy kept beside the shared one"
 converged
 
@@ -276,6 +277,15 @@ echo "20. a codex that gives no version gets a copy of its own, and a warning"
 CODEX_VERSION='' expect 2 apply $W
 grep -q 'gave no version' "$SB/out" || fail "unknown codex version not reported: $(cat "$SB/out")"
 grep -q '3 to add, 0 to change, 0 to remove' "$SB/out" || fail "unknown codex not given copies: $(cat "$SB/out")"
+CODEX_VERSION='Error: Node.js v18.19.1 is not supported' expect 2 apply $W
+grep -q 'gave no version' "$SB/out" || fail "a runtime's version taken for codex's: $(cat "$SB/out")"
+if command -v timeout >/dev/null 2>&1; then
+  echo "    nor does one that hangs"
+  t0=$(date +%s)
+  CODEX_HANG=1 expect 2 apply $W
+  [ $(( $(date +%s) - t0 )) -lt 30 ] || fail "a hanging codex hung the inventory"
+  grep -q 'gave no version' "$SB/out" || fail "a hanging codex not reported: $(cat "$SB/out")"
+fi
 
 echo "21. a hand-made copy codex reads beside agentctl's is reported, never touched"
 mkdir -p "$CX/beta"; printf 'mine\n' > "$CX/beta/SKILL.md"

@@ -196,8 +196,11 @@
                    (str "printf 'R\\t" (name r) "\\t%s\\n' \"$(e \"" (sh-root r) "\")\"\n")))
        (str/join (for [t tools]
                    (str "if command -v " t " >/dev/null 2>&1; then printf 'T\\t" t "\\t1\\n'\n"
-                        ;; stdin is the rest of this script: a CLI reading it would eat it
-                        "printf 'V\\t" t "\\t%s\\n' \"$(e \"$(" t " --version </dev/null 2>/dev/null | head -n 1 || true)\")\"\n"
+                        ;; stdin is the rest of this script: a CLI reading it
+                        ;; would eat it. One that hangs, or fails, has no version.
+                        "v=$(if command -v timeout >/dev/null 2>&1; then timeout 5 " t " --version; else " t
+                        " --version; fi </dev/null 2>/dev/null) || v=\n"
+                        "printf 'V\\t" t "\\t%s\\n' \"$(e \"$(printf '%s\\n' \"$v\" | head -n 1)\")\"\n"
                         "else printf 'T\\t" t "\\t0\\n'; fi\n")))
        (str/join
         (for [r roots id ids

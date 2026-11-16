@@ -41,10 +41,13 @@
 
 (defn codex-reads-agents?
   "Does the codex whose `--version` printed `line` read `~/.agents/skills`?
-   nil when the line carries no version."
+   nil when the line carries no codex version: a wrapper's error names its
+   runtime's (`Node.js v18.19.1`), which says nothing about codex. A
+   pre-release comes before its release, so `0.95.0-alpha.2` reads as older."
   [line]
-  (when-let [[_ a b c] (some->> line (re-find #"(\d+)\.(\d+)\.(\d+)"))]
-    (not (neg? (compare (mapv parse-long [a b c]) codex-reads-agents-since)))))
+  (when-let [[_ a b c pre] (some->> line (re-find #"\bcodex-cli\s+v?(\d+)\.(\d+)\.(\d+)(-\S+)?"))]
+    (let [order (compare (mapv parse-long [a b c]) codex-reads-agents-since)]
+      (or (pos? order) (and (zero? order) (nil? pre))))))
 
 (defn roots-for
   "The roots one skill is copied into, given the tools that want it and are on
@@ -227,7 +230,11 @@
         prunable (when (empty? unfetched)
                    (sort (for [[r id :as k] owned
                                :let [ps (placed-at id)]
-                               :when (and (root-on? r) (not (some #(= r (:root %)) ps))
+                               ;; a codex copy beside the shared one is a duplicate
+                               ;; that placing the shared one made: -t awl undoes it
+                               :when (and (or (root-on? r)
+                                              (and shared? (= :codex r) (some #(= :awl (:root %)) ps)))
+                                          (not (some #(= r (:root %)) ps))
                                           (every? #(and (ready? %) (placeable? host (:source %))) ps))]
                            k)))
         state-at (fn [r id] (get-in inv [:entries r (name id) :state] :absent))

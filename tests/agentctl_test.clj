@@ -3932,7 +3932,13 @@
   (is (false? (hosts/codex-reads-agents? "codex-cli 0.94.9")))
   (is (false? (hosts/codex-reads-agents? "codex-cli 0.9.100")))
   (is (nil? (hosts/codex-reads-agents? "")))
-  (is (nil? (hosts/codex-reads-agents? nil))))
+  (is (nil? (hosts/codex-reads-agents? nil)))
+  (testing "a version not codex's is no version"
+    (is (nil? (hosts/codex-reads-agents? "Error: Node.js v18.19.1 is not supported")))
+    (is (nil? (hosts/codex-reads-agents? "warning: v1.2.3 codex-cli"))))
+  (testing "a pre-release comes before its release"
+    (is (false? (hosts/codex-reads-agents? "codex-cli 0.95.0-alpha.2")))
+    (is (true? (hosts/codex-reads-agents? "codex-cli 0.95.1-alpha.1")))))
 
 (deftest a-skill-both-want-goes-where-both-read-it
   (testing "codex reads ~/.agents/skills: one copy, there"

@@ -858,14 +858,16 @@ Locally awl reads its skills out of `agents.edn`, but a host has none, so there
 `:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
 not awl's alone: codex 0.95.0 and later read it as well, and list a skill once
 for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
-when the host's `codex --version` is 0.95.0 or later. An older codex gets its own
-copy in `~/.codex/skills`, and so does a codex whose version can't be read, with a
-warning. Changing the declaration or the codex version moves the copy on the next
+when the host's `codex --version` reports `codex-cli` 0.95.0 or later (a
+pre-release of 0.95.0 counts as older). An older codex gets its own copy in
+`~/.codex/skills`, with a warning, and so does a codex whose version can't be
+read, or that hasn't answered within 5 seconds where the host has `timeout`. Changing the declaration or the codex version moves the copy on the next
 apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
 since it is often a shell alias, so an awl skill is placed whether or not `awl` is
 on the host's `PATH`. When codex reads both directories and one holds a hand-made
 copy of a skill agentctl places in the other, the plan warns that codex lists the
-skill twice. `-t awl` selects `~/.agents/skills`; it is valid only with `--host`.
+skill twice. `-t awl` selects `~/.agents/skills`, and the codex copies that
+placing a skill there made redundant; it is valid only with `--host`.
 
 Skills are copied, not linked: sources are read on this machine (a git pack is
 fetched here) and sent over SSH. Drift is a per-file comparison of byte hashes,
