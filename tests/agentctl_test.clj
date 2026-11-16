@@ -2302,6 +2302,29 @@
       (is (false? (:show-noop o)))
       (is (= "x" (:file o)) "base opts survive"))))
 
+(deftest gui-refuses-a-filter-that-selects-nothing
+  ;; the CLI exits 1 on `-k bogus`; the GUI answers the same request with a 400
+  ;; naming what is valid, never with a plan of nothing that reads as converged
+  (let [ctx {:tok "t" :path "/tmp/agentctl-gui/agents.edn" :base-opts {} :lock (Object.)}
+        body (fn [m] (java.io.ByteArrayInputStream. (.getBytes (json/generate-string m))))
+        post (fn [uri m] (gui/handler ctx {:request-method :post :uri uri
+                                           :headers {"host" "127.0.0.1:1" "x-agentctl-token" "t"}
+                                           :body (body m)}))]
+    (doseq [uri ["/api/plan" "/api/edit" "/api/apply"]]
+      (let [res (post uri {:text "{}" :kinds ["bogus"] :ops [] :confirm true})
+            data (json/parse-string (:body res) true)]
+        (is (= 400 (:status res)) uri)
+        (is (false? (:ok data)) uri)
+        (is (str/includes? (:error data) "unknown kind :bogus") uri)
+        (is (str/includes? (:error data) "plugins") uri)))
+    (let [res (post "/api/plan" {:text "{}" :tools ["nope"]})
+          data (json/parse-string (:body res) true)]
+      (is (= 400 (:status res)))
+      (is (str/includes? (:error data) "unknown tool :nope"))
+      (is (str/includes? (:error data) "claude")))
+    (testing "valid filters still plan"
+      (is (= 200 (:status (post "/api/plan" {:text "{}" :tools ["pi"] :kinds ["mcps"]})))))))
+
 (deftest gui-plans-from-a-buffer-that-was-never-saved
   (let [dir (temp-dir)
         path (str dir "/agents.edn")

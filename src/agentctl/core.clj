@@ -46,6 +46,23 @@
    nothing, and an empty plan reads exactly like a converged machine."
   (vec (sort (into (set scope/kinds) (mapcat val config/capabilities)))))
 
+(defn kind-problem
+  "Why `k` is no kind to select."
+  [k]
+  (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
+
+(defn unknown-selectors
+  "`[flag value message]` for each `:tools` / `:kinds` value that selects
+   nothing — the CLI's `-t`/`-k` and the GUI's filters alike. A tool without
+   an adapter or a kind no op carries plans nothing, and an empty plan reads
+   exactly like a converged machine."
+  [{:keys [tools] :as opts}]
+  (concat
+   (for [t tools :when (not (some #{t} config/all-tools))]
+     ["-t" t (str (config/tool-problem t) " (tools: " (str/join ", " (map name config/all-tools)) ")")])
+   (for [k (:kinds opts) :when (not (some #{k} kinds))]
+     ["-k" k (kind-problem k)])))
+
 (defn- keep-kinds [ops {:keys [kinds]}]
   (if (seq kinds) (filter #(contains? (set kinds) (:kind %)) ops) ops))
 
@@ -61,15 +78,21 @@
        (some? (:id o))
        (contains? (id-names (:id o)) id)))
 
+(declare unmatched-only)
+
 (defn- keep-only
   "`--only kind/id` keeps the ops of one entity wherever it is placed, user
    scope and projects alike. A selected skill keeps the op that fetches its
    pack, for the reason `keep-projects` gives: without the clone there is
-   nothing to link, and `converge!` never gets its second pass."
-  [ops cfg {:keys [only]}]
+   nothing to link, and `converge!` never gets its second pass. An id nothing
+   declares or owns brings no pack: its lookup would fall back to every pack
+   not on disk yet, and a typo would clone them all."
+  [ops cfg st {:keys [only] :as opts}]
   (if (empty? only)
     ops
-    (let [packs (set (for [[kind id] only :when (= :skills kind)
+    (let [unknown (set (unmatched-only cfg st opts))
+          packs (set (for [[kind id] only
+                           :when (and (= :skills kind) (not (unknown (str (name kind) "/" id))))
                            p (sources/packs-for-skill cfg (keyword id)) :when p] p))]
       (filter #(or (some (fn [sel] (only-match? sel %)) only)
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
@@ -440,7 +463,7 @@
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st)))
         (keep-kinds opts)
         (keep-projects cfg opts)
-        (keep-only cfg opts)
+        (keep-only cfg st opts)
         (keep-user opts)
         defer-unmet-removals
         (->> (annotate-skill-ops cfg))

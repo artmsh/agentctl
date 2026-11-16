@@ -987,4 +987,32 @@ done
 sel_plan -f "$SEL/git.edn" --only skills/nope > "$SEL/nope.txt"
 grep -q -- '--only skills/nope — nothing declared or owned' "$SEL/nope.txt" || { cat "$SEL/nope.txt"; fail "an --only naming nothing was not reported"; }
 
+# ...and brings no pack: an unknown id must not fall back to cloning every
+# pack not on disk yet
+mkdir -p "$SEL/gp2/skills/h"
+printf -- '---\nname: h\ndescription: Demo.\n---\n' > "$SEL/gp2/skills/h/SKILL.md"
+git -C "$SEL/gp2" init -q
+git -C "$SEL/gp2" -c user.email=t@e -c user.name=t add -A
+git -C "$SEL/gp2" -c user.email=t@e -c user.name=t commit -qm init
+cat > "$SEL/git2.edn" <<EDN
+{:skill-packs {[:uri "file://$SEL/gp2"] {:alias gp2 :dir "skills" :type :git}}
+ :skills {[gp2 "h"] {:in :all :acli [:claude]}}}
+EDN
+sel_plan -f "$SEL/git2.edn" --all --json > "$SEL/git2-all.json"
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(0 if any(o["kind"]=="skill-packs" for o in ops) else 1)' "$SEL/git2-all.json" \
+  || { cat "$SEL/git2-all.json"; fail "setup: gp2 is not planned as a clone"; }
+sel_plan -f "$SEL/git2.edn" --only skills/nope --json > "$SEL/git2-nope.json"
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["ops"] == [] else 1)' "$SEL/git2-nope.json" \
+  || { cat "$SEL/git2-nope.json"; fail "--only with an unknown id planned a clone or a link"; }
+(cd "$SEL" && sel apply! -f "$SEL/git2.edn" --only skills/nope -y) > "$SEL/git2-nope.txt"
+[ ! -e "$SEL/.agents/skill-packs/gp2" ] || { cat "$SEL/git2-nope.txt"; fail "--only with an unknown id cloned a pack"; }
+
+# a mistyped command is reported as one, whatever options came with it
+for opt in "--only skills/x" "--host h"; do
+  set +e
+  sel bogus $opt > "$SEL/cmd.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] && grep -q 'unknown command: bogus' "$SEL/cmd.txt" || { cat "$SEL/cmd.txt"; fail "bogus $opt was not reported as an unknown command"; }
+done
+
 echo "all agentctl e2e checks passed"

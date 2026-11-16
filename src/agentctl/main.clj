@@ -317,41 +317,40 @@
                      :path (or (:file opts) config/default-path)
                      :open? (not (:no-open opts))))))
 
-(defn- check-tools!
-  "`-t` selects adapters by name, and a name without one has nothing to plan."
-  [{:keys [tools]}]
-  (doseq [t tools :when (not (some #{t} config/all-tools))]
-    (throw (ex-info (str "-t " (name t) ": " (config/tool-problem t)
-                         " (tools: " (str/join ", " (map name config/all-tools)) ")")
-                    {}))))
-
 (defn- check-selectors!
-  "`-k` and `--only` name kinds of op, and a kind no op carries selects
-   nothing — a typo would read as a converged machine. Returns `opts` with
-   each `--only` parsed into `[kind id]`."
-  [{:keys [kinds only] :as opts}]
-  (let [valid (set core/kinds)
-        listing (str " (kinds: " (str/join ", " (map name core/kinds)) ")")]
-    (doseq [k kinds :when (not (valid k))]
-      (throw (ex-info (str "-k " (u/kw->str k) ": unknown kind " k listing) {})))
-    (when (and (:user opts) (seq (:projects opts)))
-      (throw (ex-info "--user plans no project; it does not combine with --project" {})))
-    (cond-> opts
-      (seq only)
-      (assoc :only (vec (for [s only
-                              :let [[_ k id] (re-matches #"([^/]+)/(.+)" s)]]
-                          (cond
-                            (nil? k) (throw (ex-info (str "--only " s ": want KIND/ID, e.g. --only skills/review") {}))
-                            (not (valid (keyword k))) (throw (ex-info (str "--only " s ": unknown kind :" k listing) {}))
-                            :else [(keyword k) id])))))))
+  "`-t`, `-k` and `--only` each name something to plan, and a name nothing
+   answers to selects nothing — a typo would read as a converged machine.
+   Returns `opts` with each `--only` parsed into `[kind id]`."
+  [{:keys [only] :as opts}]
+  (when-let [[flag v msg] (first (core/unknown-selectors opts))]
+    (throw (ex-info (str flag " " (u/kw->str v) ": " msg) {})))
+  (when (and (:user opts) (seq (:projects opts)))
+    (throw (ex-info "--user plans no project; it does not combine with --project" {})))
+  (cond-> opts
+    (seq only)
+    (assoc :only (vec (for [s only
+                            :let [[_ k id] (re-matches #"([^/]+)/(.+)" s)]]
+                        (cond
+                          (nil? k) (throw (ex-info (str "--only " s ": want KIND/ID, e.g. --only skills/review") {}))
+                          (not (some #{(keyword k)} core/kinds))
+                          (throw (ex-info (str "--only " s ": " (core/kind-problem (keyword k))) {}))
+                          :else [(keyword k) id]))))))
+
+(def ^:private commands
+  #{"apply" "plan" "apply!" "validate" "import" "import!" "state" "gui"})
 
 (defn -main [& args]
   (let [{:keys [command help] :as opts} (parse-args args)]
     (cond
       (or help (nil? command)) (println usage)
+      ;; what the command is comes before what its options may be: a typo in
+      ;; the command must not be reported as an option it does not take
+      (not (commands command))
+      (do (println (str "unknown command: " command "\n"))
+          (println usage)
+          (System/exit 1))
       :else
       (try
-        (check-tools! opts)
         (when (and (:host opts) (not (#{"apply" "plan" "apply!" "validate" "state"} command)))
           (throw (ex-info (str command " does not take --host") {})))
         (when (and (or (seq (:only opts)) (:user opts)) (not (#{"apply" "plan" "apply!"} command)))
@@ -365,10 +364,7 @@
             "import" (cmd-import opts false)
             "import!" (cmd-import opts true)
             "state" (cmd-state opts)
-            "gui" (cmd-gui opts)
-            (do (println (str "unknown command: " command "\n"))
-                (println usage)
-                (System/exit 1))))
+            "gui" (cmd-gui opts)))
         (catch clojure.lang.ExceptionInfo e
           (println (str "error: " (ex-message e)))
           (System/exit 1))))))
