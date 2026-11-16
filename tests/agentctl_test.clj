@@ -628,7 +628,7 @@
     (is (= #{:kimi} (get-in cfg [:projects :p :for-tools])))))
 
 (deftest antigravity-speaks-its-own-mcp-dialect
-  (let [entry #'antigravity/mcp-entry
+  (let [entry (fn [m cur] (#'antigravity/mcp-entry m cur nil))
         {:keys [local remote off]}
         (:mcps (config/normalize {:mcps {:local "/bin/echo hi"
                                          :remote {:url "https://example.com/sse"
@@ -669,7 +669,7 @@
 ;; ---------------------------------------------------------------- kimi
 
 (deftest kimi-speaks-its-own-mcp-dialect
-  (let [entry #'kimi/mcp-entry
+  (let [entry (fn [m cur] (#'kimi/mcp-entry m cur nil))
         {:keys [local remote off]} (:mcps (config/normalize
                                            {:mcps {:local "/bin/echo hi"
                                                    :remote {:url "https://example.com/mcp"

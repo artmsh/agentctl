@@ -78,6 +78,30 @@
   [m]
   (concat (ref-issues [["env" (:env m)] ["headers" (:headers m)]]) (:arg-issues m)))
 
+(defn declared-names
+  "The env and header names a server declares, kept in the manifest beside
+   it. A name agentctl declared and the declaration has since dropped is
+   agentctl's to remove; a name it never declared was added by hand, and is
+   kept."
+  [m]
+  (let [names (fn [x] (not-empty (vec (sort (map u/key-str (keys x))))))]
+    (u/prune-nils {:env-names (names (:env m)) :header-names (names (:headers m))})))
+
+(def name-tracking-tools
+  "Tools whose server entries keep env vars and headers agentctl does not
+   declare, so the manifest records the names it did."
+  #{:claude :kimi :antigravity})
+
+(defn kept-values
+  "An entry's current env or header map (`k` is `:env-names` or
+   `:header-names`) without the names the manifest entry `old` says agentctl
+   declared and `m` no longer does, keyed by string: JSON reads a key back as
+   a keyword, and merged with a declared one the name would be written twice."
+  [cur old m k]
+  (let [now (set (get (declared-names m) k))
+        dropped (into #{} (remove now) (get old k))]
+    (into {} (keep (fn [[kk v]] (let [kk (u/key-str kk)] (when-not (dropped kk) [kk v])))) cur)))
+
 (defn mcp-secrets
   "Every ref a server declares where a credential goes, by name: env, headers
    and argv — what `holds-secret?` looks at."

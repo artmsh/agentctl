@@ -262,7 +262,7 @@
    agentctl's to remove; a name it never declared was added by hand, and is
    kept."
   [m]
-  (u/prune-nils {:env-names (key-names (:env m)) :header-names (key-names (:headers m))}))
+  (common/declared-names m))
 
 (defn- dropped-names
   "Names under `k` (`:env-names`, `:header-names`) that the manifest entry

@@ -232,6 +232,29 @@ CFG="$SB/stale.edn" outputs
 grep -q odocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the switched servers are not planned"; }
 leaks argsecretvalue888 envsecretvalue444 hdrsecretvalue555 Zq9x
 
+echo "9. an env var dropped from a server goes from disk, and no output prints it"
+cat > "$SB/drop.edn" <<'EDN'
+{:mcps [{:id :edocs :command "/bin/echo" :env {"DOCS" "!bw://plant/ENV" "MODE" "fast"} :in :all
+         :acli [:pi :omp :kimi :antigravity]}
+        {:id :ehttp :type :http :url "https://mcp.example.com/e" :headers {"x-docs" "!bw://plant/HDR" "x-mode" "fast"} :in :all
+         :acli [:omp :kimi :antigravity]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all "${TOOLS[@]}" -f "$SB/drop.edn" -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the env servers exited $code"; }
+sed -i.bak 's|"DOCS" "!bw://plant/ENV" ||; s|"x-docs" "!bw://plant/HDR" ||' "$SB/drop.edn"
+CFG="$SB/drop.edn" outputs
+grep -q edocs "$SB/plan.json" || { cat "$SB/plan.json"; fail "the dropped env var is not planned"; }
+leaks envsecretvalue444 hdrsecretvalue555
+for f in .pi/agent/mcp.json .omp/agent/mcp.json .kimi-code/mcp.json .gemini/config/mcp_config.json; do
+  python3 - "$SB/$f" <<'PY' || fail "$f still holds the dropped env var or header"
+import json, sys
+ms = json.load(open(sys.argv[1]))["mcpServers"]
+assert "DOCS" not in ms["edocs"].get("env", {}), ms["edocs"]
+assert ms["edocs"]["env"]["MODE"] == "fast", ms["edocs"]
+assert "ehttp" not in ms or "x-docs" not in ms["ehttp"].get("headers", {}), ms.get("ehttp")
+PY
+done
+
 echo "10. a secret that is also a word in a URL or a path leaves them readable"
 cat > "$SB/word.edn" <<'EDN'
 {:mcps [{:id :wdocs :type :http :url "https://config.example.com/w" :headers {"x-site" "!bw://plant/WORD"} :in :all
