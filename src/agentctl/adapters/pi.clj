@@ -59,7 +59,7 @@
         managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
     (concat
      (keep (fn [[id m]]
-             (if-let [issues (seq (concat (common/ref-issues [["env" (:env m)]]) (:arg-issues m)))]
+             (if-let [issues (seq (concat (common/ref-issues [["env" (:env m)]]) (:arg-issues m) (:url-issues m)))]
                (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
                (plan/json-set-op {:tool tool :kind :mcps :id id
                                   :file mcp-file :path [:mcpServers (keyword (u/kw->str id))]

@@ -153,6 +153,7 @@
                    :else (f :error [:mcps id] (str "command not executable: " cmd)))]))
       (ref-findings [:mcps id :env] (:env m))
       (ref-findings [:mcps id :headers] (:headers m))
+      (when-let [r (common/url-ref m)] (ref-findings [:mcps id] {:url r}))
       (ref-findings [:mcps id :args] (into {} (map (fn [[_ flag r]] [(str "--" flag) r])) (refs/arg-refs (:args m))))
       (when (and deep? (= :http (:transport m)))
         (let [{:keys [exit]} (u/sh "curl" "-sS" "-o" "/dev/null" "--max-time" "8" (:url m))]

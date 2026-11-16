@@ -327,7 +327,7 @@
         headers (common/resolve-env (:headers m))]
     {:env env
      :headers headers
-     :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m))}))
+     :issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m) (:url-issues m))}))
 
 (defn- restore-user-mcp!
   "Put back a user-wide server's entry as it was before the update removed

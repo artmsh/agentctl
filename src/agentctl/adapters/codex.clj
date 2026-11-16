@@ -374,7 +374,7 @@
                  cur (get current name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
-                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m) (:url-issues m))
                  want (mcp-desired-shape m (:values headers))
                  have (some-> cur mcp-current-shape)]
            ;; an unresolved env or header ref holds the server back: written
@@ -464,7 +464,7 @@
                  id (keyword (name pid) name*)
                  env (common/resolve-env (:env m))
                  headers (common/resolve-env (:headers m))
-                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m))
+                 issues (concat (common/issues-in "env" env) (common/issues-in "headers" headers) (:arg-issues m) (:url-issues m))
                  have (get servers name*)
                  want (project-mcp-table m (:values env) (:values headers))
                  secret? (common/holds-secret? (common/mcp-secrets m))]

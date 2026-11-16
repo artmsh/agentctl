@@ -30,6 +30,25 @@
                                  :when (not= :ok status)]
                              {:key (str "--" flag) :status status :message message :where "args"}))))))
 
+(defn url-ref
+  "The reference an http server's `:url` is, when it is one (`!bw://…`,
+   `$VAR`): an endpoint can carry its credential in the path or the query."
+  [m]
+  (let [r (try (refs/parse (:url m)) (catch clojure.lang.ExceptionInfo _ nil))]
+    (when (refs/secret-ref? r) r)))
+
+(defn resolve-url
+  "An MCP server with a `:url` reference resolved: the reference under
+   `:url-ref`, and under `:url-issues` when it did not resolve, which holds
+   the server back as an unresolved header does."
+  [m]
+  (if-let [r (when-not (::url-resolved m) (url-ref m))]
+    (let [{:keys [status value message]} (refs/resolve-ref r)]
+      (cond-> (assoc m ::url-resolved true :url-ref r)
+        (= :ok status) (assoc :url value)
+        (not= :ok status) (assoc :url-issues [{:key "url" :status status :message message :where "url"}])))
+    m))
+
 (defn for-this-tool
   "Apply a resource's :per-tool override for `tool`, if any.
 
@@ -41,7 +60,7 @@
   (cond-> (if-let [override (get-in res [:per-tool tool])]
             (merge res (into {} (remove (comp nil? val)) override))
             res)
-    (= :mcps (:kind res)) resolve-args))
+    (= :mcps (:kind res)) (-> resolve-args resolve-url)))
 
 (defn for-tool-resources
   "Resources targeting `tool`, each already merged with its per-tool override."
@@ -76,7 +95,7 @@
 (defn mcp-issues
   "A server's unresolved env, header and argv refs."
   [m]
-  (concat (ref-issues [["env" (:env m)] ["headers" (:headers m)]]) (:arg-issues m)))
+  (concat (ref-issues [["env" (:env m)] ["headers" (:headers m)]]) (:arg-issues m) (:url-issues m)))
 
 (defn declared-names
   "The env and header names a server declares, kept in the manifest beside
@@ -106,7 +125,7 @@
   "Every ref a server declares where a credential goes, by name: env, headers
    and argv — what `holds-secret?` looks at."
   [m]
-  (merge (:env m) (:headers m) (:arg-refs m)))
+  (merge (:env m) (:headers m) (:arg-refs m) (when (:url-ref m) {"url" (:url-ref m)})))
 
 (defn provider-issues
   "A provider's unresolved refs: its key, unless `key?` is false (a key the
@@ -293,7 +312,7 @@
   (into {} (keep (fn [mid]
                    (let [m (get-in cfg [:mcps mid])]
                      (when (and m (project-scopes (:scope m)) (contains? (:tools m) tool))
-                       [mid (resolve-args m)]))))
+                       [mid (-> m resolve-args resolve-url)]))))
         (sort (:mcp proj))))
 
 (defn project-scope-skip-ops

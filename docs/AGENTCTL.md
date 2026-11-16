@@ -776,6 +776,10 @@ Kimi and Antigravity keep env vars and headers added to a server by hand; the
 manifest records the names agentctl declared, and a name the declaration drops
 is removed from the server, as for Claude.
 
+An http server's `:url` may itself be a reference (`!bw://vendor/docs/url`),
+for an endpoint that carries its credential in the path or the query. It is
+resolved, masked and held back like a header, and `validate` checks it.
+
 OMP writes an http or sse server's `:headers` resolved into the server's
 `headers` map in `~/.omp/agent/mcp.json`; a header that does not resolve holds
 the server back, as an env value does.

@@ -265,4 +265,20 @@ grep -qF 'https://config.example.com/w' "$SB/plan.json" || { grep -n url "$SB/pl
 grep -qF "$SB/.gemini/config/mcp_config.json" "$SB/plan.json" || { grep -n target "$SB/plan.json"; fail "--json masked a word inside a path"; }
 grep -qF '"x-site" : "********"' "$SB/plan.json" || { grep -n x-site "$SB/plan.json"; fail "the secret itself was not masked"; }
 
+echo "11. a reference as an http server's URL is resolved, masked, and held back when it does not resolve"
+cat > "$SB/url.edn" <<'EDN'
+{:mcps [{:id :udocs :type :http :url "!bw://plant/URL" :in :all :acli [:omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/url.edn" outputs
+leaks urlsecretpath99
+grep -q 'urlsecretpath99' "$SB/.kimi-code/mcp.json" || fail "the resolved URL was not written"
+grep -q '!bw://' "$SB/.kimi-code/mcp.json" && fail "the URL reference was written as text"
+sed -i.bak 's|plant/URL|plant/NOPE|' "$SB/url.edn"
+for t in omp kimi antigravity codex; do
+  set +e; "$ROOT/agentctl" apply --all -t $t -k mcps -f "$SB/url.edn" > "$SB/url.txt" 2>&1; code=$?; set -e
+  [ "$code" = 2 ] && grep -qF '(url.url)' "$SB/url.txt" || { cat "$SB/url.txt"; fail "$t: an unresolved URL is not held back"; }
+done
+set +e; "$ROOT/agentctl" validate -f "$SB/url.edn" > "$SB/url.txt" 2>&1; set -e
+grep -qF 'udocs.url' "$SB/url.txt" || { cat "$SB/url.txt"; fail "validate does not report the unresolved URL"; }
+
 echo "all secrets e2e checks passed"
