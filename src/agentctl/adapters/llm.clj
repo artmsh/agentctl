@@ -96,8 +96,15 @@
                                                             others (remove #(= (:model_id %) (:model_id d)) cur-list)]
                                                         (u/write-yaml! (models-file)
                                                                        (vec (concat others [d])))))}))))
-                             desired)]
-         (remove nil? (concat [no-dialect key-op enumerate-warn] model-ops))))
+                             desired)
+             issues (when d (seq (common/provider-issues p true)))]
+         (if issues
+           ;; written without its key or a header, every model would answer
+           ;; nothing — and leave no drift behind to say so
+           (remove nil? [enumerate-warn
+                         (common/unresolved-op {:tool tool :kind :providers :id id :target (models-file)}
+                                               issues)])
+           (remove nil? (concat [no-dialect key-op enumerate-warn] model-ops)))))
      (common/for-tool-resources (:providers cfg) tool))))
 
 (defn settings-ops [cfg]

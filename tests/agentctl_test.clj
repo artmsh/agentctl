@@ -1941,7 +1941,8 @@
               id ids]
         (testing (str (name tool) " MCP server " (name id))
           (is (held? (ops (cfg tool) state/empty-state) id))))
-      (doseq [[tool ops] [[:pi pi/provider-ops] [:omp omp/provider-ops] [:kimi kimi/provider-ops]]]
+      (doseq [[tool ops] [[:pi pi/provider-ops] [:omp omp/provider-ops] [:kimi kimi/provider-ops]
+                          [:llm llm/provider-ops]]]
         (testing (str (name tool) " provider key")
           (is (held? (ops (cfg tool)) :gw)))))
     (reset! @#'refs/cache {})))

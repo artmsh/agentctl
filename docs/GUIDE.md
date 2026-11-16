@@ -408,7 +408,7 @@ the private one.
 When a reference does not resolve — the vault is locked, the variable is unset,
 the Bitwarden field is empty or holds the text `null`, the variable, file or
 command yields nothing but whitespace, the reference is malformed — the MCP server, the
-provider, or Claude's settings `env` object holding it is not written at all, in
+provider (for `llm`, its key and every one of its models), or Claude's settings `env` object holding it is not written at all, in
 any scope and for every tool. Writing the rest of it would leave a server that is
 configured and cannot authenticate, and because the missing value would then be
 missing from the desired entry too, the next plan would report no drift. The plan

@@ -109,4 +109,20 @@ grep -q '"ops"' "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "apply! --json pr
 leaks envsecretvalue111 hdrsecretvalue222 keysecretvalue333 envsecretvalue444 hdrsecretvalue555 keysecretvalue666
 grep -q envsecretvalue444 "$SB/.pi/agent/mcp.json" || fail "the rotated secret was not written"
 
+echo "3. an llm provider whose key does not resolve is held back whole, not written keyless"
+LLM_DIR="$SB/Library/Application Support/io.datasette.llm"
+cat > "$SB/llm.edn" <<'EDN'
+{:providers [{:id :gw :url "https://api.example.com/v1" :api "openai-completions" :key "!bw://plant/NOPE"
+              :models [{:id "m1"}] :acli [:llm] :in :all}]}
+EDN
+set +e
+"$ROOT/agentctl" apply --all -t llm -f "$SB/llm.edn" > "$SB/llm-plan.txt" 2>&1; code=$?
+"$ROOT/agentctl" apply! --all -t llm -f "$SB/llm.edn" -y > "$SB/llm-apply.txt" 2>&1; bang=$?
+set -e
+[ "$code" = 2 ] || { cat "$SB/llm-plan.txt"; fail "apply exited $code on an unresolved llm key, not 2"; }
+[ "$bang" = 1 ] || { cat "$SB/llm-apply.txt"; fail "apply! exited $bang on an unresolved llm key, not 1"; }
+grep -q 'providers/gw' "$SB/llm-plan.txt" && grep -q 'secret unresolved: field not found on bw item: plant/NOPE' "$SB/llm-plan.txt" \
+  || { cat "$SB/llm-plan.txt"; fail "the plan does not say the llm key is unresolved"; }
+[ ! -e "$LLM_DIR/extra-openai-models.yaml" ] || { cat "$LLM_DIR/extra-openai-models.yaml"; fail "the keyless llm models were written"; }
+
 echo "all secrets e2e checks passed"
