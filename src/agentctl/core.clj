@@ -692,8 +692,8 @@
    ;; claude's servers carry the env and header names they declare: one
    ;; dropped from the declaration is agentctl's to remove, the rest the user's
    (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))]
-     (if (= :claude t)
-       [t :mcps id (claude/declared-names (common/for-this-tool m t))]
+     (if (contains? common/name-tracking-tools t)
+       [t :mcps id (common/declared-names (common/for-this-tool m t))]
        [t :mcps id]))
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)

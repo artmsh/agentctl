@@ -248,7 +248,12 @@
                        url :http
                        :else :stdio)
       :command (some-> cmd u/expand)
-      :args (mapv (comp str u/expand) (concat (when-not (:command decl) (rest tokens)) (:args decl)))
+      ;; a reference where a credential goes is resolved when the plan is
+      ;; made, as env and headers are; expanded here, an unset variable
+      ;; would reach the server as its own name
+      :args (let [raw (vec (concat (when-not (:command decl) (rest tokens)) (:args decl)))
+                  kept (set (map first (refs/arg-refs raw)))]
+              (vec (map-indexed (fn [i a] (if (kept i) (str a) (str (u/expand a)))) raw)))
       :env (not-empty env)
       :url url
       :headers headers

@@ -6,6 +6,7 @@
             [agentctl.hosts :as hosts]
             [agentctl.imports :as imports]
             [agentctl.plan :as plan]
+            [agentctl.refs :as refs]
             [agentctl.remote :as remote]
             [agentctl.state :as state]
             [agentctl.statusline :as statusline]
@@ -129,8 +130,11 @@
           :else (recur (rest args) (assoc opts :command a))))
       opts)))
 
-(defn- op->data [o]
-  (-> o (dissoc :exec!) (update :tool u/kw->str) (update :kind u/kw->str) (update :id u/kw->str)))
+(defn- op->data
+  "An op as `--json` prints it: masked exactly as the text plan is."
+  [o]
+  (-> o (dissoc :exec!) plan/mask-op
+      (update :tool u/kw->str) (update :kind u/kw->str) (update :id u/kw->str)))
 
 (defn- load! [opts]
   (config/load-config (or (:file opts) config/default-path)))
@@ -289,7 +293,7 @@
                                (count done)
                                (if (seq failed) (str ", " (count failed) " failed") "")))
               (doseq [f failed]
-                (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+                (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (refs/scrub (:error f))))
               (println (str "backups on host: " backups))))
           (System/exit (if (or (seq failed) (plan/withheld? ops)) 1 0)))))))
 
@@ -379,7 +383,7 @@
                                  (count done)
                                  (if (seq failed) (str ", " (count failed) " failed") "")))
                 (doseq [f failed]
-                  (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
+                  (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (refs/scrub (:error f))))
                 (report-unresolved! unresolved)
                 (println (str "backups: " (u/tilde (u/backup-dir))))))
             (System/exit (if (or (seq failed) (seq unresolved) (plan/withheld? ops)) 1 0))))))))

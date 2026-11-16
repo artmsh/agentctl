@@ -49,11 +49,7 @@
                         (refs/redact scope k)))]))
         m))
 
-(def ^:private plain-env-words
-  "Values common enough as settings, and short enough, to be no one's secret."
-  #{"true" "false" "yes" "no" "on" "off" "enabled" "disabled"
-    "trace" "debug" "info" "warn" "warning" "error" "fatal" "silent" "verbose" "quiet"
-    "fast" "slow" "dev" "development" "prod" "production" "test" "staging" "local"})
+(def ^:private plain-env-words refs/plain-words)
 
 (defn- plain-env-value?
   "Whether an env value is provably no secret: a reference to where the value
@@ -81,6 +77,27 @@
                                     " -> create bitwarden item `" scope "` field `" (u/kw->str k) "`"))
                         (refs/redact scope k)))]))
         m))
+
+(defn- redact-args
+  "An argument after a credential-looking flag (`--token X`, `--token=X`) as
+   a bw placeholder, resolved when the plan is made as an env value is. A
+   whole `$VAR` already there is kept."
+  [scope args]
+  (let [secret (fn [flag v]
+                 (if (env-ref? v)
+                   v
+                   (do (note! (str "redacted " scope " argument after --" flag
+                                   " -> create bitwarden item `" scope "` field `" flag "`"))
+                       (refs/redact scope flag))))]
+    (first
+     (reduce (fn [[out flag] a]
+               (if-let [[_ f v] (and (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))]
+                 [(conj out (if-let [nm (refs/credential-flag f)] (str f "=" (secret nm v)) a)) nil]
+                 (if (and flag (string? a) (not (str/starts-with? a "-")))
+                   [(conj out (secret flag a)) nil]
+                   [(conj out a) (refs/credential-flag a)])))
+             [[] nil]
+             args))))
 
 (defn- invert [key-map] (into {} (map (fn [[k v]] [(u/kw->str v) k])) key-map))
 
@@ -243,7 +260,8 @@
     (u/prune-nils
      {:tool tool
       :command (or (:command t) (:command entry))
-      :args (not-empty (vec (or (:args t) (:args entry))))
+      ;; a token passed on the command line is as much a secret as one in env
+      :args (not-empty (redact-args nm (or (:args t) (:args entry))))
       :url (or (:url t) (:url entry))
       :env (not-empty (redact-env nm (or (:env t) (:env entry))))
       ;; an http server's whole credential rides in a header — left

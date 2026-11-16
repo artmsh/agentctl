@@ -58,8 +58,10 @@
   "Antigravity's spelling of a server: `serverUrl` rather than `url`, and
    `disabled` rather than `enabled` — copying pi's keys verbatim would leave a
    server switched on while the plan reported it converged. Managed fields are
-   merged onto the current entry so keys the DSL does not model survive."
-  [m cur]
+   merged onto the current entry so keys the DSL does not model survive. An
+   env var or header agentctl declared (`old`, the manifest entry) and no
+   longer does is removed; one added by hand stays."
+  [m cur old]
   (let [env (common/resolve-env (:env m))
         headers (common/resolve-env (:headers m))]
     (merge cur
@@ -68,8 +70,8 @@
             {:command (:command m)
              :args (not-empty (vec (:args m)))
              :serverUrl (:url m)
-             :env (not-empty (merge (:env cur) (:values env)))
-             :headers (not-empty (merge (:headers cur) (:values headers)))})
+             :env (not-empty (merge (common/kept-values (:env cur) old m :env-names) (:values env)))
+             :headers (not-empty (merge (common/kept-values (:headers cur) old m :header-names) (:values headers)))})
            ;; agy writes this key explicitly even when the server is on, so
            ;; always emitting it costs no churn
            {:disabled (not (:enabled m))})))
@@ -80,13 +82,14 @@
         managed (into #{} (map keyword) (state/managed-ids st tool :mcps))]
     (concat
      (keep (fn [[id m]]
-             (let [secret? (common/holds-secret? (merge (:env m) (:headers m)))]
+             (let [secret? (common/holds-secret? (common/mcp-secrets m))]
                (if-let [issues (seq (common/mcp-issues m))]
                  (common/unresolved-op {:tool tool :kind :mcps :id id :target mcp-file} issues)
                  (plan/json-set-op {:tool tool :kind :mcps :id id
                                     :file mcp-file
                                     :path [:mcpServers (keyword (u/kw->str id))]
-                                    :value (mcp-entry m (get current (keyword (u/kw->str id))))
+                                    :value (mcp-entry m (get current (keyword (u/kw->str id)))
+                                                      (state/entry st tool :mcps id))
                                     :risk (if secret? :secret :low)
                                     :summary (common/mcp-summary m)}))))
            desired)

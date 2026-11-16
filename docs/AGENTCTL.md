@@ -750,12 +750,39 @@ are redacted the same way unless they are provably no secret: a whole `$VAR`, a
 boolean, a number of up to five digits, or a common settings word such as
 `debug` or `fast`. A token under a plain name, `DOCS_AUTH` or `UPSTREAM`, is a
 placeholder too, and the import notes list each vault field to fill in.
+An MCP argument that follows a credential-looking flag — `--api-key X`,
+`--token=X` — becomes a `!bw://<server>/<flag>` placeholder the same way
+(`!bw://docs/api-key`); a flag naming where the credential lives, such as
+`--token-file`, keeps its value.
+
+An MCP server's argv takes a reference wherever a credential goes: the
+argument after a flag whose name says credential (`--token`, `--api-key`,
+`--password`), or such a flag's `=value`. It is resolved when the plan is made,
+masked in every output, and held back like an env value when it does not
+resolve; `validate` checks it. Anywhere else in argv, `$VAR` is expanded when
+the config is read and `!bw://` is plain text.
+
+```clojure
+{:mcps [{:id :docs :cmd "docs-mcp --api-key !bw://vendor/docs/api-key" :in :all}]}
+```
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
 `!bw://` references; apply resolves them and writes the native
 `http_headers` table. Codex's `env_http_headers` and `http_headers_helper` are
 not yet modelled by this DSL.
+
+Kimi and Antigravity keep env vars and headers added to a server by hand; the
+manifest records the names agentctl declared, and a name the declaration drops
+is removed from the server, as for Claude.
+
+An http server's `:url` may itself be a reference (`!bw://vendor/docs/url`),
+for an endpoint that carries its credential in the path or the query. It is
+resolved, masked and held back like a header, and `validate` checks it.
+
+OMP writes an http or sse server's `:headers` resolved into the server's
+`headers` map in `~/.omp/agent/mcp.json`; a header that does not resolve holds
+the server back, as an env value does.
 
 `:cmd "srv --transport stdio"` is one shell-ish line, split on whitespace with
 single and double quotes honoured. `:command` + `:args` is the same thing
@@ -971,6 +998,20 @@ Plans print `bw:dev-keys/hosted/api-key`, never the resolved value. Changes that
 end up writing a resolved secret into a tool's config file are tagged
 `⚠ writes resolved secret` and counted before the confirmation prompt.
 
+Every value a reference resolved to is masked (`"sk-t…ef"`) in every output:
+the text plan, `-v`, `--json`, `apply!` and the GUI, for every tool, whatever
+the field is called. So is the old value on the before side of a change to
+one, and any old env or header value a change replaces or removes: a rotated
+or dropped secret is still a secret, though nothing resolves it any more.
+Inside an env or header map an unchanged value is masked too unless it is
+plainly no secret (a boolean, a small number, a common settings word, a `$VAR`
+or a path): the text plan never prints it, but `--json` prints the whole map. In argv the position decides: the
+argument after a credential-looking flag, or such a flag's `=value`, is masked
+in diffs, summaries, command lines and failure messages whatever it holds,
+however short. A resolved value found inside other text is masked only as a
+token of its own, so one that is also a word in a host or a path leaves the
+URL or the path readable.
+
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
 `$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
@@ -1145,8 +1186,10 @@ different thing from a plan read after saving and re-running.
   re-render. The form is never re-rendered under a field that has focus — that
   eats the caret and the last keystrokes with it.
 - **The plan crosses the wire as rendered text, never as ops.** Masking lives in
-  `plan/render-val`; serializing `:diffs` would route around it and put a
-  credential read out of an existing tool config into a JSON payload.
+  `plan/mask-op`, which `render-plan`, `plan-data` and `--json`'s `op->data`
+  all go through, and `refs/scrub` takes every resolved value out of what is
+  left; serializing raw `:diffs` would route around both and put a credential
+  into a JSON payload.
   `plan/*color*` is bound to `false` and the page colours by sigil.
 - **Apply is gated three ways**: an explicit `confirm` in the request body (the
   browser dialog is a courtesy, not the gate), a re-plan on the server, and the

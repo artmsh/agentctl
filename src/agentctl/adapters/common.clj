@@ -10,16 +10,57 @@
   [m tool]
   (into {} (filter (fn [[_ v]] (contains? (:tools v) tool))) m))
 
+(defn resolve-args
+  "An MCP server with the references in its argv resolved (`refs/arg-refs`):
+   `:args` as written, the references under `:arg-refs` by flag, and those
+   that did not resolve under `:arg-issues`, which hold the server back as
+   an unresolved env value does. An unresolved one stays as written."
+  [m]
+  (let [found (refs/arg-refs (:args m))]
+    (if (or (::args-resolved m) (empty? found))
+      m
+      (let [res (for [[i flag r prefix] found] [i flag r prefix (refs/resolve-ref r)])]
+        (assoc m
+               ::args-resolved true
+               :args (reduce (fn [args [i _ _ prefix {:keys [status value]}]]
+                               (if (= :ok status) (assoc args i (str prefix value)) args))
+                             (vec (:args m)) res)
+               :arg-refs (into {} (map (fn [[_ flag r]] [(str "--" flag) r])) res)
+               :arg-issues (for [[_ flag _ _ {:keys [status message]}] res
+                                 :when (not= :ok status)]
+                             {:key (str "--" flag) :status status :message message :where "args"}))))))
+
+(defn url-ref
+  "The reference an http server's `:url` is, when it is one (`!bw://…`,
+   `$VAR`): an endpoint can carry its credential in the path or the query."
+  [m]
+  (let [r (try (refs/parse (:url m)) (catch clojure.lang.ExceptionInfo _ nil))]
+    (when (refs/secret-ref? r) r)))
+
+(defn resolve-url
+  "An MCP server with a `:url` reference resolved: the reference under
+   `:url-ref`, and under `:url-issues` when it did not resolve, which holds
+   the server back as an unresolved header does."
+  [m]
+  (if-let [r (when-not (::url-resolved m) (url-ref m))]
+    (let [{:keys [status value message]} (refs/resolve-ref r)]
+      (cond-> (assoc m ::url-resolved true :url-ref r)
+        (= :ok status) (assoc :url value)
+        (not= :ok status) (assoc :url-issues [{:key "url" :status status :message message :where "url"}])))
+    m))
+
 (defn for-this-tool
   "Apply a resource's :per-tool override for `tool`, if any.
 
    One endpoint often differs per agent — one tool may use a public host while
    others use an internal address — and a single flattened
-   definition would silently rewrite one of them on every apply."
+   definition would silently rewrite one of them on every apply. An MCP
+   server's argv references are resolved once the override is in."
   [res tool]
-  (if-let [override (get-in res [:per-tool tool])]
-    (merge res (into {} (remove (comp nil? val)) override))
-    res))
+  (cond-> (if-let [override (get-in res [:per-tool tool])]
+            (merge res (into {} (remove (comp nil? val)) override))
+            res)
+    (= :mcps (:kind res)) (-> resolve-args resolve-url)))
 
 (defn for-tool-resources
   "Resources targeting `tool`, each already merged with its per-tool override."
@@ -52,9 +93,39 @@
   (mapcat (fn [[where m]] (issues-in where (resolve-env m))) places))
 
 (defn mcp-issues
-  "A server's unresolved env and header refs."
+  "A server's unresolved env, header and argv refs."
   [m]
-  (ref-issues [["env" (:env m)] ["headers" (:headers m)]]))
+  (concat (ref-issues [["env" (:env m)] ["headers" (:headers m)]]) (:arg-issues m) (:url-issues m)))
+
+(defn declared-names
+  "The env and header names a server declares, kept in the manifest beside
+   it. A name agentctl declared and the declaration has since dropped is
+   agentctl's to remove; a name it never declared was added by hand, and is
+   kept."
+  [m]
+  (let [names (fn [x] (not-empty (vec (sort (map u/key-str (keys x))))))]
+    (u/prune-nils {:env-names (names (:env m)) :header-names (names (:headers m))})))
+
+(def name-tracking-tools
+  "Tools whose server entries keep env vars and headers agentctl does not
+   declare, so the manifest records the names it did."
+  #{:claude :kimi :antigravity})
+
+(defn kept-values
+  "An entry's current env or header map (`k` is `:env-names` or
+   `:header-names`) without the names the manifest entry `old` says agentctl
+   declared and `m` no longer does, keyed by string: JSON reads a key back as
+   a keyword, and merged with a declared one the name would be written twice."
+  [cur old m k]
+  (let [now (set (get (declared-names m) k))
+        dropped (into #{} (remove now) (get old k))]
+    (into {} (keep (fn [[kk v]] (let [kk (u/key-str kk)] (when-not (dropped kk) [kk v])))) cur)))
+
+(defn mcp-secrets
+  "Every ref a server declares where a credential goes, by name: env, headers
+   and argv — what `holds-secret?` looks at."
+  [m]
+  (merge (:env m) (:headers m) (:arg-refs m) (when (:url-ref m) {"url" (:url-ref m)})))
 
 (defn provider-issues
   "A provider's unresolved refs: its key, unless `key?` is false (a key the
@@ -241,7 +312,7 @@
   (into {} (keep (fn [mid]
                    (let [m (get-in cfg [:mcps mid])]
                      (when (and m (project-scopes (:scope m)) (contains? (:tools m) tool))
-                       [mid m]))))
+                       [mid (-> m resolve-args resolve-url)]))))
         (sort (:mcp proj))))
 
 (defn project-scope-skip-ops

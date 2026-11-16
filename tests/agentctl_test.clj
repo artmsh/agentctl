@@ -637,7 +637,7 @@
     (is (= #{:kimi} (get-in cfg [:projects :p :for-tools])))))
 
 (deftest antigravity-speaks-its-own-mcp-dialect
-  (let [entry #'antigravity/mcp-entry
+  (let [entry (fn [m cur] (#'antigravity/mcp-entry m cur nil))
         {:keys [local remote off]}
         (:mcps (config/normalize {:mcps {:local "/bin/echo hi"
                                          :remote {:url "https://example.com/sse"
@@ -678,7 +678,7 @@
 ;; ---------------------------------------------------------------- kimi
 
 (deftest kimi-speaks-its-own-mcp-dialect
-  (let [entry #'kimi/mcp-entry
+  (let [entry (fn [m cur] (#'kimi/mcp-entry m cur nil))
         {:keys [local remote off]} (:mcps (config/normalize
                                            {:mcps {:local "/bin/echo hi"
                                                    :remote {:url "https://example.com/mcp"
@@ -1971,12 +1971,42 @@
       (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
              (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
 
+(deftest a-resolved-value-is-masked-whatever-its-field-is-called
+  (refs/forget!)
+  (try
+    (is (= "sk-test-resolvedvalue77" (refs/resolved-value (refs/parse "!cmd://echo sk-test-resolvedvalue77"))))
+    (let [o (plan/op {:tool :kimi :kind :mcps :id :docs :action :update :summary "x sk-test-resolvedvalue77"
+                      :diffs [{:key :docs
+                               ;; read back from JSON (keywords), merged with
+                               ;; the declaration (strings): one field twice
+                               :before {:env {:DOCS "old-plain-value-1" :MODE "fast"}}
+                               :after {:env {:DOCS "old-plain-value-1" "DOCS" "sk-test-resolvedvalue77"
+                                             :MODE "fast" "MODE" "fast"}
+                                       :x-docs "sk-test-resolvedvalue77"
+                                       :args ["--opt" "sk-test-resolvedvalue77"]}}]})
+          m (plan/mask-op o)
+          [{:keys [before after]}] (:diffs m)]
+      (testing "the resolved value is masked in every field and in the summary"
+        (is (= "sk-t…77" (get-in after ["env" "DOCS"])))
+        (is (= "sk-t…77" (get after "x-docs")))
+        (is (= ["--opt" "sk-t…77"] (get after "args")))
+        (is (= "x sk-t…77" (:summary m))))
+      (testing "the old value it replaces is masked, an unchanged plain one is not"
+        (is (= "old-…-1" (get-in before ["env" "DOCS"])))
+        (is (= "fast" (get-in before ["env" "MODE"]))))
+      (testing "the text plan masks what the op does"
+        (let [text (plan/render-plan [o] {:verbose true})]
+          (is (not (str/includes? text "sk-test-resolvedvalue77")))
+          (is (not (str/includes? text "old-plain-value-1"))))))
+    (finally (refs/forget!))))
+
 (deftest every-adapter-holds-back-what-an-unresolved-secret-would-leave-partial
   ;; a locked vault: every ref below stays unresolved, and `bw` never runs
   (let [ref "!bw://vendor/KEY"
         cfg (fn [tool]
               (config/normalize
                {:mcps {:docs {:command "/bin/echo" :env {"TOKEN" ref "MODE" "fast"} :tools [tool]}
+                       :cli {:command "/bin/echo" :args ["--mode" "fast" "--token" ref] :tools [tool]}
                        :web {:url "https://mcp.example.com/w" :headers {"x-key" ref} :tools [tool]}}
                 :extra-providers {:gw {:url "https://api.example.com/v1" :api "openai-completions"
                                        :key ref :models ["m1"] :tools [tool]}}}
@@ -1990,15 +2020,16 @@
     (reset! @#'refs/cache {})
     (with-redefs [refs/bw-state (delay :locked)
                   codex/mcp-list (fn [] {})]
-      (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs]]
-                              [:omp omp/mcp-ops [:docs]]
-                              [:antigravity antigravity/mcp-ops [:docs :web]]
-                              [:kimi kimi/mcp-ops [:docs :web]]
-                              [:codex codex/mcp-ops [:docs :web]]]
+      (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs :cli]]
+                              [:omp omp/mcp-ops [:docs :web :cli]]
+                              [:antigravity antigravity/mcp-ops [:docs :web :cli]]
+                              [:kimi kimi/mcp-ops [:docs :web :cli]]
+                              [:codex codex/mcp-ops [:docs :web :cli]]]
               id ids]
         (testing (str (name tool) " MCP server " (name id))
           (is (held? (ops (cfg tool) state/empty-state) id))))
-      (doseq [[tool ops] [[:pi pi/provider-ops] [:omp omp/provider-ops] [:kimi kimi/provider-ops]]]
+      (doseq [[tool ops] [[:pi pi/provider-ops] [:omp omp/provider-ops] [:kimi kimi/provider-ops]
+                          [:llm llm/provider-ops]]]
         (testing (str (name tool) " provider key")
           (is (held? (ops (cfg tool)) :gw)))))
     (reset! @#'refs/cache {})))

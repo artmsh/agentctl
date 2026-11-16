@@ -401,8 +401,9 @@ plan lists the keys that go:
 
 ## Unresolved secrets
 
-A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
-`:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
+A value in an MCP server's `:env` or `:headers`, an argument after a
+credential-looking flag in its argv (`--token !bw://docs/token`,
+`--api-key=$DOCS_KEY`), or a value in Claude's `:settings` `:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
 that is resolved when `apply!` runs. A settings `env` is where a project's
 `.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
 value:
@@ -415,14 +416,16 @@ The resolved value is what lands in `settings.json`, so the plan flags the op
 `⚠ secret value written into the project` (or into `~/.claude/settings.json`)
 and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
 same on both sides is marked `(changed)`. An old value that a change replaces
-or drops is masked too, even when the new value is a plain literal. A project's
+or drops is masked too, even when the new value is a plain literal. The same
+holds for every tool and every output — `-v`, `--json`, `apply!` and the GUI:
+a value that came from a reference is masked whatever its field is called. A project's
 `.claude/settings.json` is usually committed; `.claude/settings.local.json` is
 the private one.
 
 When a reference does not resolve — the vault is locked, the variable is unset,
 the Bitwarden field is empty or holds the text `null`, the variable, file or
 command yields nothing but whitespace, the reference is malformed — the MCP server, the
-provider, or Claude's settings `env` object holding it is not written at all, in
+provider (for `llm`, its key and every one of its models), or Claude's settings `env` object holding it is not written at all, in
 any scope and for every tool. Writing the rest of it would leave a server that is
 configured and cannot authenticate, and because the missing value would then be
 missing from the desired entry too, the next plan would report no drift. The plan
