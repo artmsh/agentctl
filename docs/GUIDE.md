@@ -128,7 +128,10 @@ too, for the same reason.
 
 A narrowed run (`-t`, `-k`, `-p`, `--only`, `--user`, or the working
 directory) forgets ownership only of what it removed itself, so nothing outside
-the selection is pruned or orphaned. `--user` still removes user-scope
+the selection is pruned or orphaned. It adopts what it selects as an unscoped
+run does: a placement already on disk as declared, such as a link made by hand,
+plans no change but is owned from then on, so dropping it from the config later
+removes it whatever flags that run uses. Nothing outside the selection is adopted. `--user` still removes user-scope
 resources dropped from the config; only `--only` is a single-entity change.
 
 `-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`

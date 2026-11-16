@@ -226,6 +226,25 @@
                    (and (= :skill-packs (:kind %)) (contains? packs (:id %))))
               ops))))
 
+(defn covers
+  "What a scoped run (`scoped?`) selects, as a predicate over `inventory`
+   tuples: the same `-t`/`-k`/`--only`/`-p`/`--user` rules the plan's own
+   filters apply to ops. A tuple's project is the `:project-id` it carries;
+   one without is user-wide. `sync-state!` adopts what this covers, because
+   a converged placement plans no op at all, so the filtered plan would
+   never show it as this run's."
+  [cfg {:keys [tools only projects user] :as opts}]
+  (let [tools (not-empty (set tools))
+        pids (when (seq projects) (set (mapcat #(project-ids cfg %) projects)))]
+    (fn [[t k id data]]
+      (let [pid (:project-id data)]
+        (boolean
+         (and (or (nil? tools) (contains? tools t))
+              (kind-selected? opts k)
+              (or (empty? only) (some #(only-match? % {:kind k :id id}) only))
+              (or (nil? pids) (contains? pids pid))
+              (not (and user pid))))))))
+
 (defn- under?
   "Is `child` `parent` itself or somewhere beneath it? Compared on whole path
    segments — ~/projects/agent is not a parent of ~/projects/agentctl."
@@ -716,10 +735,18 @@
    this run never wrote, and the next unfiltered run would then fail to find
    the real element to replace, orphaning it in the array forever — so there,
    only ids actually in `done` refresh, everything else keeps what the
-   manifest already had."
+   manifest already had.
+
+   `covered?` (`covers`) widens `done` to what the scoped run selected: a
+   placement already on disk plans no op, so without it only an unfiltered
+   run would ever adopt one. A tuple it covers is treated as an unfiltered
+   run treats every tuple — the run planned it, and planned nothing because
+   disk already matches. Nothing outside it is adopted, refreshed or
+   forgotten."
   ([st cfg] (sync-state! st cfg #{} nil))
   ([st cfg failed] (sync-state! st cfg failed nil))
-  ([st cfg failed done]
+  ([st cfg failed done] (sync-state! st cfg failed done (constantly false)))
+  ([st cfg failed done covered?]
    (let [cfg (if (:entity-dsl? cfg)
                (assoc cfg :skills (:skills (config/normalize (:entity-raw cfg) (:source cfg)))) cfg)
          owned (remove (fn [[t k id]] (contains? failed [t k id])) (inventory cfg))
@@ -734,7 +761,7 @@
          unsourced (set (for [[id s] (sources/all-skills cfg) :when (nil? (:source s))] id))
          wrote? (fn [t k id data]
                   (or (contains? done [t k id])
-                      (and (nil? done)
+                      (and (or (nil? done) (covered? [t k id data]))
                            (not (and (= :skills k) (unsourced id))))))
          data-for (fn [t k id data]
                     (cond

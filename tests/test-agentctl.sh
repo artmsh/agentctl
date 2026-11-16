@@ -1853,7 +1853,50 @@ for pair in "dsl projects entity-DSL" "old trust old-format"; do
     || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
 done
 
-echo "41. an unscoped run owns no skill whose pack failed to clone"
+echo "41. a scoped run adopts the placements it selects that are already on disk, and nothing else"
+(
+  # adopt NAME WANT SKIP FLAGS...: links already made by hand for the user-wide
+  # wrap-up (pi) and proj's review (claude); a run scoped by FLAGS owns the
+  # ones named in WANT and none in SKIP. `other` (pi, not on disk) sends a run
+  # that selects it down the path that applies changes.
+  adopt() {
+    local name=$1 want=$2 skip=$3; shift 3
+    H=$(fresh_home "adopt-$name"); export AGENTCTL_HOME="$H"
+    K="$H/projects/shared/skills"; P="$H/projects/proj"
+    mkskill "$K/wrap-up" wrap-up; mkskill "$K/review" review; mkskill "$K/other" other
+    mkdir -p "$P/.claude/skills" "$H/.pi/agent/skills"; git -C "$P" init -q
+    ln -s "$K/wrap-up" "$H/.pi/agent/skills/wrap-up"
+    ln -s "$K/review" "$P/.claude/skills/review"
+    cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}
+          [shared "other"] {:in :all :acli [:pi]}
+          [shared "review"] {:in "projects/proj" :acli [:claude]}}}
+EDN
+    run apply! -f "$H/agents.edn" "$@" -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$name: apply! failed"; }
+    S="$H/.config/agentctl/state.edn"
+    for n in $want; do
+      grep -Eq "\[:[a-z]+ :skills \"([^\"]*/)?$n\"\]" "$S" 2>/dev/null || { cat "$S"; fail "$name: $n on disk is not adopted"; }
+    done
+    for n in $skip; do
+      ! grep -Eq "\[:[a-z]+ :skills \"([^\"]*/)?$n\"\]" "$S" 2>/dev/null || { cat "$S"; fail "$name: $n is adopted outside the selection"; }
+    done
+  }
+  adopt tool "wrap-up" "review" -t pi
+  # the scoped run's adoption is what lets a later removal take the link away
+  sed -i.bak 's/\[shared "wrap-up"\] {:in :all :acli \[:pi\]}/[shared "wrap-up"] {:in :all :acli []}/' "$H/agents.edn"
+  (run apply -f "$H/agents.edn" -t pi || true) > "$H/plan.txt" 2>&1
+  grep -q -- "- skill \[agents: pi\] ~/projects/shared/skills/wrap-up" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a link adopted under -t is not removed with its placement"; }
+  adopt other-tool "" "wrap-up review" -t codex
+  adopt kind "wrap-up review" "" -k skills
+  adopt other-kind "" "wrap-up review" -k mcps
+  adopt only "review" "wrap-up" --only skills/review
+  adopt project "review" "wrap-up" -p projects/proj
+  adopt user "wrap-up" "review" --user
+)
+
+echo "42. an unscoped run owns no skill whose pack failed to clone"
 (
   H=$(fresh_home unsourced); export AGENTCTL_HOME="$H"
   cat > "$H/agents.edn" <<EDN
