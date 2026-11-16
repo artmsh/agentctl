@@ -137,10 +137,14 @@ config's format plans: an entity-DSL config files a project's trust,
 permissions and settings under `trust`, `permissions` and `settings`, so
 `-k projects` there exits 1; an old-format config plans all three as
 `projects`, so `-k trust` there exits 1. The message lists the kinds the
-format has, `--help` marks `projects` as legacy, and the GUI refuses the same
-kinds for the buffer it plans. An `--only` or `-p` that nothing declares or
-owns is reported with `⚠` (under `--json`, in `warnings`), because a run
-narrowed to a typo plans nothing and would otherwise read as converged.
+format has, `--help` marks `projects` as legacy, `--host` runs are held to the
+same rule, and the GUI refuses the same kinds for the buffer it plans. A
+config with nothing that decides the format yet — `{}`, or only `:statusline`,
+`:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
+and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
+because a run narrowed to a typo plans nothing and would otherwise read as
+converged.
 
 ## Claude session retention
 
@@ -199,7 +203,11 @@ what you are editing rather than what is on disk. Edits go through the server,
 which rewrites only the node you touched: comments, blank lines and `$name`
 references survive, and a `:#def` binding is shown as the reference it is rather
 than the value it expands to. The tool chips in the header and the `verbose` /
-`show noop` toggles are `--tool`, `-v` and `--show-noop`.
+`show noop` toggles are `--tool`, `-v` and `--show-noop`, and `-t` given to
+`gui` picks the chips it starts with. `-k` and `-p` given to `gui` narrow
+every plan the page shows, which says so under the findings; the page has no
+control for them, so they hold until the server stops. A `-p` that selects no
+declared project is a warning there, as it is in the CLI.
 
 **Apply** is the only thing that writes. It asks for confirmation, then saves
 the buffer to `agents.edn` (backed up first) and converges, exactly as
@@ -709,14 +717,18 @@ is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and und
 `--json` as ops with `"warn": true` — and still exits 0, since nothing would
 change.
 
-Under `--json`, `apply` (and `validate`) print one JSON document on stdout:
-the plan's `ops`, the selector `warnings`, the config's own warnings and this
-machine's (the status line's) in `findings` (`level`, `where`, `message`, as
-`validate --json` prints them) and the `summary`. An error is `{"error": …}`
-with exit 1 instead — a config with errors carries its `findings` too, an
-unknown option or a missing file only the message. `apply! --json` prints the
-plan document the same way, then the confirmation prompt and the result of
-the run as text.
+Under `--json`, `apply`, `apply!` and `validate` print one JSON document on
+stdout: the plan's `ops`, the selector `warnings`, the config's own warnings
+and this machine's (the status line's) in `findings` (`level`, `where`,
+`message`, as `validate --json` prints them), the number of changes that write
+a resolved secret in `secrets`, and the `summary`. `apply!` adds `applied` —
+`done` and `failed`, each op with its `tool`, `kind`, `id` and `action`, a
+failed one with its `error` — and `backups`. A confirmation prompt cannot share
+stdout with that document, so `apply! --json` needs `-y`. An error is
+`{"error": …}` with exit 1 instead — a config with errors carries its
+`findings` too; an unknown command or option, or a config file missing,
+unreadable or not a file, only the message. Without `--json` the same errors
+are one `error: …` line.
 
 A skill whose source is not on disk, such as a `:per-tool :path` into a
 project copy that has since gone, is not linked: the plan says `source

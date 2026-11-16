@@ -1214,7 +1214,8 @@ fk_code 1 "$FK/dead.json" apply -f "$FK/old.edn" -k trust --json
 python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.argv[1]))["error"] else 1)' "$FK/dead.json" \
   || { cat "$FK/dead.json"; fail "-k trust --json lost the refusal"; }
 # --help marks the old format's own kind
-run --help | grep -q 'legacy (old-format configs only, in place of trust): projects$' \
+run --help | tr -s ' \n' ' ' \
+  | grep -q "legacy (old-format configs only, in place of trust, and of a project's permissions and settings): projects " \
   || { run --help; fail "--help does not mark projects as legacy"; }
 # The steps below each get a home of their own: what the steps above own would
 # otherwise turn into prunes and change the exit codes asserted here.
@@ -1655,5 +1656,201 @@ EDN
   grep -q '! .*source missing: ~/projects/lib/.agents/skills/wrap-up' "$H/validate.txt" \
     || { cat "$H/validate.txt"; fail "validate does not report the missing source"; }
 )
+
+echo "37. apply! --json needs -y, and prints one document with what it applied"
+AJ="$SB/apply-json"
+mkdir -p "$AJ"
+aj() { (cd "$AJ" && AGENTCTL_HOME="$AJ" run "$@"); }
+# aj_json <want-exit> <out-file> <args…>: exits as wanted, stdout is one JSON document
+aj_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  aj "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$AJ/ok.edn" <<'EDN'
+{:executors {:pi {:model "m1"}}}
+EDN
+# a prompt cannot share stdout with JSON: without -y it is refused before
+# anything is planned — on a host too, before it is looked up
+aj_json 1 "$AJ/noyes.json" apply! -f "$AJ/ok.edn" -t pi
+aj_json 1 "$AJ/noyes-host.json" apply! -f "$AJ/ok.edn" --host nowhere
+for f in noyes noyes-host; do
+  python3 -c 'import json,sys; sys.exit(0 if "-y" in json.load(open(sys.argv[1]))["error"] else 1)' "$AJ/$f.json" \
+    || { cat "$AJ/$f.json"; fail "apply! --json without -y did not ask for -y"; }
+done
+[ -e "$AJ/.pi/agent/settings.json" ] && fail "apply! --json without -y wrote settings"
+aj_json 0 "$AJ/apply.json" apply! -f "$AJ/ok.edn" -t pi -y
+python3 - "$AJ/apply.json" <<'PY' || { cat "$AJ/apply.json"; fail "apply! --json did not report what it applied"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(o["action"] == "create" for o in d["ops"]), d
+assert d["applied"]["failed"] == [], d
+assert any(o["tool"] == "pi" and o["kind"] == "settings" for o in d["applied"]["done"]), d
+assert d["backups"] and d["summary"], d
+assert d["findings"] == [] and d["warnings"] == [], d
+PY
+grep -q 'm1' "$AJ/.pi/agent/settings.json" || fail "apply! --json -y did not converge"
+aj_json 0 "$AJ/again.json" apply! -f "$AJ/ok.edn" -t pi -y
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["applied"] == {"done": [], "failed": []} else 1)' "$AJ/again.json" \
+  || { cat "$AJ/again.json"; fail "a converged apply! --json reported something applied"; }
+# a failed op is in the document with its error, and the run exits 1
+cat > "$AJ/fail.edn" <<EDN
+{:executors {:pi {:model "m1"}}
+ :skill-packs {:gone {:uri "file://$AJ/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}}}
+EDN
+aj_json 1 "$AJ/fail.json" apply! -f "$AJ/fail.edn" -t pi -y
+python3 - "$AJ/fail.json" <<'PY' || { cat "$AJ/fail.json"; fail "apply! --json lost a failed op"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["kind"] == "skill-packs" and "git clone exited" in f["error"] for f in d["applied"]["failed"]), d
+PY
+# the text output is unchanged
+cat > "$AJ/ok2.edn" <<'EDN'
+{:executors {:pi {:model "m2"}}}
+EDN
+aj apply! -f "$AJ/ok2.edn" -t pi -y > "$AJ/text.txt"
+grep -q '^applied 1 change(s)$' "$AJ/text.txt" && grep -q '^backups: ' "$AJ/text.txt" \
+  || { cat "$AJ/text.txt"; fail "apply! text output changed"; }
+
+echo "38. every failure is one error line, or one JSON document under --json"
+EF="$SB/errors"
+mkdir -p "$EF/dir.edn"
+printf '{}\n' > "$EF/locked.edn"
+chmod 000 "$EF/locked.edn"
+ef() { (cd "$EF" && AGENTCTL_HOME="$EF" run "$@"); }
+# ef_fails <out-stem> <expect-in-message> <args…>: exit 1 in both modes, a
+# one-line "error: …" in text, {"error": …} under --json, and no stack trace
+ef_fails() {
+  local stem=$1 want=$2; shift 2
+  set +e
+  ef "$@" > "$EF/$stem.txt" 2> "$EF/$stem.err"; local code=$?
+  ef "$@" --json > "$EF/$stem.json" 2> "$EF/$stem.jerr"; local jcode=$?
+  set -e
+  [ "$code" = 1 ] && [ "$jcode" = 1 ] || { cat "$EF/$stem".*; fail "$* exited $code / $jcode under --json, wanted 1"; }
+  [ "$(wc -l < "$EF/$stem.txt")" -eq 1 ] && grep -q "^error: .*$want" "$EF/$stem.txt" \
+    || { cat "$EF/$stem.txt" "$EF/$stem.err"; fail "$* did not fail with one error line"; }
+  python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["error"] else 1)' "$EF/$stem.json" "$want" \
+    || { cat "$EF/$stem.json" "$EF/$stem.jerr"; fail "$* --json did not fail with a JSON error"; }
+  if grep -q 'Error ---\|Location:' "$EF/$stem.err" "$EF/$stem.jerr"; then
+    cat "$EF/$stem.err" "$EF/$stem.jerr"; fail "$* printed a stack trace"
+  fi
+}
+ef_fails dir 'Is a directory' apply -f "$EF/dir.edn"
+ef_fails dir-validate 'Is a directory' validate -f "$EF/dir.edn"
+# root reads a file whatever its mode; the check means nothing there
+if [ ! -r "$EF/locked.edn" ]; then
+  ef_fails locked 'Permission denied' apply -f "$EF/locked.edn"
+fi
+chmod 600 "$EF/locked.edn"
+# a mistyped command, under --json, is an error and not the usage text
+set +e
+ef bogus --json > "$EF/bogus.json"; code=$?
+set -e
+[ "$code" = 1 ] || { cat "$EF/bogus.json"; fail "bogus --json exited $code"; }
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) == {"error": "unknown command: bogus"} else 1)' "$EF/bogus.json" \
+  || { cat "$EF/bogus.json"; fail "bogus --json did not print a JSON error"; }
+set +e
+ef bogus > "$EF/bogus.txt"; code=$?
+set -e
+[ "$code" = 1 ] && grep -q '^unknown command: bogus' "$EF/bogus.txt" && grep -q '^USAGE' "$EF/bogus.txt" \
+  || { cat "$EF/bogus.txt"; fail "bogus without --json stopped printing the usage"; }
+
+echo "39. gui -k and -p are the page's starting filter, as -t is"
+GD="$SB/gui-filter"
+mkdir -p "$GD/sub/web"
+cat > "$GD/agents.edn" <<'EDN'
+{:mcps [{:id :inproj :cmd "/bin/echo" :in "sub/web" :acli [:claude]}
+        {:id :global :cmd "/bin/echo" :in :all :acli [:claude]}]
+ :settings [{:model "opus" :acli [:claude] :in :all}]}
+EDN
+(cd "$GD" && AGENTCTL_HOME="$GD" exec "$ROOT/agentctl" gui -f "$GD/agents.edn" -k mcps -p sub/web \
+   --port 0 --no-open) > "$GD/gui.log" 2>&1 &
+GD_PID=$!
+trap 'kill ${GUI_PID:-} ${GD_PID:-} 2>/dev/null || true; rm -rf "$SB"' EXIT
+for _ in $(seq 1 100); do grep -q 'http://127.0.0.1' "$GD/gui.log" && break; sleep 0.1; done
+GD_URL=$(grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$GD/gui.log" | head -1)
+[ -n "$GD_URL" ] || { cat "$GD/gui.log"; fail "gui -k -p did not start"; }
+gd_post() { # gd_post <extra-json> <out>: plan the file's text with extra request fields
+  python3 -c 'import json,sys; d=json.loads(sys.argv[2]); d["text"]=open(sys.argv[1]).read(); print(json.dumps(d))' \
+    "$GD/agents.edn" "$1" > "$GD/req.json"
+  curl -sS -X POST -H "X-Agentctl-Token: ${GD_URL##*t=}" -H 'content-type: application/json' \
+    --data-binary "@$GD/req.json" "${GD_URL%%/\?t=*}/api/plan" > "$2"
+}
+curl -sS -H "X-Agentctl-Token: ${GD_URL##*t=}" "${GD_URL%%/\?t=*}/api/config" > "$GD/config.json"
+python3 - "$GD/config.json" <<'PY' || { cat "$GD/config.json"; fail "gui did not hand the page its -k and -p"; }
+import json, sys
+o = json.load(open(sys.argv[1]))["opts"]
+assert o["kinds"] == ["mcps"] and o["projects"] == ["sub/web"], o
+PY
+# a request that says nothing about kinds or projects gets the command line's
+gd_post '{"tools": ["claude"]}' "$GD/narrow.json"
+python3 - "$GD/narrow.json" <<'PY' || { cat "$GD/narrow.json"; fail "gui ignored -k / -p"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"], d
+assert "inproj" in d["plan"], d["plan"]
+assert "global" not in d["plan"] and "opus" not in d["plan"], d["plan"]
+PY
+# one that does say overrides them, an empty list meaning none
+gd_post '{"tools": ["claude"], "kinds": [], "projects": []}' "$GD/whole.json"
+python3 - "$GD/whole.json" <<'PY' || { cat "$GD/whole.json"; fail "the page could not widen the gui's filter"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"] and "inproj" in d["plan"] and "global" in d["plan"] and "opus" in d["plan"], d["plan"]
+PY
+# a -p that selects nothing is said, as the cli says it
+gd_post '{"tools": ["claude"], "projects": ["sub/nope"]}' "$GD/nope.json"
+python3 - "$GD/nope.json" <<'PY' || { cat "$GD/nope.json"; fail "gui -p naming nothing was not reported"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and "sub/nope" in f["where"] for f in d["findings"]), d["findings"]
+PY
+kill "$GD_PID" 2>/dev/null || true
+
+echo "40. a config that decides no format claims none; --host holds -k to the format"
+UF="$SB/undecided"
+mkdir -p "$UF/proj"
+uf() { (cd "$UF" && AGENTCTL_HOME="$UF" run "$@"); }
+printf '{}\n' > "$UF/empty.edn"
+cat > "$UF/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+# -k trust selects nothing in either, and is told so — as a warning, since the
+# next section added may decide the format either way
+for f in empty statusline; do
+  set +e
+  uf apply -f "$UF/$f.edn" --all -k trust > "$UF/$f.txt" 2>&1; code=$?
+  uf apply -f "$UF/$f.edn" --all -k trust --json > "$UF/$f.json"; jcode=$?
+  set -e
+  [ "$code" = 0 ] && [ "$jcode" = 0 ] || { cat "$UF/$f.txt" "$UF/$f.json"; fail "-k trust on $f.edn exited $code / $jcode"; }
+  grep -q '⚠ -k trust — selects nothing in this config' "$UF/$f.txt" \
+    || { cat "$UF/$f.txt"; fail "-k trust on $f.edn was not reported"; }
+  python3 -c 'import json,sys; sys.exit(0 if any(w.startswith("-k trust — selects nothing in this config") for w in json.load(open(sys.argv[1]))["warnings"]) else 1)' "$UF/$f.json" \
+    || { cat "$UF/$f.json"; fail "-k trust --json on $f.edn lost the warning"; }
+  if grep -q 'old-format\|entity-DSL' "$UF/$f.txt" "$UF/$f.json"; then
+    cat "$UF/$f.txt" "$UF/$f.json"; fail "$f.edn was said to be in a format it does not have"
+  fi
+done
+# a host is planned under the same config: a kind its format never plans is
+# refused there too, before the host is looked up
+cat > "$UF/dsl.edn" <<EDN
+{:trust [{:in "$UF/proj" :acli [:codex]}]}
+EDN
+cat > "$UF/old.edn" <<EDN
+{:projects {:p {:path "$UF/proj" :trusted true :executors #{:codex}}}}
+EDN
+for pair in "dsl projects entity-DSL" "old trust old-format"; do
+  set -- $pair
+  set +e
+  uf apply -f "$UF/$1.edn" --host nowhere -k "$2" > "$UF/host-$1.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] && grep -q "^error: -k $2: an $3 config plans nothing as $2" "$UF/host-$1.txt" \
+    || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
+done
 
 echo "all agentctl e2e checks passed"

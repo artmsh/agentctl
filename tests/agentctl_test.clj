@@ -1591,16 +1591,24 @@
                    (drop-while #(not (str/includes? % "--kind KIND")))
                    rest
                    (take-while #(str/starts-with? % (apply str (repeat 23 " ")))))
-        {legacy true current false} (group-by #(str/includes? % "legacy") lines)
+        [current legacy] (split-with #(not (str/includes? % "legacy")) lines)
         words #(set (mapcat (fn [l] (str/split (str/trim l) #"\s+")) %))]
     (testing "--help names every kind: the DSL's, then the old format's own, marked"
       (is (= (set (map name (core/kinds-for {:entity-dsl? true}))) (words current)))
-      (is (= 1 (count legacy)))
       (is (= #{"projects"} (set (map name (remove (set (core/kinds-for {:entity-dsl? true})) core/kinds)))))
-      (is (str/ends-with? (first legacy) "in place of trust): projects"))))
+      (is (= (str "legacy (old-format configs only, in place of trust, and of a project's"
+                  " permissions and settings): projects")
+             (str/join " " (map str/trim legacy))))))
   (is (= {:only ["skills/review" "mcps/search"] :user true}
          (select-keys (main/parse-args ["apply" "--only" "skills/review" "--only" "mcps/search" "--user"])
                       [:only :user]))))
+
+(deftest gui-command-line-kinds-and-projects-hold-unless-a-request-names-them
+  (let [base (main/parse-args ["gui" "-k" "mcps" "-p" "sub/web"])
+        sel #(select-keys (gui/opts-from-json % base) [:kinds :projects])]
+    (is (= {:kinds #{:mcps} :projects #{:sub/web}} (sel {:tools ["claude"]})))
+    (is (= {:kinds #{} :projects #{}} (sel {:kinds [] :projects []})) "an empty list means none")
+    (is (= {:kinds #{:skills} :projects #{:sub/web}} (sel {:kinds ["skills"]})))))
 
 (deftest each-config-format-has-its-own-kinds
   ;; the DSL refiles every :projects op under :trust/:permissions/:settings, and
@@ -1652,6 +1660,39 @@
         (is (str/starts-with? (:error res) "kind projects: an entity-DSL config")))
       (is (false? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:trust}}))))
       (is (true? (:ok (gui/plan-for-text old-text "test" {:tools #{:codex} :kinds #{:projects}})))))))
+
+(deftest a-config-that-decides-no-format-claims-none
+  ;; `{}` and a file of format-neutral keys are normalized the old way, but
+  ;; they are in neither format: nothing said about them may name one
+  (testing "what decides the format"
+    (doseq [raw [{} {:statusline {:defaults {:segments [:model]}}}
+                 {:extensions {[:uri "file:///tmp/ext"] {:acli [:pi]}}}
+                 {:hosts {:win {:ssh "example.com" :os :windows}}}
+                 {:projects {}} {:bogus-key {:a 1}}]]
+      (is (nil? (config/config-format raw)) (pr-str raw)))
+    ;; a section vector exists only in the DSL, empty or not, and the config
+    ;; is normalized as one: the format follows how it is read
+    (is (= :entity-dsl (config/config-format {:mcps []})))
+    (is (= :legacy (config/config-format {:mcps {:x {:cmd "a"}}})))
+    (is (= :legacy (config/config-format {:statusline {} :executors {:pi {:model "m"}}})))
+    (is (= :entity-dsl (config/config-format {:mcps [{:id :x :cmd "a" :in :all}]})))
+    (is (nil? (:format (config/normalize {:statusline {:defaults {:segments [:model]}}} "test"))))
+    (is (= :legacy (:format (config/normalize {:projects {:p {:path "/tmp/x"}}} "test")))))
+  (testing "a kind it plans nothing as is a warning that names no format"
+    (doseq [raw [{} {:statusline {:defaults {:segments [:model]}}}]
+            :let [cfg (config/normalize raw "test")
+                  [[flag v msg level] :as dead] (core/dead-selectors cfg {:kinds #{:trust :projects}})]]
+      (is (= 1 (count dead)))
+      (is (= ["-k" "trust" :warn] [flag v level]))
+      (is (str/starts-with? msg "selects nothing in this config"))
+      (is (not (re-find #"old-format|entity-DSL" msg)))))
+  (testing "the gui plans it, and reports the kind"
+    (let [res (gui/plan-for-text "" "test" {:tools #{:claude} :kinds #{:trust}})]
+      (is (true? (:ok res)))
+      (is (some #(and (= "warn" (:level %)) (= "kind trust" (:where %))
+                      (str/starts-with? (:message %) "selects nothing"))
+                (:findings res)))
+      (is (not (re-find #"old-format|entity-DSL" (pr-str res)))))))
 
 (deftest only-and-user-select-across-scopes-without-the-rest
   (let [root (temp-dir) repo (str root "/repo") pack (str root "/pack")]

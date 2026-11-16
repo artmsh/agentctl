@@ -669,10 +669,13 @@
       :unsupported (vec (sort (remove (into host-settings host-sections) (keys decl))))
       :cfg (normalize-resources (or body {}) source)})))
 
+(declare config-format)
+
 (defn normalize [raw path & [load-findings]]
   ;; read off the file as written: extensions are placed for a whole machine,
   ;; so they take no part in the entity lowering below
   (assoc (normalize-resources raw path load-findings)
+         :format (config-format raw)
          :extensions (norm-extensions (:extensions raw))
          ;; one file for the whole machine, outside the entity model too
          :statusline (statusline/normalize (:statusline raw))
@@ -760,6 +763,27 @@
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
     :settings :permissions :trust :hooks :plugins :extensions :hosts :statusline :#def})
+
+(def format-neutral-keys
+  "Top-level keys that say nothing about which format a file is in.
+   `normalize` reads `:extensions`, `:statusline` and `:hosts` off the file as
+   written, outside the format split; `:#def` is expanded before it; nothing
+   reads a top-level `:defaults`."
+  #{:extensions :statusline :hosts :#def :defaults})
+
+(defn config-format
+  "`:entity-dsl`, `:legacy`, or nil when nothing in `raw` decides between
+   them: `{}`, or a file of format-neutral keys and empty sections. Such a
+   file is normalized the old way, but it is in neither format yet, and
+   nothing said about it may claim one. A key agentctl does not know (a typo)
+   decides nothing either."
+  [raw]
+  (cond
+    (scope/dsl? raw) :entity-dsl
+    (some (fn [[k v]] (and (known-top-keys k) (not (format-neutral-keys k))
+                           (some? v) (not (and (coll? v) (empty? v)))))
+          raw)
+    :legacy))
 
 (defn- host-findings
   "A host's `:ssh` goes on an ssh command line and its name into a file name, so
