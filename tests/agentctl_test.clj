@@ -4123,14 +4123,18 @@
              [(str "F\tcodex-config\t" (e "/h/.codex/config.toml") "\t" (e "model = \"x\"\n"))
               (str "F\tempty\t" (e "/h/e"))
               (str "F\tnone\t" (e "/h/n") "\t-")
-              (str "F\tlinked\t" (e "/h/l") "\t@") "OK"])]
+              (str "F\tlinked\t" (e "/h/l") "\t@")
+              (str "F\tthrough\t" (e "/h/t") "\t@" (e "x = 1\n")) "OK"])]
     (is (= "model = \"x\"\n" (String. ^bytes (get-in inv [:host-files :codex-config :bytes]) "UTF-8")))
     (is (= "/h/.codex/config.toml" (get-in inv [:host-files :codex-config :path])))
     (testing "an empty file is not an absent one"
       (is (= 0 (count (get-in inv [:host-files :empty :bytes])))))
     (is (nil? (get-in inv [:host-files :none :bytes])))
     (testing "a symlink is reported, its content not read"
-      (is (= {:path "/h/l" :bytes nil :link? true} (get-in inv [:host-files :linked])))))
+      (is (= {:path "/h/l" :bytes nil :link? true} (get-in inv [:host-files :linked])))
+      (testing "and what it points at, read to plan with"
+        (is (get-in inv [:host-files :through :link?]))
+        (is (= "x = 1\n" (String. ^bytes (get-in inv [:host-files :through :bytes]) "UTF-8"))))))
   (let [script (atom nil)
         ascii? #(every? (fn [c] (< (int c) 128)) %)]
     (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]

@@ -179,7 +179,9 @@ Codex keeps its TUI settings in nested `[tui.*]` tables of
 `~/.codex/config.toml`, next to state it writes for itself. Each declared
 setting below is written key by key into its own table, so that state survives.
 A `config.toml` that is a symlink, into a dotfiles checkout say, is left alone:
-agentctl does not write through it, and the plan says so in one warning.
+agentctl does not write through it. The plan says so in one warning that lists
+each change withheld, and counts them as pending: `apply` exits 2 and `apply!` 1
+until the link is replaced or the declaration matches the file.
 
 A model switch two keys away: bind the presets browser and put `/model` in slot 0.
 
@@ -1006,7 +1008,7 @@ staged next to the file and renamed over it, so an interrupted write leaves the 
 file whole. As locally, what agentctl wrote there is recorded in the host's state,
 and a setting dropped from the host's declaration is removed from the host; keys it
 never wrote stay. A `config.toml` that is a symlink, dangling or not, is not
-written through: the plan warns once and changes nothing, on a host as locally.
+written through: its changes are withheld and listed, on a host as locally.
 Other tools' settings are reported, not written.
 
 Locally awl reads its skills out of `agents.edn`, but a host has none, so there

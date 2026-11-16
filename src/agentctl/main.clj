@@ -269,12 +269,12 @@
     (cond
       (not mutate?)
       (do (when (:json opts) (print-json doc))
-          (System/exit (if (seq changes) 2 0)))
+          (System/exit (if (or (seq changes) (plan/withheld? ops)) 2 0)))
 
       (empty? changes)
       (do (state/save-host! (:id host) (hosts/sync-host-state st planned [] []))
           (when (:json opts) (print-json (assoc doc :applied (applied->data [] []))))
-          (System/exit 0))
+          (System/exit (if (plan/withheld? ops) 1 0)))
 
       :else
       (do
@@ -291,7 +291,7 @@
               (doseq [f failed]
                 (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
               (println (str "backups on host: " backups))))
-          (System/exit (if (seq failed) 1 0)))))))
+          (System/exit (if (or (seq failed) (plan/withheld? ops)) 1 0)))))))
 
 (defn cmd-apply [opts mutate?]
   (let [cfg (load! opts)
@@ -346,7 +346,7 @@
       (cond
         (not mutate?)
         (do (when (:json opts) (print-json doc))
-            (System/exit (if (or (seq changes) (seq unresolved)) 2 0)))
+            (System/exit (if (or (seq changes) (seq unresolved) (plan/withheld? ops)) 2 0)))
 
         (empty? changes)
         (do (state/save! (core/sync-state! st cfg (set (mapcat core/op-keys unresolved))
@@ -356,7 +356,7 @@
             (if (:json opts)
               (print-json (assoc doc :applied (applied->data [] [])))
               (report-unresolved! unresolved))
-            (System/exit (if (seq unresolved) 1 0)))
+            (System/exit (if (or (seq unresolved) (plan/withheld? ops)) 1 0)))
 
         :else
         (do
@@ -382,7 +382,7 @@
                   (println "  ✗" (name (:tool f)) (name (:kind f)) (u/kw->str (:id f)) "—" (:error f)))
                 (report-unresolved! unresolved)
                 (println (str "backups: " (u/tilde (u/backup-dir))))))
-            (System/exit (if (or (seq failed) (seq unresolved)) 1 0))))))))
+            (System/exit (if (or (seq failed) (seq unresolved) (plan/withheld? ops)) 1 0))))))))
 
 (defn cmd-validate [opts]
   (let [cfg (load! opts)

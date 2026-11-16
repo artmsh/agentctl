@@ -547,10 +547,18 @@
    that did not converge, so it is counted apart rather than as unchanged."
   [ops]
   (let [held (count (filter :unresolved ops))
-        f (frequencies (map :action (remove :unresolved ops)))]
+        withheld (reduce + 0 (keep :withheld ops))
+        f (frequencies (map :action (remove #(or (:unresolved %) (:withheld %)) ops)))]
     (str (format "%d to add, %d to change, %d to remove, %d unchanged"
                  (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))
-         (when (pos? held) (format ", %d unresolved" held)))))
+         (when (pos? held) (format ", %d unresolved" held))
+         (when (pos? withheld) (format ", %d withheld" withheld)))))
+
+(defn withheld?
+  "Does the plan hold back changes it could not make (`:withheld`)? It has
+   not converged, whatever else it does."
+  [ops]
+  (boolean (some :withheld ops)))
 
 (defn op-counts
   "The numbers behind the GUI's pills, counted over ops the way `summary-line`

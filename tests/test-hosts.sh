@@ -498,21 +498,24 @@ grep -q 'personality' "$GC" && fail "the last setting kept: $(cat "$GC")"
 grep -q 'default_permissions\|personality' "$SB/.config/agentctl/hosts/box3.edn" && fail "pruned settings still owned"
 expect 0 apply -f "$SB/set4.edn" --host box3
 
-echo "31. a host config.toml that is a symlink is not written through: one warning instead"
+echo "31. a host config.toml that is a symlink is not written through; what it withholds stays pending"
 mkdir -p "$G/dotfiles"; mv "$GC" "$G/dotfiles/config.toml"; ln -s "$G/dotfiles/config.toml" "$GC"
 cp "$G/dotfiles/config.toml" "$SB/gl.before"
-expect 0 apply $S
+expect 2 apply $S
 grep -q 'is a symlink' "$SB/out" || fail "a linked host config.toml not reported: $(cat "$SB/out")"
-expect 0 apply! $S -y
+grep -q 'withheld: .*default_permissions' "$SB/out" || fail "the withheld changes are not listed: $(cat "$SB/out")"
+grep -q 'withheld$\|[0-9] withheld' "$SB/out" || fail "the summary does not count them: $(cat "$SB/out")"
+expect 1 apply! $S -y
 cmp -s "$G/dotfiles/config.toml" "$SB/gl.before" || fail "written through the host's config.toml link"
 [ -L "$GC" ] || fail "the host's config.toml link was replaced"
 rm "$GC"; mv "$G/dotfiles/config.toml" "$GC"
 
 echo "    nor is a dangling one: the same warning, on every run"
 mv "$GC" "$SB/gc.keep"; ln -s "$G/nowhere/config.toml" "$GC"
-expect 0 apply $S
+expect 2 apply $S
 grep -q 'is a symlink' "$SB/out" || fail "a dangling host config.toml link not reported: $(cat "$SB/out")"
-expect 0 apply! $S -y
+grep -q 'withheld: ' "$SB/out" || fail "the withheld changes are not listed: $(cat "$SB/out")"
+expect 1 apply! $S -y
 grep -q 'appeared on the host' "$SB/out" && fail "a dangling link refused as a new file"
 [ -L "$GC" ] && [ ! -e "$G/nowhere" ] || fail "written through a dangling link"
 rm "$GC"; mv "$SB/gc.keep" "$GC"

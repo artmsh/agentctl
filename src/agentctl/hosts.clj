@@ -317,7 +317,7 @@
         pending (set (for [o place-ops :when (plan/mutating? o)] [(:tool o) (:id o)]))
         remote-config (get-in inv [:host-files :codex-config])
         linked? (:link? remote-config)
-        local-config (when (and settings? ((:tools inv) :codex) (not linked?)) (local-copy remote-config))]
+        local-config (when (and settings? ((:tools inv) :codex)) (local-copy remote-config))]
     {:inventory inv
      :skipped (vec (filter selected? (remove (:tools inv) probe)))
      :desired (into {} (for [{:keys [root id source] :as p} placed
@@ -325,7 +325,7 @@
                          [[root id] {:source source :target (target-in host inv root id)}]))
      :gone (set (remove present-at prunable))
      :owned-cfg (when local-config (owned-cfg hcfg))
-     :push (when local-config
+     :push (when (and local-config (not linked?))
              {:file :codex-config :local local-config
               :expected (some-> (:bytes remote-config) remote/sha256)})
      :ops
@@ -336,12 +336,12 @@
              :when (and (kind? :settings) (selected? t))]
          (warn-op t :settings (keyword "host" (name t))
                   (str (name t) " settings are not provisioned on hosts yet — only codex's are")))
-       (when local-config (settings-ops host hcfg st remote-config local-config))
-       (when (and settings? ((:tools inv) :codex) linked?)
-         [(plan/op {:tool :codex :kind :settings :id :config-link :warn true :host (name (:id host))
-                    :target (:path remote-config)
-                    :summary (str (:path remote-config) " is a symlink: agentctl does not write through it"
-                                  " — codex settings not applied on this host")})])
+       ;; planned against what the link points at, as locally, and then
+       ;; withheld: a symlink is not written through
+       (when local-config
+         (cond-> (settings-ops host hcfg st remote-config local-config)
+           linked? (-> (codex/withhold (:path remote-config) (:path remote-config))
+                       (->> (map #(assoc % :host (name (:id host))))))))
        (for [k (remove supported-kinds kinds)]
          (warn-op :agentctl k (keyword "host" (name k))
                   (str (name k) " are not provisioned on hosts yet — only skills are")))
@@ -459,7 +459,7 @@
   (let [where [:hosts (:id host)]]
     (try
       (let [{:keys [ops skipped inventory]} (plan-host host st opts)
-            changes (filter plan/mutating? ops)]
+            changes (concat (filter plan/mutating? ops) (filter :withheld ops))]
         (concat
          [[:ok where (str "reachable over ssh — " (:ssh host) ", " (name (:os host))
                           ", home " (:home inventory))]]

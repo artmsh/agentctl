@@ -256,7 +256,7 @@ c=$(code_of run apply -f "$SB/i.edn" --all -t codex)
 python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["hooks"]; assert not h.get("Stop"), h; assert len(h["SessionStart"]) == 1, h' "$HOOKS" \
   || { cat "$HOOKS"; fail "a moved codex hook left its old element"; }
 
-echo "11. a config.toml that is a symlink is not written through: one warning instead"
+echo "11. a config.toml that is a symlink is not written through; what it withholds stays pending"
 mkdir -p "$SB/dotfiles"
 printf 'model = "m-a"\n' > "$SB/dotfiles/config.toml"
 rm -f "$CONF" "$HOOKS"; ln -s "$SB/dotfiles/config.toml" "$CONF"
@@ -266,9 +266,11 @@ cat > "$SB/l.edn" <<'EDN'
              :permission-profiles {:net {:extends ":workspace"}}}]}
 EDN
 c=$(code_of run apply -f "$SB/l.edn" --all -t codex)
-[ "$c" = 0 ] || { cat "$SB/out.txt"; fail "a linked config.toml planned changes (exit $c)"; }
+[ "$c" = 2 ] || { cat "$SB/out.txt"; fail "a linked config.toml hid its drift (exit $c, not 2)"; }
 grep -q 'is a symlink' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the plan does not say config.toml is a link"; }
+grep -q 'withheld.*model' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the withheld changes are not listed"; }
 c=$(code_of run apply! -f "$SB/l.edn" --all -t codex -y)
+[ "$c" = 1 ] || { cat "$SB/out.txt"; fail "apply! with changes withheld exited $c, not 1"; }
 cmp -s "$SB/dotfiles/config.toml" "$SB/before.toml" || fail "written through the config.toml link"
 [ -L "$CONF" ] || fail "the config.toml link was replaced"
 rm -f "$CONF"

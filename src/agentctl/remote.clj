@@ -131,7 +131,9 @@
                 (str/join (for [k files]
                             (str "$f=\"" (ps-file k) "\"\n"
                                  "$a=Attr $f\n"
-                                 "if(($a -ne $null) -and (IsLink $a)){Say (\"F`t" (name k) "`t\"+(E $f)+\"`t@\")}\n"
+                                 "if(($a -ne $null) -and (IsLink $a)){$c=''\n"
+                                 "if(Test-Path -LiteralPath $f -PathType Leaf){$c=[Convert]::ToBase64String([IO.File]::ReadAllBytes($f))}\n"
+                                 "Say (\"F`t" (name k) "`t\"+(E $f)+\"`t@\"+$c)}\n"
                                  "elseif(Test-Path -LiteralPath $f -PathType Leaf){Say (\"F`t" (name k) "`t\"+(E $f)"
                                  "+\"`t\"+[Convert]::ToBase64String([IO.File]::ReadAllBytes($f)))}"
                                  "else{Say (\"F`t" (name k) "`t\"+(E $f)+\"`t-\")}\n")))
@@ -207,7 +209,8 @@
        "printf 'H\\t%s\\n' \"$(e \"$H\")\"\n"
        (str/join (for [k files]
                    (str "f=\"" (sh-file k) "\"\n"
-                        "if [ -L \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t@\\n' \"$(e \"$f\")\"\n"
+                        "if [ -L \"$f\" ] && [ -f \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t@%s\\n' \"$(e \"$f\")\" \"$(base64 < \"$f\" | tr -d '\\n')\"\n"
+                        "elif [ -L \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t@\\n' \"$(e \"$f\")\"\n"
                         "elif [ -f \"$f\" ]; then printf 'F\\t" (name k) "\\t%s\\t%s\\n' \"$(e \"$f\")\" \"$(base64 < \"$f\" | tr -d '\\n')\"\n"
                         "else printf 'F\\t" (name k) "\\t%s\\t-\\n' \"$(e \"$f\")\"; fi\n")))
        (str/join (for [r roots]
@@ -382,11 +385,15 @@
          "S" (assoc-in acc [:entries (keyword a) b :state] (get state-of c :absent))
          "M" (assoc-in acc [:entries (keyword a) b :files (unb64-str c)] d)
          ;; `-` is no file; an empty one loses its field to the line trim
-         ;; `@` is a symlink, whose content is not read: it is not written through
-         "F" (assoc-in acc [:host-files (keyword a)]
-                       (cond-> {:path (unb64-str b)
-                                :bytes (when-not (#{"-" "@"} c) (.decode (Base64/getDecoder) (str c)))}
-                         (= "@" c) (assoc :link? true)))
+         ;; `@` marks a symlink, followed by what it points at (nothing when
+         ;; it dangles): read to plan with, never written through
+         "F" (let [c (str c)
+                   link? (str/starts-with? c "@")
+                   c (if link? (subs c 1) c)]
+               (assoc-in acc [:host-files (keyword a)]
+                         (cond-> {:path (unb64-str b)
+                                  :bytes (when-not (or (= "-" c) (and link? (= "" c))) (.decode (Base64/getDecoder) c))}
+                           link? (assoc :link? true))))
          acc)))
    {:tools #{} :roots {} :versions {} :entries {} :host-files {}}
    lines))

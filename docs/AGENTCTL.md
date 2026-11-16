@@ -913,7 +913,9 @@ the file's SHA-256 is no longer the one read, then renamed over it. The replaced
 file goes into the host's backups; the local copy is not backed up locally. The
 writes are recorded in the host's state keyed by the host's path, and pruned there
 as `ownership/prune-ops` prunes local ones. A symlinked `config.toml`, dangling or
-not, is reported (`@` in the inventory) and never written through, the rule the
+not, is reported (`@` in the inventory, followed by what it points at) and planned
+against, then never written through: `codex/withhold` turns the changes into one
+warning that lists them and counts them as pending (`:withheld`), the rule the
 local codex adapter follows.
 
 A host has no `agents.edn` for awl to read, so `:awl` there places copies, in
