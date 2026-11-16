@@ -2276,7 +2276,7 @@
 (deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
   ;; `-k` is checked against `core/kinds`; a kind missing from it would be
   ;; refused, and one missing from --help is a kind nobody knows to ask for
-  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
+  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins :agents
            :providers :memory :trust :extensions :projects :statusline}
          (set core/kinds)))
   (let [lines (->> (str/split-lines main/usage)
@@ -2334,7 +2334,7 @@
       (is (= ["-k" "projects"] [flag v]))
       (is (str/includes? msg "entity-DSL"))
       (is (str/includes? msg "under permissions, settings or trust"))
-      (is (str/includes? msg "kinds for this config: extensions"))
+      (is (str/includes? msg "kinds for this config: agents, extensions"))
       (is (not (str/includes? msg " projects,")))
       (let [[[flag v msg]] (core/dead-selectors old {:kinds #{:trust}})]
         (is (= ["-k" "trust"] [flag v]))

@@ -6,11 +6,11 @@
 
 (def max-depth 32)
 (def ignored #{"node_modules" ".venv" "venv" ".git" ".jj" ".hg" "skill-packs"})
-(def kinds [:settings :permissions :mcps :skills :skill-packs :providers :memory :trust :hooks :plugins])
+(def kinds [:settings :permissions :mcps :skills :skill-packs :providers :memory :trust :hooks :plugins :agents])
 (def keyed-kinds
   "Sections that are maps keyed by a source selector rather than vectors of rows."
-  #{:skills :skill-packs :plugins})
-(defn- keyed? [v] (and (map? v) (seq v) (every? vector? (keys v))))
+  #{:skills :skill-packs :plugins :agents})
+(defn keyed? [v] (and (map? v) (seq v) (every? vector? (keys v))))
 (defn dsl? [raw] (some #(let [v (get raw %)] (or (vector? v) (keyed? v))) kinds))
 
 ;; ---------------------------------------------------------------- keyed sections
@@ -59,8 +59,9 @@
     (str "invalid " kind " key " (pr-str k)
          (if (= kind :skills)
            " — expected [:gh \"owner/repo\"], [:uri \"…\"], [pack \"skill\"] or [pack [\"skill\" …]]"
-           (if (= kind :plugins)
-             " — expected [:gh \"owner/repo\" \"plugin\"] or [:uri \"…\" \"plugin\"]"
+           (case kind
+             :plugins " — expected [:gh \"owner/repo\" \"plugin\"] or [:uri \"…\" \"plugin\"]"
+             :agents " — expected [pack \"agent\"] or [pack [\"agent\" …]]"
              " — expected [:gh \"owner/repo\"] or [:uri \"…\"]")))
     {:kind kind :key k})))
 
@@ -147,8 +148,31 @@
             :plugin plugin
             :marketplace (or (:marketplace v) plugin)))))
 
+(defn- agent-rows
+  "A Claude subagent key names a definition inside a declared pack:
+     [pack \"name\"]          `<pack root>/agents/name.md`
+     [pack [\"a\" \"b\"]]     several of one pack sharing one value"
+  [agents packs]
+  (let [pack-ids (set (map :id packs))]
+    (vec
+     (for [[k v] agents
+           :let [[head arg] k]
+           :when (or (and (vector? k) (= 2 (count k)) (symbol? head)
+                          (or (non-blank? arg) (and (vector? arg) (seq arg) (every? non-blank? arg))))
+                     (bad-key :agents k))
+           :let [pid (keyword (name head))
+                 names (if (string? arg) [arg] arg)]
+           :when (or (pack-ids pid)
+                     (throw (ex-info (str "agent " (pr-str k) " names undefined pack " head
+                                          " — declare it under :skill-packs with {:alias " head "}")
+                                     {:key k})))
+           :when (or (not (and (next names) (:alias v)))
+                     (throw (ex-info (str "agent " (pr-str k) " gives one :alias to several agents") {:key k})))
+           nm names]
+       (assoc (row (keyword nm) v) :from pid :agent nm)))))
+
 (defn lower-keyed
-  "Rewrite keyed source maps (`:skill-packs`, `:skills`, and `:plugins`) into entity rows."
+  "Rewrite keyed source maps (`:skill-packs`, `:skills`, `:plugins` and `:agents`) into entity rows."
   [raw]
   (doseq [k keyed-kinds :let [v (get raw k)]
           :when (and (some? v) (not (map? v)))]
@@ -158,7 +182,9 @@
     (let [packs (pack-rows (:skill-packs raw))
           {:keys [skills packs]} (skill-rows (:skills raw) packs)]
       (cond-> (assoc raw :skill-packs packs :skills skills)
-        (seq (:plugins raw)) (assoc :plugins (plugin-rows (:plugins raw)))))))
+        (seq (:plugins raw)) (assoc :plugins (plugin-rows (:plugins raw)))
+        ;; after the skills: a `[:gh …]` skill key may have declared its pack
+        (map? (:agents raw)) (assoc :agents (agent-rows (:agents raw) packs))))))
 (defn path [p]
   (let [p (u/expand p)]
     (str (fs/normalize (if (fs/absolute? p) p (str u/home "/" p))))))
@@ -333,6 +359,13 @@
                                                           :scope scope
                                                           :used-by (cond-> (set (:used-by old)) pid (conj pid))})))
                                pid (update-in [:projects pid :plugins] (fnil conj []) id))
+                    ;; one definition, linked user-wide and into each project placed
+                    :agents (update-in cfg [:agents id]
+                                       (fn [old]
+                                         (merge old body
+                                                {:id id :tools (set (concat (:tools old) ts))
+                                                 :global (or (:global old) (nil? pid))
+                                                 :targets (cond-> (or (:targets old) {}) pid (assoc pid target))})))
                     :providers (if pid cfg (assoc-in cfg [:providers id] (assoc body :tools ts)))
                     :memory (if pid cfg
                                 (-> cfg

@@ -392,12 +392,14 @@
   [cfg project-ids]
   (let [wanted (set project-ids)]
     (set
-     (for [[pid proj] (:projects cfg)
-           :when (contains? wanted pid)
-           id (:skills proj)
-           pack (packs-for-skill cfg id)
-           :when pack]
-       pack))))
+     (concat
+      (for [[pid proj] (:projects cfg)
+            :when (contains? wanted pid)
+            id (:skills proj)
+            pack (packs-for-skill cfg id)
+            :when pack]
+        pack)
+      (for [[_ a] (:agents cfg) :when (some wanted (keys (:targets a)))] (:pack a))))))
 
 ;; ---------------------------------------------------------------- pack ops
 
@@ -479,7 +481,9 @@
                       (seq (get-in cfg [:skill-packs id :consumers]))))
             (:entities cfg))
       (some #(and (= id (:from %)) (= :global (:scope %)) (or (seq (:tools %)) (seq (:consumers %))))
-            (vals (:skills cfg)))))
+            (vals (:skills cfg)))
+      ;; a Claude subagent is linked by agentctl, user-wide or into a project
+      (some #(and (= id (:pack %)) (seq (:tools %))) (vals (:agents cfg)))))
 
 (defn taken-whole?
   "A git pack some project takes whole, which the `skills` CLI installs there

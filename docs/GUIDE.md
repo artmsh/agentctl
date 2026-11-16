@@ -741,8 +741,113 @@ marketplace; other URLs are `git`, or `url` for a hosted `marketplace.json`.
 Dropping a placement uninstalls the plugin there and removes its
 `enabledPlugins` entry; the marketplace declaration stays.
 
-Marketplace names are global to Claude: two declarations whose sources share a
-marketplace name re-register it, and every project follows the last one.
+`:ref` pins a git marketplace (`[:gh …]` or a git URL) to a branch, tag or
+commit:
+
+```clojure
+{:plugins {[:gh "example/plugins" "lint"] {:in :all :acli [:claude] :ref "next"}}}
+```
+
+It becomes `source.ref` in `extraKnownMarketplaces`, and `apply!` adds the
+marketplace as `example/plugins#next` (`<git-url>#ref` for a git URL), the
+spelling the CLI reads a ref from. A changed ref is drift on the marketplace
+entry. Claude refuses to re-point a marketplace whose user settings name another
+source, so `apply!` writes the new entry first and puts the file back if the
+CLI then fails. A `:ref` on a directory or a hosted `marketplace.json` is an
+error: neither has revisions.
+
+When the source of a marketplace changes while its plugin is installed, Claude
+keeps the installed copy until the new source offers a different version, and
+`claude plugin update` does nothing at the same version. `apply!` therefore
+reinstalls the plugin (`claude plugin uninstall`, then `install`), and the plan
+says why.
+
+### Plugin versions
+
+Without `:version` a plugin is converged once it is installed, whatever its
+version. `:version` adds a version check:
+
+```clojure
+{:plugins {[:gh "example/plugins" "lint"] {:in :all :acli [:claude] :version :latest}
+           [:gh "example/tools" "fmt"]   {:in :all :acli [:claude] :version "1.4.0" :ref "v1.4.0"}}}
+```
+
+- `:latest` follows the marketplace. `apply` compares the installed version
+  with the one the marketplace on disk offers, and asks the remote, read-only
+  (`git ls-remote`), whether the marketplace has moved since it was fetched; a
+  moved one shows as `version: "1.0.0" -> "latest @ <commit>"`. `apply!` runs
+  `claude plugin marketplace update <marketplace>` and `claude plugin update`
+  at the placement's scope.
+- A string pins a version. Claude has no command that installs a given
+  version: it installs what the marketplace offers. A pin the marketplace does
+  not offer fails `apply!` before anything is installed, and the plan says so.
+  Pin the marketplace too, with `:ref` on a tag that carries that version.
+
+The version is the one Claude computes for a plugin kept inside its
+marketplace: `plugin.json`'s, else the marketplace entry's, else the first 12
+hex digits of the marketplace commit. A plugin whose marketplace entry points
+at another repository has no version until Claude fetches it, so `:latest`
+then follows only the marketplace's commit. A directory marketplace has no
+remote; Claude reads it live.
+
+`:build` is a shell command run in the plugin's install path
+(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`), for a plugin that
+ships sources rather than a built tree:
+
+```clojure
+{:plugins {[:gh "example/plugins" "graph"]
+           {:in :all :acli [:claude] :version :latest
+            :build "pnpm install --frozen-lockfile && pnpm --filter core build"}}}
+```
+
+It runs once per install path, and again after an install or update moves the
+plugin. A stamp under `~/.agents/plugins/.built` records the path, the commit
+and the command. A failing build fails `apply!` and leaves no stamp, so the
+next run builds again; the install it follows stays, and stays owned, so
+dropping the row still uninstalls it. Claude runs a
+plugin from a directory marketplace out of that directory, not the install
+path, so a build there does not change what Claude loads.
+
+Marketplace names are global to Claude: it keeps one source per name and
+refuses to add a marketplace from another. Rows naming one marketplace from
+different sources or refs are a `validate` error, and the plan flags them.
+Claude adds a marketplace to a project only from the source the user settings
+name for it, spelled the same way; when `~/.claude/settings.json` names it from
+elsewhere, the plan says so and `apply!` fails for that project.
+
+A `[:uri …]` source is read the way `claude plugin marketplace add` reads it:
+a URL ending in `.git`, an scp-style address, or a `github.com` or `gitlab.com`
+repository URL (written with `.git` appended) is a git marketplace; any other
+`http(s)` URL serves a `marketplace.json`, has no revisions, and takes no
+`:ref`. Keys of a marketplace entry the row does not declare, such as
+`autoUpdate`, are kept: the CLI drops them when it re-adds the marketplace, and
+`apply!` puts them back.
+
+## Claude subagents
+
+`:agents` links subagent definitions kept in a skill pack's `agents/` directory
+into the place Claude Code reads them from:
+
+```clojure
+{:skill-packs {[:gh "example/team-agents"] {:alias team}}
+ :agents {[team "reviewer"]            {:in :all}
+          [team ["planner" "tester"]]  {:in "projects/app"}}}
+```
+
+`:in :all` links `~/.claude/agents/reviewer.md`; a project placement links
+`<project>/.claude/agents/<name>.md`. Each is a symlink to
+`<pack root>/agents/<name>.md`, so a pack update reaches Claude without an
+apply, and the pack is cloned even when it is declared `:in :none`. The plan
+line is `+ agent [agents: claude-code] <source>`.
+
+A link agentctl made is recorded in the state file with the file it points at.
+Dropping the row removes that link, and only while it still points there: a
+file or another link in its place is left alone, and the plan says so. A
+hand-made definition at the destination is backed up before it is replaced,
+and the plan flags it. `validate` reports a name the pack has no `.md` for.
+`import` reads back links in `~/.claude/agents` and the projects'
+`.claude/agents` that point into a known pack; a plain file there is the
+user's own and is not imported.
 
 ## Project skills
 

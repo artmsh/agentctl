@@ -1193,7 +1193,7 @@ fk_code() {
 }
 for cmd in apply apply!; do
   fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
-  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: extensions, ' "$FK/dsl-$cmd.txt" \
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: agents, extensions, ' "$FK/dsl-$cmd.txt" \
     || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
   grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
   fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y

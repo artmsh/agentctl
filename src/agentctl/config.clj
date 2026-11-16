@@ -4,7 +4,8 @@
    The declared file is convenience-shaped (loose, terse). Everything downstream
    consumes the normalized shape produced here, so adapters never re-interpret
    surface syntax."
-  (:require [agentctl.codex-schema :as codex-schema]
+  (:require [agentctl.adapters.claude-sources :as cs]
+            [agentctl.codex-schema :as codex-schema]
             [agentctl.refs :as refs]
             [agentctl.scope :as scope]
             [agentctl.sources :as sources]
@@ -18,7 +19,7 @@
 
 (def capabilities
   "Which resource kinds each tool can be provisioned with."
-  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks :plugins}
+  {:claude      #{:settings :mcps :skills :memory :projects :permissions :hooks :plugins :agents}
    :codex       #{:settings :mcps :skills :memory :projects :providers :hooks}
    :pi          #{:settings :mcps :skills :memory :providers :projects :extensions}
    :omp         #{:settings :mcps :skills :memory :providers}
@@ -209,7 +210,7 @@
 
 ;; ---------------------------------------------------------------- normalize
 
-(declare norm-mcp norm-provider norm-skill norm-plugin)
+(declare norm-mcp norm-provider norm-skill norm-plugin norm-agent)
 
 (defn- norm-per-tool
   "Normalize the per-tool override map with the same normalizer as the base."
@@ -281,12 +282,35 @@
       :kind :plugins
       :repo (:repo decl)
       :uri (:uri decl)
+      ;; the marketplace's git ref: a branch, tag or commit of its repository
+      :ref (:ref decl)
+      ;; :latest follows the marketplace; a string pins one version
+      :version (:version decl)
+      ;; a shell command run in each new install path
+      :build (:build decl)
       :plugin (or (:plugin decl) (name id))
       :marketplace (or (:marketplace decl) (:plugin decl) (name id))
       :scope (or (:scope decl) :global)
       :scope-by-tool (:scope-by-tool decl)
       :used-by (:used-by decl)
       :tools (tool-selection decl :plugins)})))
+
+(defn- norm-agent
+  "A Claude subagent definition: `<pack root>/agents/<name>.md`, linked as
+   `<name>.md` into `~/.claude/agents` and each placed project's
+   `.claude/agents`. `:targets` maps a project id to its path."
+  [id decl packs]
+  (let [pack (get packs (:from decl))
+        nm (or (:agent decl) (name id))]
+    (u/prune-nils
+     {:id id
+      :kind :agents
+      :pack (:from decl)
+      :name nm
+      :source (when-let [root (:root pack)] (str root "/agents/" nm ".md"))
+      :global (boolean (:global decl))
+      :targets (or (:targets decl) {})
+      :tools (set (filter #(supports? % :agents) (as-set (:tools decl))))})))
 
 (defn norm-pack [id decl]
   (let [decl (or decl {})
@@ -589,6 +613,7 @@
      :skills (scope-skills (merge bare-skills declared-skills) (:skills raw) projects)
      :skill-packs skill-packs
      :plugins (into {} (map (fn [[k v]] [k (norm-plugin k v)])) (:plugins raw))
+     :agents (into {} (keep (fn [[k v]] (when (map? v) [k (norm-agent k v skill-packs)]))) (:agents raw))
      :providers (into {} (map (fn [[k v]] [k (norm-provider k v)]))
                       (merge (:extra-providers raw) (:providers raw)))
      :memory (into {} (map (fn [[k v]] [k (norm-memory k v)])) (:memory raw))
@@ -792,7 +817,7 @@
 
 (def known-top-keys
   #{:executors :cli-code :projects :mcps :skills :skill-packs :extra-providers :providers :memory :defaults
-    :settings :permissions :trust :hooks :plugins :extensions :hosts :statusline :#def})
+    :settings :permissions :trust :hooks :plugins :agents :extensions :hosts :statusline :#def})
 
 (def format-neutral-keys
   "Top-level keys that say nothing about which format a file is in.
@@ -838,6 +863,50 @@
         (for [k unsupported]
           (finding :warn (conj where k) (str (name k) " is not provisioned on hosts yet — ignored"))))))
    (:hosts cfg)))
+
+(defn- plugin-marketplace-kind
+  "Which kind of marketplace source a plugin row names, as Claude reads it."
+  [{:keys [repo uri]}]
+  (cond repo :github
+        (str/blank? uri) nil
+        (scope/local-uri? uri) :directory
+        :else (keyword (:source (cs/remote uri)))))
+
+(defn- plugin-ref-findings
+  "A `:ref` picks a revision of a git repository: a directory or a hosted
+   marketplace.json has none. `:version` and `:build` have one shape each.
+   One marketplace name is one registration in Claude, so two rows naming it
+   from different places fight over it."
+  [cfg]
+  (concat
+   (for [[id p] (:plugins cfg)
+         :when (some? (:ref p))
+         :let [ref (:ref p)
+               msg (cond (not (and (string? ref) (not (str/blank? ref))))
+                         ":ref must be a branch, tag or commit, as a string"
+                         (#{:directory :url} (plugin-marketplace-kind p))
+                         (str ":ref needs a git marketplace ([:gh …] or a git URL) — a "
+                              (name (plugin-marketplace-kind p)) " source has no revisions"))]
+         :when msg]
+     (finding :error [:plugins id :ref] msg))
+   (for [[id p] (:plugins cfg)
+         :let [v (:version p)]
+         :when (and (some? v) (not (or (= :latest v) (and (string? v) (not (str/blank? v))))))]
+     (finding :error [:plugins id :version] ":version must be :latest or a version string, e.g. \"1.2.0\""))
+   (for [[id p] (:plugins cfg)
+         :let [b (:build p)]
+         :when (and (some? b) (not (and (string? b) (not (str/blank? b)))))]
+     (finding :error [:plugins id :build] ":build is a shell command, run in the plugin's install path"))
+   (for [[m ps] (group-by :marketplace (vals (:plugins cfg)))
+         ;; spelled as the CLI reads it: a URL with or without .git is one source
+         :let [canon (fn [{:keys [repo uri ref]}]
+                       [repo (when uri (if (scope/local-uri? uri) uri (:url (cs/remote uri)))) ref])
+               sources (distinct (map canon ps))]
+         :when (next sources)]
+     (finding :error [:plugins (keyword m)]
+              (str "marketplace " m " is declared from " (count sources)
+                   " different sources or refs — Claude keeps one source per marketplace name and"
+                   " refuses to add it from another, so apply! fails for all but one")))))
 
 (defn structural-findings [cfg]
   (let [raw (:raw cfg)]
@@ -947,6 +1016,9 @@
                      (str/blank? (or (:plugin p) "")))]
        (finding :error [:plugins id]
                 "plugin needs a marketplace source and plugin name"))
+     (plugin-ref-findings cfg)
+     (for [[id a] (:agents cfg) :when (empty? (:tools a))]
+       (finding :warn [:agents id] "only Claude Code reads subagent definitions; :acli selects no tool here"))
      (provider-model-findings cfg)
      (for [[pid proj] (:projects cfg)
            mid (:mcp proj)

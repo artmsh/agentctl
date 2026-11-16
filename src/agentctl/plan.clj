@@ -360,6 +360,9 @@
                               cmds (distinct (mapcat op-cmds g))]]
                     (str/join "\n" (concat [(colorize action (skill-line action (assoc d :skills skills) agents))]
                                             (when warn [(str "    " warn)])
+                                            ;; what a change does beyond its line, such as replacing a
+                                            ;; file agentctl did not write
+                                            (map #(str "    ⚠ " %) (distinct (keep :note g)))
                                             (when (or path verbose)
                                               (map #(str "exec: '" (str/join " " (map (comp shell-word u/tilde str) (remove nil? (flatten %)))) "'")
                                                    cmds))
