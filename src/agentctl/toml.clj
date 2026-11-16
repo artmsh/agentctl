@@ -303,28 +303,6 @@
   (let [segs (segments text)]
     (boolean (some->> (segment-index segs table-path) (nth segs) :lines (key-span k)))))
 
-(defn ensure-table
-  "Append an empty `[table-path]` unless that table already exists."
-  [text table-path]
-  (let [segs (segments text)]
-    (if (segment-index segs table-path)
-      text
-      (render (conj (vec segs) {:header (header-for table-path)
-                                :lines [(str "[" (header-for table-path) "]") ""]})))))
-
-(defn set-tree
-  "`set-keys` for a value that nests: a map goes into a sub-table of its
-   own — unless the file already holds that key as an inline table, which is
-   then rewritten where it stands. Either way the representation on disk is
-   kept, so a write never defines one table twice."
-  [text table-path m]
-  (reduce (fn [t [k v]]
-            (if (and (map? v) (not (has-key? t table-path k)))
-              (let [sub (conj (vec table-path) (u/kw->str k))]
-                (if (empty? v) (ensure-table t sub) (set-tree t sub v)))
-              (set-key t table-path k v)))
-          text m))
-
 (defn remove-key [text table-path k]
   (let [segs (segments text)
         header (when (seq table-path) (header-for table-path))]
