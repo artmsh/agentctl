@@ -509,6 +509,8 @@ reaches Codex only when its `:acli` names `:codex`; a row without `:acli`, with
 `:acli :all`, or a `:hooks` key in a `:settings` row that does not name `:codex`
 stays Claude's, because events and tool-name matchers differ between the two. Codex
 hooks are user-wide only: a row placed in a project is reported, not written.
+A `:settings` row's `:hooks` and the `:hooks` rows for the same tool add up,
+hook by hook. Declaring one id in both with different bodies is an error.
 
 ```clojure
 {:hooks [{:id :session-note :event :SessionStart :command "$HOME/bin/session-note"

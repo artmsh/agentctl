@@ -1592,6 +1592,25 @@
           (is (seq (:failed (core/execute! ops))))
           (is (= broken (slurp hooks))))))))
 
+(deftest a-settings-rows-hooks-and-hooks-rows-both-contribute
+  (let [settings {:id :user-claude :acli [:claude] :in :all :model "m-a"
+                  :hooks {:Stop [{:id :from-settings :command "a"}]
+                          :from-settings-keyed {:event :SessionStart :command "c"}}}
+        hook {:id :from-row :event :Stop :command "b" :acli [:claude] :in :all}]
+    (testing "whichever placement comes first, every hook reaches the tool"
+      (doseq [raw [{:settings [settings] :hooks [hook]}
+                   {:hooks [hook] :settings [settings]}
+                   ;; a row without :acli is placed in another order
+                   {:settings [settings] :hooks [(dissoc hook :acli)]}
+                   {:settings [(dissoc settings :acli)] :hooks [(dissoc hook :acli)]}]
+              :let [hooks (get-in (config/normalize raw "test") [:tools :claude :hooks])]]
+        (is (= #{:from-settings :from-settings-keyed :from-row} (set (keys hooks))) (pr-str raw))
+        (is (= :Stop (keyword (u/kw->str (:event (:from-settings hooks))))))))
+    (testing "one id declared in both, with different bodies, is a structural error"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hook :from-row is declared twice"
+                            (config/normalize {:settings [(assoc-in settings [:hooks :Stop 0 :id] :from-row)]
+                                               :hooks [hook]} "test"))))))
+
 (deftest codex-hooks-validate-events-and-stay-opt-in
   (testing "validate accepts codex hooks and rejects an event codex never fires"
     (is (empty? (config/structural-findings
