@@ -37,8 +37,10 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
    and exits 2 on drift so it is usable from cron or CI.
 4. **Secrets are references, never literals.** `agents.edn` holds
    `!bw://…`/`$ENV` refs; values are resolved at apply time. A ref that cannot
-   be resolved (locked vault, unset variable) leaves any existing credential
-   untouched instead of blanking it.
+   be resolved (locked vault, unset variable, a vault field holding `""` or
+   `"null"`) leaves any existing credential untouched instead of blanking it:
+   the Claude adapter writes nothing for that server, and `apply!` exits 1
+   until the ref resolves.
 5. **Unknown ≠ failure.** A locked Bitwarden vault or an unreachable endpoint
    is reported as `?`, not as an error.
 6. Every mutation is backed up under `~/.config/agentctl/backups/<run>/`, one
@@ -49,11 +51,11 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 | Entity | claude | codex | pi | omp | llm | antigravity | kimi | dsh |
 |---|---|---|---|---|---|---|---|---|
 | `:executors` (settings) | `settings.json` | `config.toml` | `settings.json` | `config.yml` | default model, aliases | `~/.gemini/antigravity-cli/settings.json` | `config.toml` | — (Cordis patch layers) |
-| `:mcps` | `claude mcp --scope user`, or the project's entry in `~/.claude.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` | — (Cordis patch layers) |
+| `:mcps` | `claude mcp --scope user`, the project's entry in `~/.claude.json`, or `.mcp.json` approved in `.claude/settings.local.json` | `codex mcp` | `mcp.json` | `mcp.json` | — | `~/.gemini/config/mcp_config.json` | `mcp.json` | — (Cordis patch layers) |
 | `:skills` | `~/.claude/skills` | `~/.codex/skills` | `~/.pi/agent/skills` | `~/.omp/agent/skills` | — | `~/.gemini/config/skills` | `~/.kimi-code/skills` | `$DSH_HOME/skills` |
 | `:memory` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.pi/agent/AGENTS.md` | `~/.omp/agent/AGENTS.md` | — | `~/.gemini/config/rules/AGENTS.md` | `~/.kimi-code/AGENTS.md` | `$DSH_HOME/AGENTS.md` |
 | `:extra-providers` | — | `[model_providers.*]` | `models.json` | `models.yml` | `extra-openai-models.yaml` + `keys.json` | — | `[providers.*]` + `[models.*]` | — (Cordis patch layers) |
-| `:trust` / legacy `:projects` | project `settings.json`, trust, MCP enablement | `[projects."…"]` trust | `trust.json` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
+| `:trust` / legacy `:projects` | project `settings.json`, trust | `[projects."…"]` trust | `trust.json`; project `.agents/skills` from `:skills` | — | — | `trustedWorkspaces`, `<project>/.agents/skills` | — | —; project `.agents/skills` from `:skills` |
 | `:skill-packs` | shared checkout under `~/.agents/skill-packs` | | | | | | | |
 | `:plugins` | `claude plugin marketplace add` + `install`, then `extraKnownMarketplaces` / `enabledPlugins` in the placement's settings file | — | — | — | — | — | — | — |
 | `:agents` | symlink `~/.claude/agents/<name>.md` or `<project>/.claude/agents/<name>.md` | — | — | — | — | — | — | — |
@@ -462,11 +464,23 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:scope` | Where it lands | For |
 | --- | --- | --- |
 | `:local` (default for a project's servers) | `~/.claude.json`, under the project's entry | anything with a credential; anything only you run |
-| `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
+| `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
 codex, pi, omp and antigravity have no project-level MCP config; they report the
 skip as a warning rather than silently installing the server user-wide.
+
+A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
+the project's `.claude/settings.local.json`, the list Claude Code reads, so it
+starts without the approval prompt. Names already there, added by hand or by
+that prompt, are kept. A name agentctl added is removed again when its server is
+dropped or leaves `:project` scope; the manifest records which names those are,
+so a server the user had approved before agentctl declared it stays approved. A
+server held back because a secret did not resolve is not approved either:
+nothing was written for it in `.mcp.json`. Older releases wrote the list under
+the project in `~/.claude.json`; Claude Code moves that copy into
+`settings.local.json` and deletes it on its next run, and agentctl no longer
+plans it.
 
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` ref that resolves at apply time, or a token
@@ -493,6 +507,32 @@ unrelated server of the same name, so the project's own entry is cleaned up
 separately. The ownership manifest also records the resolved path, so deleting
 the entire project declaration still prunes entries agentctl wrote there.
 
+A user-wide server is written with `claude mcp add`, which cannot edit an
+entry: an update removes the server and adds it again, after backing up
+`~/.claude.json`. Drift there is a declared env or header name the entry lacks,
+never a value and never a name added by hand, and the add carries every env var
+or header the declaration does not name, so a hand-added `Authorization`
+survives. A name agentctl declared and the declaration has since dropped is
+removed.
+
+Both project placements are merged onto the entry already there, so an env
+var, header or unmodelled key added by hand survives an update; the declared
+type, command, args and url replace their old values. An env var or header
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares, so a dropped secret does not
+stay in the file. A transport change
+(stdio to http, or back) replaces every transport key instead: merged, the
+stdio server's `command`, `args` and `env` would stay beside the new `url`. The
+plan lists the keys that go:
+
+```
+~ projects/sample mcps/docs
+      - args: ["docs-mcp"]
+      - command: "/usr/local/bin/docs-mcp"
+      ~ type: "stdio" -> "http"
+      + url: "https://docs.example.com/mcp"
+```
+
 ### Project skills (legacy)
 
 A project's `:skills` names a whole skill-pack, a skill declared under
@@ -518,13 +558,21 @@ relative one) is repointed at the pack cache under `~/.agents/skill-packs`.
 `:scope :global` on an explicit `:skills` declaration keeps a skill user-wide
 even when a project names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
 For current entity-first declarations, a repository placement uses the skills
-CLI. Claude reads `<project>/.claude/skills`, while Codex and Antigravity
-share `<project>/.agents/skills`. The legacy project registry is kept for
+CLI. Claude reads `<project>/.claude/skills`, while Codex, Antigravity, Kimi,
+Pi and the DeepSeek Harness share `<project>/.agents/skills`. Pi reads it only
+in a project it trusts; see [Pi](GUIDE.md#pi) for how that is decided and how
+it settles a skill name found both there and user-wide. A copy there is kept
+while an agent placed in the project reads it and has no user-wide copy. The legacy project registry is kept for
 existing files; see [`SCOPE-DSL.md`](SCOPE-DSL.md) for current placement rules.
 
 ### MCP shorthand
@@ -538,9 +586,15 @@ A bare string *is* the declaration — a command line, or a URL:
 
 Anything beyond that (env, cwd, per-tool selection) needs the map form.
 
+`import` redacts every MCP header value, for every tool, to a `!bw://<server>/<header>`
+placeholder: agentctl writes headers resolved, and the value on disk says
+nothing about whether it was a secret. A whole `$VAR` header is kept. Env
+values, an MCP server's and Claude's settings `env` (`!bw://claude-env/<NAME>`),
+are redacted when they look like a credential.
+
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
-`bearer_token_env_var` to `:bearer-token-env`. Header credentials are redacted
-to `!bw://` references; apply resolves them and writes the native
+`bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
+`!bw://` references; apply resolves them and writes the native
 `http_headers` table. Codex's `env_http_headers` and `http_headers_helper` are
 not yet modelled by this DSL.
 
@@ -580,6 +634,11 @@ different value, override just that field:
 
 `import` writes these automatically wherever it finds a resource configured
 differently per tool, preserving those differences in the emitted declaration.
+
+The plan names the source each tool actually links: a skill whose `:per-tool
+:path` differs from its base source is its own line for that tool, and
+`--verbose` adds the `ln` command and `link <dest> -> <source> (was <old>)`
+under every skill line, user-wide ones included.
 
 ### Fields agentctl does not model
 
@@ -716,7 +775,8 @@ which reads the same file only when built with `-Dstatusline`. `validate` and
 |---|---|
 | `$FOO` or `"!env://FOO"` | environment variable |
 | `"$HOME/bin/x"` | a literal: `$VAR`, `${VAR}` and a leading `~` are expanded when the file is read. Only a whole `$NAME` is a reference |
-| `"!bw://item/field"`, `"!bw://folder/item/field"` | Bitwarden item field |
+| `"!bw://item/field"`, `"!bw://folder/item/field"` | Bitwarden item field; `password` and `username` read the item's login, as does the login's own username for its password |
+| `"!bw://item"` | the item's login password |
 | `"!file://~/path"` | file contents, trimmed |
 | `"!cmd://some command"` | stdout of a command |
 | `"anything else"` | literal |
@@ -724,6 +784,16 @@ which reads the same file only when built with `-Dstatusline`. `validate` and
 Plans print `bw:dev-keys/hosted/api-key`, never the resolved value. Changes that
 end up writing a resolved secret into a tool's config file are tagged
 `⚠ writes resolved secret` and counted before the confirmation prompt.
+
+A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
+not a value: written out, it is a header that authenticates nothing. So is an
+`$ENV`, `!file://` or `!cmd://` reference that yields nothing but whitespace.
+A field name the item does not have is missing too: a misspelt field never
+falls back to the login password. Claude's
+settings `:env` takes the same forms as an MCP server's `:env`. A Claude MCP
+server or settings `env` with any ref that does not resolve is held back whole,
+as [GUIDE.md](GUIDE.md#unresolved-secrets) describes; a resolved one is printed
+masked, and so is any old env or header value a change replaces or removes.
 
 `codex` reads provider keys from the environment only — declare those as
 `:key $VAR`; `validate` flags anything else.
@@ -733,15 +803,27 @@ end up writing a resolved secret into a tool's config file are tagged
 ```
 -f, --file PATH    config file (default ~/.config/agents.edn)
 -t, --tool TOOL    restrict to a tool (repeatable)
--k, --kind KIND    restrict to a kind (repeatable; --help lists them, an unknown
-                   one exits 1)
+-k, --kind KIND    restrict to a kind (repeatable; --help lists them). An
+                   unknown one exits 1, and so does one the config's format
+                   plans nothing as: projects in the entity DSL (which plans
+                   trust, permissions and settings instead), trust in the
+                   legacy map form (which plans all three as projects); with
+                   --host too. A config no section of which decides the format
+                   ({}, or only :statusline/:extensions/:hosts) gets a ⚠ for
+                   -k trust instead, naming no format
 -p, --project ID   restrict to one declared project — selects everything that
                    project owns, whatever its kind (its servers and skills are
-                   :mcps / :skills ops, so --kind projects would miss them)
+                   :mcps / :skills ops, so --kind trust, or projects in the
+                   legacy form, would miss them)
     --only KIND/ID apply/apply!: one entity wherever it is placed (repeatable)
     --user         apply/apply!: user scope only, no project
-    --json         machine-readable output
--v, --verbose      per-field diffs and target paths
+    --json         machine-readable output: apply, apply! and validate print
+                   one JSON document, apply with config warnings in
+                   `findings` and apply! with what it `applied`; apply! --json
+                   needs -y; an error, a refused config included, is
+                   {"error": …} with exit 1
+-v, --verbose      per-field diffs and target paths; for skills, the link
+                   commands and what each link points at, before and after
     --show-noop    include unchanged and informational entries
     --deep         validate: probe the network (provider /models, git remotes)
     --replace      import!: overwrite instead of merging into the existing file
@@ -777,6 +859,13 @@ one project. Ops writing one file for one project collapse into a single block,
 their ids in braces (`mcps/{repl search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
+
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere (an unsupported setting, a placement a tool
+cannot take). That plan is printed in full, here, under `--host`, in the GUI's
+text view, and under `--json` (as ops with `"warn": true`), and the exit code
+still says only whether anything would change: 0.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the e2e test provisions a throwaway
@@ -900,6 +989,12 @@ All of this describes this machine, so `validate --host` leaves it out.
 `HOSTS` covers every host under `:hosts`, or only the one `--host` names, in which
 case this machine's checks are skipped. A host that does not answer, or answers
 only in part, is `unknown`, and its drift is not reported as clean.
+
+`SKILLS` also repeats the plan's reports that hold once it has converged: a
+skill whose source is missing, a project copy kept beside a user-wide skill
+and why, one pi loads in place of a
+user-wide skill of the same name, and skills placed in a project pi asks
+about first or does not read. They are warnings and never fail the exit code.
 
 ## Import is lossy w.r.t. sugar
 

@@ -292,10 +292,23 @@
                                 (str "[skill: " (str/join ", " skills) "]"))
                               (when alias (str "[" alias "]"))])))
 
+(defn- link-line
+  "What one link op changes, for `--verbose`: where the link is and what it
+   points at, before and after. It starts with a word, not a path: a line
+   whose first character is `~` would read as a change sigil."
+  [o]
+  (for [{:keys [key before after]} (:diffs o)
+        :when (= :target key)]
+    (str "    link " (u/tilde (:target o)) " -> " (u/tilde (str after))
+         (when before (str " (was " (u/tilde (str before)) ")")))))
+
 (defn- render-skill-blocks
-  "One line per entity and action in each scope, however many tools it
-   reaches; a project line ends with the commands it runs."
-  [ops]
+  "One line per entity, action and source in each scope, however many tools
+   it reaches; a project line ends with the commands it runs, and with
+   `--verbose` every line does, followed by what each link points at. Two
+   tools linking one skill from different places are two lines: folded into
+   one, the line would name only the first one's source."
+  [ops {:keys [verbose]}]
   (let [placed (mapcat (fn [o]
                          (let [ps (get-in o [:display :in-projects])]
                            (if (and (seq ps) (not (:project-path o)))
@@ -313,11 +326,12 @@
           :let [scope-ops (get by-scope path)]
           :when (seq scope-ops)
           s (cons (str "\n" (scope-heading path))
-                  (for [[[_ _ action warn] g] (sort-by (fn [[[k e a] _]] [(str e) k (str a)])
+                  (for [[[_ _ action warn] g] (sort-by (fn [[[k e a _ s] _]] [(str e) k (str a) (str s)])
                                                        (group-by (fn [o] [(get-in o [:display :kind])
                                                                           (get-in o [:display :entity])
                                                                           (:action o)
-                                                                          (when (:warn o) (:summary o))])
+                                                                          (when (:warn o) (:summary o))
+                                                                          (get-in o [:display :source])])
                                                                  scope-ops))
                         :let [d (:display (first g))
                               agents (sort (distinct (concat (:agents d) (keep #(get-in % [:display :agent]) g))))
@@ -328,10 +342,18 @@
                                             ;; what a change does beyond its line, such as replacing a
                                             ;; file agentctl did not write
                                             (map #(str "    ⚠ " %) (distinct (keep :note g)))
-                                            (when path
+                                            (when (or path verbose)
                                               (map #(str "exec: '" (str/join " " (map (comp shell-word u/tilde str) (remove nil? (flatten %)))) "'")
-                                                   cmds))))))]
+                                                   cmds))
+                                            (when verbose (mapcat link-line g))))))]
       s)))
+
+(defn show-plan?
+  "Is there a plan to print, or only \"no changes\"? A warning is: it says a
+   declared setting went nowhere, and that holds on every run, converged or
+   not — behind \"no changes\" it would make the config read as applied."
+  [ops {:keys [show-noop]}]
+  (boolean (or (some mutating? ops) show-noop (some :warn ops))))
 
 (defn render-plan
   [ops {:keys [show-noop] :as opts}]
@@ -347,7 +369,7 @@
     (str/join
      "\n"
      (concat
-      (render-skill-blocks skill-ops)
+      (render-skill-blocks skill-ops opts)
       (for [tool (sort-by name (keys by-tool))
             :let [tool-ops (sort-by (juxt (comp name :kind) (comp u/kw->str :id)) (get by-tool tool))]
             s (cons (str "\n" (str/upper-case (name tool)))
@@ -498,10 +520,15 @@
            {:tool (name tool)
             :groups (mapv group-data (chunk-ops tool-ops))}))))
 
-(defn summary-line [ops]
-  (let [f (frequencies (map :action ops))]
-    (format "%d to add, %d to change, %d to remove, %d unchanged"
-            (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))))
+(defn summary-line
+  "Counts by action. A resource held back on an unresolved secret is a noop
+   that did not converge, so it is counted apart rather than as unchanged."
+  [ops]
+  (let [held (count (filter :unresolved ops))
+        f (frequencies (map :action (remove :unresolved ops)))]
+    (str (format "%d to add, %d to change, %d to remove, %d unchanged"
+                 (get f :create 0) (get f :update 0) (get f :delete 0) (get f :noop 0))
+         (when (pos? held) (format ", %d unresolved" held)))))
 
 (defn op-counts
   "The numbers behind the GUI's pills, counted over ops the way `summary-line`
@@ -630,6 +657,37 @@
                                     (conj arr' value))]
                         (u/write-json! file (assoc-in data path arr''))))})))))
 
+(defn json-union-op
+  "Op that makes the JSON array at `path` hold every element of `values`,
+   keeping whatever else is there, in its order. The array is shared — the
+   tool and the user add to it too — so nothing is removed and an element
+   already present is not added twice. Nothing missing is no op at all."
+  [{:keys [tool kind id file path values summary note risk project]}]
+  (let [current (get-in (u/read-json file) path)
+        have (set (map u/norm current))
+        missing (vec (remove #(have (u/norm %)) values))]
+    (when (seq missing)
+      (op {:project project :action (if (nil? current) :create :update)
+           :tool tool :kind kind :id id
+           :target file
+           :path (mapv u/kw->str path)
+           :summary summary
+           :note note
+           :diffs [{:key (last path) :before current :after (into (vec current) missing)}]
+           ;; what this op puts in the array, for a caller that has to take it
+           ;; out again later — and only that: the rest was someone else's
+           :added missing
+           :risk (or risk :low)
+           ;; re-read at execution time: the tool rewrites this array itself,
+           ;; and several ops may target one file in a single run
+           :exec! (fn []
+                    (u/backup! file)
+                    (let [data (or (u/read-json file) {})
+                          arr (vec (get-in data path))
+                          have (set (map u/norm arr))]
+                      (u/write-json! file (assoc-in data path
+                                                    (into arr (remove #(have (u/norm %)) values))))))}))))
+
 (defn json-array-unset-op
   "Op that removes one caller-owned element (`old`) from a JSON array at
    `path`. Nothing to remove is no op at all — mirrors `json-unset-op`."
@@ -711,12 +769,7 @@
            :risk :medium
            :exec! (fn [] (u/backup! file) (toml/update-file! file #(toml/remove-table % (vec table))))}))))
 
-(defn link-op
-  "Ensure `dest` is a symlink to `src` (or a copy when mode = :copy).
-
-   Those two are the whole taxonomy: how an entry gets to its destination.
-   `:hardlink` would be the third and nothing asks for it yet — the shape
-   here has room for it, and `:fs-op` is already the word the plan renders."
+(defn- link-op*
   [{:keys [tool kind id src dest mode project]}]
   (let [mode (or mode :symlink)
         exists (u/exists? dest)
@@ -729,7 +782,7 @@
         ok (or in-place
                (case mode
                  :symlink (= current-target (u/real-path want))
-                 :copy (and exists (= (u/path-sha256 dest) (u/path-sha256 src)))))]
+                 :copy (and exists (u/same-content? dest src))))]
     (when-not ok
       (op {:project project :action (if exists :update :create)
            :tool tool :kind kind :id id
@@ -754,6 +807,24 @@
                       (if (babashka.fs/directory? want)
                         (babashka.fs/copy-tree want dest)
                         (babashka.fs/copy want dest))))}))))
+
+(defn link-op
+  "Ensure `dest` is a symlink to `src` (or a copy when mode = :copy).
+
+   Those two are the whole taxonomy: how an entry gets to its destination.
+   `:hardlink` would be the third and nothing asks for it yet — the shape
+   here has room for it, and `:fs-op` is already the word the plan renders.
+
+   A skill whose source is not on disk is reported and its link left as it
+   is: a link to nothing would dangle, and a dangling one never reads as
+   converged. (Other kinds may link what an earlier op in the same plan
+   fetches, an extension's checkout, so they are not held to this.)"
+  [{:keys [tool kind id src dest mode project] :as m}]
+  (if (and (= :skills kind) (not (u/resolves? src)))
+    (op {:project project :action :noop :warn true :conflict true :tool tool :kind kind :id id
+         :target dest :from (u/tilde (u/abs-path src))
+         :summary (str "source missing: " (u/tilde (u/abs-path src)) " — link not changed")})
+    (link-op* m)))
 
 (defn unlink-op
   [{:keys [tool kind id dest project]}]

@@ -30,7 +30,7 @@
    shared `.agents/skills` directory, which is exactly the project root the
    Harness scans, so an install for it lands where the Harness reads."
   {:claude "claude-code" :codex "codex" :antigravity "antigravity" :kimi "kimi-code-cli"
-   :dsh "universal"})
+   :dsh "universal" :pi "pi"})
 
 (def agent-labels
   "How the plan names each tool in a `[agents: …]` line, where the CLI's own
@@ -41,8 +41,9 @@
 
 (def shared-tools
   "Tools that read the CLI's shared `.agents/skills` copy rather than a
-   directory of their own."
-  #{:codex :antigravity :kimi :dsh})
+   directory of their own. Pi has `.pi/skills` as well, but the CLI's `pi`
+   agent installs into the shared directory, and so does agentctl."
+  sources/shared-readers)
 
 (defn command
   "The CLI invocation. `AGENTCTL_SKILLS_CMD` replaces it (tests run offline)."
@@ -61,13 +62,9 @@
   [dir n tools]
   (if (shared? tools) (canonical dir n) (claude-link dir n)))
 
-(defn skill-name
+(def skill-name
   "The name the CLI installs a skill under: SKILL.md's `name:`, else the directory."
-  [dir]
-  (or (some->> (u/slurp-safe (str dir "/SKILL.md"))
-               (re-find #"(?m)^name:\s*['\"]?([^'\"\s]+)")
-               second)
-      (str (fs/file-name dir))))
+  sources/skill-name)
 
 (defn- real [p] (or (u/real-path p) (u/abs-path p)))
 
@@ -159,18 +156,97 @@
     (contains? tools :claude) (conj (claude-link dir n))
     (shared? tools) (conj (canonical dir n))))
 
+(defn- source-itself?
+  "Is `p` the skill's source, not a link to it? A skill committed in the
+   project's own `.agents/skills` is already where codex and the rest read it."
+  [p src]
+  (or (= (sources/leaf-path p) (sources/leaf-path src))
+      (and (not (fs/sym-link? p)) (u/resolves? p) (= (u/real-path p) (u/real-path src)))))
+
+(defn- link-target
+  "What a link at `p` points to: relative when the source is inside the
+   project, so the link resolves in any checkout of it; absolute otherwise.
+   Both sides are resolved first — on macOS /var is /private/var, and a link
+   computed across the two would climb out of the repository and back."
+  [dir p src]
+  (let [root (real dir) to (real src)]
+    (if (str/starts-with? to (str root "/"))
+      (str (fs/relativize (fs/path root (str (fs/relativize (u/abs-path dir) (fs/parent p)))) to))
+      (u/abs-path src))))
+
+(defn- dot-dirs
+  "Every `<repo>/.<agent>/skills/<n>` there is. The `skills` CLI counts each
+   agent's directory as its own: `skills remove <n>` clears the name from all
+   of them, whichever agent installed it."
+  [dir n]
+  (when (fs/directory? dir)
+    (sort (for [d (fs/list-dir dir)
+                :let [p (str (u/abs-path dir) "/" (fs/file-name d) "/skills/" n)]
+                :when (and (str/starts-with? (str (fs/file-name d)) ".") (u/exists? p))]
+            p))))
+
+(defn- remove-blockers
+  "`[path why]` for each directory `skills remove <n>` would take that must
+   stay: the skill's own source, or one git or a placement needs. With any
+   of them the name is not removed at all, and its lock entry stays."
+  [cfg dir n src]
+  (for [p (dot-dirs dir n)
+        :let [why (if (and src (source-itself? p src))
+                    "it is the skill's source"
+                    (sources/kept-because cfg dir p))]
+        :when why]
+    [p why]))
+
+(defn- stays-because
+  "Why the directory at `p` — where a link to `src` would go, or a copy left
+   over — must stay, or nil: git or a placement needs it, or, when the CLI
+   did not install it, it is not `src` but another skill of the same name.
+   A link is agentctl's to repoint, and `src` itself is never replaced."
+  [cfg dir p src listed?]
+  (when (and (u/exists? p) (not (fs/sym-link? p)) (not (source-itself? p src)))
+    (or (sources/kept-because cfg dir p)
+        (when (and (not listed?) (not (u/same-content? p src)))
+          (str "it differs from " (u/tilde src) " — another skill of the same name")))))
+
+(defn- name-plan
+  "What linking the name `n` to `src` takes in project `dir`: the paths that
+   stay (`:kept`, with why), the links to make, the copy left over in
+   `.agents/skills` to remove, and whether the CLI is asked to drop it
+   (`:held`) — which it is not while it would take a directory that stays."
+  [cfg dir lock tools shared-wanted? n src]
+  (let [listed? (contains? lock n)
+        c (canonical dir n)
+        paths (distinct (cond-> (link-paths dir n tools) (not shared-wanted?) (conj c)))
+        blockers (when listed? (remove-blockers cfg dir n src))
+        ;; the CLI's own copy stays with its lock entry while its remove is blocked
+        kept (keep #(some->> (or (stays-because cfg dir % src listed?)
+                                 (when-let [[b] (and (u/exists? %) (not (fs/sym-link? %))
+                                                     (not (source-itself? % src))
+                                                     (first (remove (comp #{%} first) blockers)))]
+                                   (str "`skills remove` would take " (u/tilde b) " with it")))
+                             (vector %))
+                   paths)
+        kept? (set (map first kept))]
+    {:n n :src src :kept kept
+     :held (and listed? (empty? blockers))
+     :blocked (seq blockers)
+     :links (for [p (link-paths dir n tools)
+                  :when (not (or (source-itself? p src) (kept? p)))]
+              [p (link-target dir p src)])
+     :stale (when (and (not shared-wanted?) (u/exists? c) (not (kept? c)) (not (source-itself? c src)))
+              c)}))
 (defn- linked?
-  "Every name links, in each of these tools' directories, to its source; the
-   CLI holds none of them; and no copy is left in `.agents/skills` when
-   nothing in the project reads it."
-  [dir u tools shared-wanted?]
-  (let [lock (read-lock dir)]
-    (every? (fn [[n src]]
-              (and (not (contains? lock n))
-                   (every? #(and (fs/sym-link? %) (= (u/real-path %) (real src)))
-                           (link-paths dir n tools))
-                   (or shared-wanted? (not (u/exists? (canonical dir n))))))
-            (zipmap (:names u) (:dirs u)))))
+  "Every name's source is on disk and links, in each of these tools'
+   directories, to it — or is that directory itself, or one that stays; the
+   CLI holds none of them, unless it may not drop them; and no copy is left
+   in `.agents/skills` when nothing in the project reads it."
+  [plans]
+  (every? (fn [{:keys [src kept held links stale]}]
+            (and (u/resolves? src)
+                 (not held)
+                 (every? (fn [[p]] (and (fs/sym-link? p) (= (u/real-path p) (real src)))) links)
+                 (nil? stale)))
+          plans))
 
 (defn- installed?
   "Every name from this source is in the lock, its copy is a directory
@@ -187,7 +263,7 @@
                           (fs/directory? c)
                           (or (not (shared? tools)) (not (fs/sym-link? c)))
                           (or (not (:local u))
-                              (= (u/path-sha256 c) (u/path-sha256 (by-name n))))
+                              (u/same-content? c (by-name n)))
                           (or (not (shared? tools)) (not (contains? tools :claude))
                               (= (u/real-path (claude-link dir n)) (u/real-path c))))))
                  names))))
@@ -214,51 +290,97 @@
   "Links a local unit's skills to their source, after the CLI drops any it
    installed. `shared-wanted?`: codex, antigravity, kimi or the DeepSeek
    Harness read this project's `.agents/skills`, whether or not this run
-   selects them."
+   selects them. A directory that is the source itself is never removed or
+   linked onto itself, and a source that is not on disk is reported, not
+   linked: the link would dangle. A directory that must stay
+   (`stays-because`) is reported and left as it is — whether the plan has
+   anything else to do or not, so `validate` repeats it."
   [cfg pid dir u tools shared-wanted?]
-  (when-not (linked? dir u tools shared-wanted?)
-    (let [lock (read-lock dir)
-          by-name (zipmap (:names u) (:dirs u))
-          held (filterv #(contains? lock %) (:names u))
-          rm-argv (when (seq held) (vec (concat (command) ["remove"] held ["-y"])))
-          links (for [n (:names u) p (link-paths dir n tools)] [p (u/abs-path (by-name n))])
-          stale (when-not shared-wanted?
-                  (filterv u/exists? (map #(canonical dir %) (:names u))))
-          oid (keyword (name pid) (name (:entity u)))]
-      (plan/op {:action (if (some (comp u/exists? first) links) :update :create)
-                :tool :agentctl :kind :skills :id oid :project pid :project-path dir
-                :target (str dir "/.claude/skills") :category :fs
-                :owns (mapv #(vector % :skills oid) (sort tools))
-                :summary (str "link " (u/tilde (:source u)))
-                :cmds (vec (concat (when rm-argv [rm-argv])
-                                   (for [p stale] ["rm" "-r" p])
-                                   (for [[p src] links] ["ln" "-sfn" src p])))
-                :display (display cfg u tools)
-                :exec! (fn []
-                         (when rm-argv (run! dir rm-argv "skills remove"))
-                         (doseq [p (concat stale (map first links))
-                                 :when (u/exists? p)]
-                           (u/backup! p)
-                           (fs/delete-tree p {:nofollow-links true}))
-                         (doseq [[p src] links]
-                           (fs/create-dirs (fs/parent p))
-                           (fs/create-sym-link p src)))}))))
+  (let [lock (read-lock dir)
+        plans (for [[n src] (map vector (:names u) (:dirs u))]
+                (name-plan cfg dir lock tools shared-wanted? n src))
+        oid (keyword (name pid) (name (:entity u)))
+        kept-ops (for [{:keys [kept]} plans [p why] kept]
+                   (sources/kept-op {:tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                                     :display (display cfg u tools)}
+                                    p why))
+        held (vec (keep #(when (:held %) (:n %)) plans))
+        rm-argv (when (seq held) (vec (concat (command) ["remove"] held ["-y"])))
+        links (mapcat :links plans)
+        stale (keep :stale plans)
+        src-of (into {} (for [{:keys [links src]} plans [p] links] [p src]))
+        missing (remove u/resolves? (:dirs u))]
+    (concat
+     kept-ops
+     (cond
+       (seq missing)
+       [(plan/op {:action :noop :warn true :tool :agentctl :kind :skills :id oid :project pid
+                  :project-path dir
+                  :summary (str "source " (str/join ", " (map u/tilde missing)) " is not on disk — not linked")
+                  :display (display cfg u tools)})]
 
-(defn- add-op [cfg pid dir u tools]
-  (when-not (installed? dir u tools)
-    (let [argv (vec (concat (command) ["add" (:source u)]
-                            (mapcat #(vector "-s" %) (select-args u))
-                            (mapcat #(vector "-a" (agents %)) (sort tools))
-                            ["-y"]))
-          oid (keyword (name pid) (name (:entity u)))]
-      (plan/op {:action (if (some #(fs/exists? (copy-path dir % tools)) (:names u)) :update :create)
-                :tool :agentctl :kind :skills :id oid :project pid :project-path dir
-                :target (str dir "/.agents/skills") :category :fs
-                :owns (mapv #(vector % :skills oid) (sort tools))
-                :summary (str "skills add " (:source u))
-                :cmds [argv]
-                :display (display cfg u tools)
-                :exec! (fn [] (fs/create-dirs dir) (run! dir argv "skills add"))}))))
+       (linked? plans) nil
+
+       :else
+       [(plan/op {:action (if (some (comp u/exists? first) links) :update :create)
+                  :tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                  :target (str dir "/.claude/skills") :category :fs
+                  :owns (mapv #(vector % :skills oid) (sort tools))
+                  :summary (str "link " (u/tilde (:source u)))
+                  :cmds (vec (concat (when rm-argv [rm-argv])
+                                     (for [p stale] ["rm" "-r" p])
+                                     (for [[p src] links] ["ln" "-sfn" src p])))
+                  :display (display cfg u tools)
+                  :exec! (fn []
+                           (when rm-argv (run! dir rm-argv "skills remove"))
+                           ;; what the CLI left is agentctl's link, or a copy
+                           ;; planned as identical to the source
+                           (doseq [p (concat stale (map first links))
+                                   :when (and (u/exists? p) (not (fs/sym-link? p))
+                                              (not (u/same-content? p (or (src-of p) (:source u)))))]
+                             (throw (ex-info "project skill changed since planning" {:path p})))
+                           (doseq [p (concat stale (map first links))
+                                   :when (u/exists? p)]
+                             (u/backup! p)
+                             (fs/delete-tree p {:nofollow-links true}))
+                           (doseq [[p src] links]
+                             (fs/create-dirs (fs/parent p))
+                             (fs/create-sym-link p src)))})]))))
+
+(defn- add-op
+  "Installs a remote unit with `skills add`, which writes each name's copy
+   over whatever is there. A name whose copy or claude directory must stay
+   (git or a placement needs it) is reported and left out; a whole pack
+   (`*`) names nothing until the CLI has fetched it, so it cannot be checked."
+  [cfg pid dir u tools]
+  (let [oid (keyword (name pid) (name (:entity u)))
+        kept (for [n (:names u)
+                   p [(canonical dir n) (claude-link dir n)]
+                   :when (and (u/exists? p) (not (fs/sym-link? p)))
+                   :let [why (sources/kept-because cfg dir p)]
+                   :when why]
+               [n p why])
+        skip (set (map first kept))
+        u' (cond-> u (seq skip) (assoc :names (vec (remove skip (:names u)))
+                                       :select (vec (remove skip (select-args u)))))]
+    (concat
+     (for [[_ p why] kept]
+       (sources/kept-op {:tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                         :display (display cfg u tools)}
+                        p why))
+     (when (and (or (empty? skip) (seq (:names u'))) (not (installed? dir u' tools)))
+       (let [argv (vec (concat (command) ["add" (:source u)]
+                               (mapcat #(vector "-s" %) (select-args u'))
+                               (mapcat #(vector "-a" (agents %)) (sort tools))
+                               ["-y"]))]
+         [(plan/op {:action (if (some #(fs/exists? (copy-path dir % tools)) (:names u')) :update :create)
+                    :tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                    :target (str dir "/.agents/skills") :category :fs
+                    :owns (mapv #(vector % :skills oid) (sort tools))
+                    :summary (str "skills add " (:source u))
+                    :cmds [argv]
+                    :display (display cfg u tools)
+                    :exec! (fn [] (fs/create-dirs dir) (run! dir argv "skills add"))})])))))
 
 ;; ---------------------------------------------------------------- plan
 
@@ -276,7 +398,9 @@
 (defn- remove-ops
   "Skills this project no longer asks the CLI for. Removing a name takes the
    copy, every agent link and the lock entry; `-a claude-code` alone drops
-   only claude's link, since the other agents read the shared copy."
+   only claude's link, since the other agents read the shared copy. A name
+   whose removal would take a directory that stays (`remove-blockers`) is
+   reported and left installed."
   [cfg st desired tools]
   (let [gone (for [t (keys agents)
                    :when (contains? tools t)
@@ -298,16 +422,32 @@
                 src (some :source rows)
                 linked (or (some :names rows) [(name entity)])
                 lock (read-lock dir)
-                names (or (not-empty (vec (sort (keep (fn [[n s]] (when (and src (= s src)) n)) lock))))
-                          (when (contains? lock (name entity)) [(name entity)]))
+                listed (or (not-empty (vec (sort (keep (fn [[n s]] (when (and src (= s src)) n)) lock))))
+                           (when (contains? lock (name entity)) [(name entity)]))
+                claude-only? (and (seq staying) (dropped :claude) (not (staying :claude)))
+                blocked (for [n listed
+                              [p why] (if claude-only?
+                                        (keep #(some->> (sources/kept-because cfg dir %) (vector %))
+                                              (filter u/exists? [(claude-link dir n)]))
+                                        (remove-blockers cfg dir n nil))]
+                          [n p why])
+                names (vec (remove (set (map first blocked)) listed))
                 argv (cond
                        (empty? names) nil
                        (empty? staying) (vec (concat (command) ["remove"] names ["-y"]))
                        (and (dropped :claude) (not (staying :claude)))
                        (vec (concat (command) ["remove"] names ["-a" "claude-code" "-y"]))
                        :else nil)
-                oid (keyword (name pid) (name entity))]
-          o (if argv
+                oid (keyword (name pid) (name entity))
+                kept-ops (for [[_ p why] blocked]
+                           (sources/kept-op {:tool :agentctl :kind :skills :id oid :project pid :project-path dir
+                                             :display {:kind "skill" :entity entity
+                                                       :source (or (some-> src u/tilde) (name entity))
+                                                       :agents (sort (map agent-label dropped))}}
+                                            p why))]
+          o (concat
+             kept-ops
+             (if argv
               [(plan/op {:action :delete :tool :agentctl :kind :skills :id oid :project pid
                          :project-path dir :target (str dir "/.agents/skills") :category :fs
                          :owns (mapv #(vector % :skills oid) (sort dropped))
@@ -316,20 +456,21 @@
                          :display {:kind "skill" :entity entity :source (or (some-> src u/tilde) (name entity))
                                    :agents (sort (map agent-label dropped))}
                          :exec! #(run! dir argv "skills remove")})]
-              ;; agentctl's own links to a local source
-              (when (empty? names)
+              ;; agentctl's own links to a local source. Only links: a
+              ;; directory there is the source itself, committed in the project
+              (when (empty? listed)
                 (keep identity
                       (concat
                        (when (dropped :claude)
-                         (for [n linked]
+                         (for [n linked :when (fs/sym-link? (claude-link dir n))]
                            (plan/unlink-op {:tool :claude :kind :skills :project pid :id oid
                                             :dest (claude-link dir n)})))
                        (when (and (some shared-tools dropped)
                                   (not-any? shared-tools staying))
-                         (for [n linked]
+                         (for [n linked :when (fs/sym-link? (canonical dir n))]
                            (plan/unlink-op {:tool (first (filter shared-tools (sort dropped)))
                                             :kind :skills :project pid :id oid
-                                            :dest (canonical dir n)})))))))
+                                            :dest (canonical dir n)}))))))))
           :when o]
       o)))
 
@@ -353,11 +494,10 @@
                           :summary (:warn u)
                           :display {:kind "skill" :entity id :source (name id)
                                     :agents (sort (map agent-label ts))}})]
-               (keep identity
-                     [(if (:local u)
-                        (link-op cfg pid dir u ts
-                                 (some #(contains? (get desired [pid %]) id) shared-tools))
-                        (add-op cfg pid dir u ts))]))]
+               (if (:local u)
+                 (link-op cfg pid dir u ts
+                          (some #(contains? (get desired [pid %]) id) shared-tools))
+                 (add-op cfg pid dir u ts)))]
        o))))
 
 (defn- desired-names
@@ -366,11 +506,23 @@
   (let [lock (read-lock dir)]
     (set (mapcat (fn [u] (or (:names u) (keep (fn [[n s]] (when (= s (:source u)) n)) lock))) units))))
 
+(defn- dangling? [p] (and (fs/sym-link? p) (not (u/resolves? p))))
+
 (defn global-duplicate-ops
   "A project copy the CLI installed of a skill that is now user-wide: removed
-   with `skills remove`, so the lock stays true. `:drop` names the paths whose
-   plain unlink this replaces. `global-dirs` is each tool's user-wide skills
-   directory: the copy is only removed once the user-wide one is installed."
+   with `skills remove`, so the lock stays true, and with it every link into
+   the copy. A lock entry whose copy is already gone — a dangling link left
+   behind, or nothing at all — is removed the same way: nothing is lost, and
+   a dangling link is not a copy to hash.
+
+   A copy some placement still needs, or one git tracks, stays, and so does
+   its lock entry: `skills remove` takes the shared copy whatever else it is
+   asked. It is reported instead, and only the kept paths are taken from the
+   adapters, so a redundant link into it is still unlinked there.
+
+   `:drop` names the paths whose plain unlink this replaces. `global-dirs` is
+   each tool's user-wide skills directory: the copy is only removed once the
+   user-wide one is installed."
   [cfg tool-cfg selected global-dirs]
   (let [desired (wants tool-cfg cfg (keys agents))
         found (for [[pid proj] (:projects cfg)
@@ -384,29 +536,64 @@
                     :let [src (sources/skill-source cfg s)
                           n (some-> src skill-name)
                           ts (filter #(and (contains? (:tools s) %) (contains? (:for-tools proj) %) (selected %))
-                                     (keys agents))]
+                                     (keys agents))
+                          paths (when n [(canonical dir n) (claude-link dir n)])
+                          live (filter u/resolves? paths)]
                     ;; A lock records origin, not current contents. Preserve
                     ;; edited copies even when installed from this source.
                     :when (and n (contains? lock n) (seq ts) (not (keep-names n))
-                               (let [copies (filter u/exists? [(canonical dir n) (claude-link dir n)])]
-                                 (and (seq copies)
-                                      (every? #(= (u/path-sha256 %) (u/path-sha256 src)) copies))))]
-                {:pid pid :dir dir :sid sid :n n :src src :ts ts})]
-    {:drop (set (mapcat (fn [{:keys [dir n]}] [(claude-link dir n) (canonical dir n)]) found))
-     :ops (for [{:keys [pid dir sid n src ts]} found
-                :let [argv (vec (concat (command) ["remove" n "-y"]))]]
-            (plan/op {:action :delete :tool :agentctl :kind :skills :project pid :project-path dir
-                      :id (keyword (name pid) (name sid)) :target (canonical dir n) :category :fs
-                      :owns [] :summary (str "skills remove " n " — installed user-wide")
-                      :requires (mapv #(str (global-dirs %) "/" (name sid)) ts)
-                      :cmds [argv]
-                      :display {:kind "skill" :entity sid :source (u/tilde src) :agents (sort (map agent-label ts))}
-                      :exec! (fn []
-                               (doseq [t ts :let [g (str (global-dirs t) "/" (name sid))]]
-                                 (when-not (u/exists? (str g "/SKILL.md"))
-                                   (throw (ex-info "global skill is not installed; keeping project copy"
-                                                   {:skill sid :global g}))))
-                               (run! dir argv "skills remove"))}))}))
+                               (every? #(u/same-content? % src) live))
+                    :let [present (filter u/exists? paths)]]
+                {:pid pid :dir dir :sid sid :n n :src src :ts ts :paths paths :live live
+                 :stale (empty? live)
+                 ;; `skills remove` would take any agent's directory under the
+                 ;; name, so one that stays anywhere keeps the name installed
+                 :kept (let [own (keep #(some->> (or (sources/kept-because cfg dir %)
+                                                     (when (u/resolves? %) (sources/needed-by proj % s n)))
+                                                 (vector %))
+                                       present)
+                             others (remove (comp (set present) first) (remove-blockers cfg dir n src))]
+                         (concat own others
+                                 (when-let [[b] (first others)]
+                                   (for [p present :when (and (not (fs/sym-link? p)) (not (some #{p} (map first own))))]
+                                     [p (str "`skills remove` would take " (u/tilde b) " with it")]))))
+                 :links (distinct (concat (filter fs/sym-link? present)
+                                          (mapcat #(sources/links-into dir %) (remove fs/sym-link? present))))})
+        [kept gone] ((juxt filter remove) (comp seq :kept) found)]
+    {:drop (set (concat (mapcat :paths gone) (for [f kept [p] (:kept f)] p)))
+     :ops (concat
+           (for [{:keys [pid dir sid src ts kept]} kept
+                 [p why] kept]
+             (sources/kept-op {:tool :agentctl :kind :skills :project pid :project-path dir
+                               :id (keyword (name pid) (name sid))
+                               :display {:kind "skill" :entity sid :source (u/tilde src)
+                                         :agents (sort (map agent-label ts))}}
+                              p why))
+           (for [{:keys [pid dir sid n src ts paths live stale links]} gone
+                 :let [argv (vec (concat (command) ["remove" n "-y"]))
+                       lock-file (str dir "/skills-lock.json")]]
+             (plan/op {:action :delete :tool :agentctl :kind :skills :project pid :project-path dir
+                       :id (keyword (name pid) (name sid)) :target (canonical dir n) :category :fs
+                       :owns []
+                       :summary (str "skills remove " n (if stale
+                                                          " — its copy is gone, the lock entry is stale"
+                                                          " — installed user-wide"))
+                       :requires (mapv #(str (global-dirs %) "/" (name sid)) ts)
+                       :cmds (into [argv] (for [l links :when (or (dangling? l) (not (some #{l} paths)))]
+                                            ["unlink" l]))
+                       :display {:kind "skill" :entity sid :source (u/tilde src) :agents (sort (map agent-label ts))}
+                       :exec! (fn []
+                                (doseq [t ts :let [g (str (global-dirs t) "/" (name sid))]]
+                                  (when-not (u/exists? (str g "/SKILL.md"))
+                                    (throw (ex-info "global skill is not installed; keeping project copy"
+                                                    {:skill sid :global g}))))
+                                (doseq [p live :when (not (u/same-content? p src))]
+                                  (throw (ex-info "project skill changed since planning" {:path p})))
+                                (doseq [p (concat paths links [lock-file])] (u/backup! p))
+                                (run! dir argv "skills remove")
+                                ;; whatever link the CLI left behind points nowhere now
+                                (doseq [l (distinct (concat paths links)) :when (dangling? l)]
+                                  (fs/delete l)))})))}))
 
 (defn inventory
   "Ownership of project skills: one `[tool :skills project/id]` per agent,

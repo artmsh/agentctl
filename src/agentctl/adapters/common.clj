@@ -37,6 +37,33 @@
           {:values {} :issues []}
           env))
 
+(defn issues-in
+  "`resolve-env`'s issues, each tagged with the map it came from — `env`,
+   `headers` — so a report can say where the unresolved key sits."
+  [where resolved]
+  (map #(assoc % :where where) (:issues resolved)))
+
+(defn- unresolved-reason
+  "`bitwarden vault locked (headers.api-key)`: the resolver's message and the
+   key names it applies to. Names only — a value never reaches this line."
+  [issues]
+  (str/join "; " (for [[msg is] (group-by #(or (:message %) (name (:status %))) issues)]
+                   (str msg " (" (str/join ", " (map #(str (:where %) "." (u/kw->str (:key %))) is)) ")"))))
+
+(defn unresolved-op
+  "Stands in for the op `base` would have been when its env or headers hold a
+   secret that did not resolve: a locked vault, an unset variable, an emptied
+   vault field. Writing the rest would leave a server that is configured and
+   authenticates nothing — and since the missing value contributes nothing to
+   the desired entry either, the next plan would see no drift. So nothing is
+   written: the op has no `:exec!`, and `:unresolved` tells apply! the run
+   has not converged."
+  [base issues]
+  (-> base
+      (dissoc :exec! :diffs :cmds :note :path)
+      (merge {:action :noop :warn true :unresolved true :risk :low
+              :summary (str "⚠ secret unresolved: " (unresolved-reason issues) " — nothing written")})))
+
 (def dialect-path
   "Where each dialect lives under a bare host. Only consulted for a provider
    that declares several: naming the host once is the whole point of writing
@@ -102,17 +129,69 @@
   [env]
   (boolean (some (fn [[k v]] (or (refs/secret-ref? v) (refs/secret-shaped? k v))) env)))
 
+(defn secret-keys
+  "Names in an env map whose value is a credential: a secret ref, resolved at
+   apply time, or a literal shaped like one. `raw` is the map as declared, for
+   a literal whose ref no longer shows what it looked like."
+  [refs raw]
+  (into #{} (keep (fn [[k r]]
+                    (when (or (refs/secret-ref? r) (refs/secret-shaped? k (get raw k)))
+                      (u/kw->str k))))
+        refs))
+
+(defn mask-secrets
+  "`[before after]` env maps as a plan may print them. A plan carries resolved
+   values, and a name that says nothing about a credential (`X`, `DOCS_KEY`)
+   is not masked by rendering, so the value under each name in `ks` — the
+   secrets the declaration names now — is masked on both sides.
+
+   The before side is masked as well wherever the value changes or goes
+   away. What it held may have come from a ref the declaration no longer
+   makes, and nothing on disk says which — dropping a secret, or replacing
+   it with a literal, would otherwise print it. A value that changed but
+   masks the same on both sides is marked changed, or a rotated secret
+   would show no change at all."
+  [before after ks]
+  (let [ks (set ks)
+        raw-b (u/norm before)
+        raw-a (u/norm after)
+        changed (into #{} (keep (fn [[k v]] (let [k (u/key-str k)]
+                                              (when (not= v (get raw-a k)) k))))
+                      raw-b)
+        masked (fn [m ks] (when (map? m)
+                            (into {} (map (fn [[k v]] (let [k (u/key-str k)]
+                                                        [k (if (ks k) (refs/mask v) v)])))
+                                  m)))
+        b (masked before (into ks changed))
+        a (masked after ks)]
+    [b (when a
+         (into {} (map (fn [[k v]] [k (if (and (ks k) (= v (get b k))
+                                               (not= (get raw-b k) (get raw-a k)))
+                                        (str v " (changed)")
+                                        v)]))
+               a))]))
+
+(defn mask-all
+  "`m` with every value masked: an env map that is being removed, whose
+   declaration — the only thing that said which values were secrets — is
+   already gone. Anything else is returned as it is."
+  [m]
+  (if (map? m)
+    (into {} (map (fn [[k v]] [k (refs/mask v)])) m)
+    m))
+
 (def project-mcp-tools
   "Tools with a project-level MCP config. Everything else is user-wide only."
   #{:claude :codex})
 
 (def project-skill-tools
   "Tools with a project-level skills directory. The rest read skills only from
-   the user's own home. Codex, antigravity, kimi and the DeepSeek Harness walk
-   up from the working directory to the repository root looking for
-   `.agents/skills`, so a project can carry its own — one directory all four
-   of them read."
-  #{:claude :codex :antigravity :kimi :dsh})
+   the user's own home. Codex, antigravity, kimi, pi and the DeepSeek Harness
+   walk up from the working directory to the repository root looking for
+   `.agents/skills`, so a project can carry its own — one directory all five
+   of them read. Pi also reads its own `.pi/skills`, and reads either only in
+   a project it trusts."
+  #{:claude :codex :antigravity :kimi :dsh :pi})
 
 (def project-scopes
   "Scopes that belong to one project: `:local` writes into the user's own

@@ -15,8 +15,8 @@
 > **Alpha.** Config keys change without migration: `:#let` became `:#def` with no alias, and an
 > old file's `$name` references fall back to environment variables. 170 unit tests and five
 > end-to-end suites pass in CI, but no `apply!` over a whole config on a real home has been done
-> yet. Beta when that run is verified and a locked Bitwarden vault no longer drops an MCP
-> secret silently (see [Limitations](#limitations)).
+> yet. Beta when that run is verified and no adapter drops an MCP secret silently when a
+> Bitwarden vault is locked (see [Limitations](#limitations)).
 
 ## Rationale
 
@@ -52,7 +52,7 @@ segment.
   each CLI's own subcommand, so keys a CLI writes for itself survive.
 - Secrets are `$ENV_VAR` or `!bw://folder/item/field` references resolved at apply time; a locked
   vault or unreachable endpoint is reported as unknown. `import` redacts credential-shaped
-  values; review its output before sharing a config.
+  values and every MCP header; review its output before sharing a config.
 
 ## Comparison
 
@@ -155,8 +155,11 @@ releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describ
   server is skipped for them with a warning.
 - The DeepSeek Harness keeps settings, MCP servers and providers in Cordis patch files that
   agentctl does not write; `:dsh` entries there are reported by `validate` and the plan.
-- With a locked Bitwarden vault, `apply!` writes an MCP server without the header or env var
-  that carried the secret, and the next `apply` shows no drift.
+- Pi, OMP, Kimi and Antigravity still write an MCP server without the header or env var whose
+  secret did not resolve (a locked vault, an unset variable), and the next `apply` shows no
+  drift. Codex leaves a project server, or a user-wide server's headers, untouched in that case
+  but still exits 0, and drops an unresolved `:env` from a user-wide server. Claude holds the
+  server back and `apply!` exits 1 ([unresolved secrets](docs/GUIDE.md#unresolved-secrets)).
 - Removing a project from the config leaves its project-scoped MCP entries behind.
 
 ## Development

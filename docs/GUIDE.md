@@ -30,11 +30,41 @@ alone plans nothing, and a git pack is not cloned for it.
 
 A skill placed in a repository is installed by the [`skills`](https://skills.sh) CLI,
 run there as `npx -y skills add <source> -a <agent> … -y`: a copy lands in
-`.agents/skills` (read by codex, antigravity, kimi and the DeepSeek Harness),
+`.agents/skills` (read by codex, antigravity, kimi, pi and the DeepSeek Harness),
 claude gets a link in `.claude/skills`, and the install is recorded in
 `skills-lock.json`. A dropped
 skill is removed with `npx -y skills remove`. User-wide skills stay symlinks
 into each tool's own directory. `AGENTCTL_SKILLS_CMD` overrides the command.
+
+A skill a project installed that is now declared `:in :all` is removed from the
+project with `skills remove` once the user-wide one is installed, provided the
+copy still matches its source. The links into the copy and its lock entry go
+in the same step. A lock entry whose copy is already gone, with at most a
+dangling `.claude/skills/<name>` link left behind, is removed the same way.
+A project copy is kept, and the plan says why, when:
+
+- it differs from the user-wide source, or from the source of the project
+  skill that would be linked in its place, because it is another skill of
+  the same name (a copy the `skills` CLI installed is the CLI's to replace);
+- git tracks it, or a link git tracks leads into it, because it is the project's own;
+- a declared placement needs it: a `:per-tool :path`, another skill's source,
+  or a pack that lives there. Removing it would leave that tool's link dangling;
+- an agent placed in the project reads it and has no user-wide copy of that
+  skill: every agent placed there reads the shared `.agents/skills`, a copy
+  or a link alike (pi only where it reads the project's skills), and claude
+  reads a copy its `.claude/skills/<name>` link leads into.
+
+The same holds wherever agentctl would put something: no link and no
+`skills add` lands on a directory that stays, and nothing is linked over the
+skill's own source. A kept copy that the `skills` CLI installed keeps its
+lock entry, since `skills remove` would delete the copy as well — and the CLI
+clears a name from every agent's directory in the repository (`.cursor/skills`
+as much as `.agents/skills`), so a name is not removed while any of those
+must stay. A whole remote pack names its skills only once the CLI has
+fetched it, so its install is not checked this way. A redundant link into a kept
+copy, such as claude's `.claude/skills/<name>`, is still removed. A plan
+with nothing left to change prints no warnings, so `validate` repeats these
+reports under SKILLS for every agent; they do not fail its exit code.
 
 Imports emit this format. The older map-and-project format ([AGENTCTL.md](AGENTCTL.md#legacy-map-form))
 remains supported; use one format per file.
@@ -102,9 +132,19 @@ resources dropped from the config; only `--only` is a single-entity change.
 
 `-k` and the kind in `--only` must be kinds an op carries — `agentctl --help`
 lists them — or the run exits 1, as do an `--only` whose kind `-k` leaves out
-and any option agentctl does not know. An `--only` or `-p` that nothing
-declares or owns is reported with `⚠` (under `--json`, in `warnings`), because
-a run narrowed to a typo plans nothing and would otherwise read as converged.
+and any option agentctl does not know. The kind must also be one the loaded
+config's format plans: an entity-DSL config files a project's trust,
+permissions and settings under `trust`, `permissions` and `settings`, so
+`-k projects` there exits 1; an old-format config plans all three as
+`projects`, so `-k trust` there exits 1. The message lists the kinds the
+format has, `--help` marks `projects` as legacy, `--host` runs are held to the
+same rule, and the GUI refuses the same kinds for the buffer it plans. A
+config with nothing that decides the format yet — `{}`, or only `:statusline`,
+`:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
+and is reported with `⚠`, naming no format. An `--only` or `-p` that nothing
+declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
+because a run narrowed to a typo plans nothing and would otherwise read as
+converged.
 
 ## Claude session retention
 
@@ -163,7 +203,11 @@ what you are editing rather than what is on disk. Edits go through the server,
 which rewrites only the node you touched: comments, blank lines and `$name`
 references survive, and a `:#def` binding is shown as the reference it is rather
 than the value it expands to. The tool chips in the header and the `verbose` /
-`show noop` toggles are `--tool`, `-v` and `--show-noop`.
+`show noop` toggles are `--tool`, `-v` and `--show-noop`, and `-t` given to
+`gui` picks the chips it starts with. `-k` and `-p` given to `gui` narrow
+every plan the page shows, which says so under the findings; the page has no
+control for them, so they hold until the server stops. A `-p` that selects no
+declared project is a warning there, as it is in the CLI.
 
 **Apply** is the only thing that writes. It asks for confirmation, then saves
 the buffer to `agents.edn` (backed up first) and converges, exactly as
@@ -195,17 +239,33 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:scope` | Where it lands | For |
 | --- | --- | --- |
 | `:local` (default for a project's servers) | `~/.claude.json`, under the project's entry | anything with a credential; anything only you run |
-| `:project` | `<project>/.mcp.json`, merged onto what is there, with `enabledMcpjsonServers` pre-approving it | a server the whole team should get from the repo |
+| `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
 Codex, Pi and OMP have no project-level MCP config; they report the skip as a
 warning rather than silently installing the server user-wide.
 
+A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
+the project's `.claude/settings.local.json`, the list Claude Code reads, so it
+starts without the approval prompt. Names already there, added by hand or by
+that prompt, are kept. A name agentctl added is removed again when its server is
+dropped or leaves `:project` scope; the manifest records which names those are,
+so a server the user had approved before agentctl declared it stays approved. A
+server held back because a secret did not resolve is not approved either:
+nothing was written for it in `.mcp.json`. Older releases wrote the list under
+the project in `~/.claude.json`; Claude Code moves that copy into
+`settings.local.json` and deletes it on its next run, and agentctl no longer
+plans it.
+
 `.mcp.json` is normally committed, so a `:scope :project` server whose `:env`
 carries a credential — a `!bw://` reference that resolves at apply time, or a
 token written out literally — puts that credential in the repo. The plan marks
 it `⚠ secret value written into the project`, and `validate` scans every
-project's `.mcp.json`.
+project's `.mcp.json`. In either project placement the plan, and `apply --json`,
+print a resolved env or header secret masked (`"plai…34"`, marked `(changed)`
+when a rotation masks the same), and so is every old env or header value a change
+replaces or removes, whatever the new declaration says: it may have come from a
+reference the declaration no longer makes.
 
 A server written at local scope that is *also* still declared in the project's
 `.mcp.json` is reported, not deleted — agentctl never wrote that file and will
@@ -221,6 +281,78 @@ Claude Code still offers the `.mcp.json` definition.
 
 Dropping a server from a project's `:mcp` removes the entry agentctl wrote, in
 whichever scope it landed. A server agentctl never installed is left alone.
+
+Both project placements are merged onto the entry already there, so an env
+var, header or unmodelled key added by hand survives an update; the declared
+type, command, args and url replace their old values. An env var or header
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares, so a dropped secret does not
+stay in the file. A transport change
+(stdio to http, or back) replaces every transport key instead: merged, the
+stdio server's `command`, `args` and `env` would stay beside the new `url`. The
+plan lists the keys that go:
+
+```
+~ projects/sample mcps/docs
+      - args: ["docs-mcp"]
+      - command: "/usr/local/bin/docs-mcp"
+      ~ type: "stdio" -> "http"
+      + url: "https://docs.example.com/mcp"
+```
+
+## Unresolved secrets
+
+A value in an MCP server's `:env` or `:headers`, or in Claude's `:settings`
+`:env`, may be a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
+that is resolved when `apply!` runs. A settings `env` is where a project's
+`.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
+value:
+
+```clojure
+{:settings [{:env {"DOCS_API_KEY" "!bw://vendor/docs-api-key"} :acli [:claude] :in "projects/sample"}]}
+```
+
+The resolved value is what lands in `settings.json`, so the plan flags the op
+`⚠ secret value written into the project` (or into `~/.claude/settings.json`)
+and prints the value masked, `"sk-t…ef"`; a rotated secret whose mask reads the
+same on both sides is marked `(changed)`. An old value that a change replaces
+or drops is masked too, even when the new value is a plain literal. A project's
+`.claude/settings.json` is usually committed; `.claude/settings.local.json` is
+the private one.
+
+When a reference does not resolve — the vault is locked, the variable is unset,
+the Bitwarden field is empty or holds the text `null`, the variable, file or
+command yields nothing but whitespace, the reference is malformed — Claude's server, or the settings `env` object, is not written at
+all, in any scope. Writing the rest of it would leave a server that is
+configured and cannot authenticate, and because the missing value would then be
+missing from the desired entry too, the next plan would report no drift. The plan
+names the server, the key and the reason instead:
+
+```
+= mcps/docs
+    ⚠ secret unresolved: bitwarden vault locked (headers.api-key) — nothing written
+```
+
+Every other change in the run still applies. `apply` exits 2 while such a server
+remains and `apply!` exits 1, listing what it held back, so a partial run is never
+reported as converged. A server held back this way is not recorded as owned: one
+that never got written cannot be pruned later, and a hand-made server of the same
+name stays the user's.
+
+For a user-wide server, whose secret `claude mcp add` stores and agentctl does
+not read back, drift is decided by the env and header *names*: a declared name
+missing from `~/.claude.json` is drift, a changed value is not. A name added by
+hand, such as an `Authorization` header, is not drift either. `claude mcp add`
+cannot edit an entry, so an update removes the server and adds it again, after
+backing up `~/.claude.json`; the add carries every env var (stdio) or header
+(http) the declaration does not name, so a hand-added one survives. A name
+agentctl declared and the declaration has since dropped is removed: the
+manifest records the names each server declares.
+
+`validate` checks the same references before anything runs: every MCP server's
+`:env` and `:headers` and Claude's settings `:env`, user-wide and per project.
+One a locked vault keeps is reported `?` (unknown, not a failure); one that is
+missing, emptied or malformed is an error (`✗`) and makes `validate` exit 1.
 
 ## Kimi Code
 
@@ -627,6 +759,11 @@ at the pack cache under `~/.agents/skill-packs`. `:scope :global` on an
 explicit `:skills` declaration keeps a skill user-wide even when a project
 names it.
 
+A skill whose source sits inside the project, such as one committed in its own
+`.agents/skills`, is linked relatively (`../../.agents/skills/<name>`), so the
+link resolves in any checkout and can be committed. The source directory itself
+is never removed, copied over, or linked onto itself.
+
 To promote a skill already linked in several projects, set its scope explicitly:
 
 ```clojure
@@ -638,18 +775,55 @@ whole-pack references. `apply` previews a `- projects/<id> skills/wrap-up` unlin
 for each redundant symlink in the configured projects; `apply!` installs the
 global skill first, then removes those links. This also covers legacy symlinks
 that predate agentctl's state file and projects that no longer name the skill.
-Local directories are preserved. Project links are kept if the global skill
+A local directory is removed only when it matches the source and nothing keeps
+it (see the list near the top of this guide). Project links are kept if the global skill
 is unavailable (including a project-only apply before global installation).
 
 A pack that is not cloned yet can enumerate nothing, so a dry `apply` reports
 `pack not fetched yet` for it. `apply!` clones first, then re-plans and links
 what the clone brought — one run, not two.
 
-Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi and the
-DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
-declared skills live there. For Pi and OMP a project's declared skills are
-installed user-wide instead — that is the only place those tools read skills
-from — and are owned there.
+Claude Code gets its own `.claude/skills`; Codex, antigravity, kimi, Pi and
+the DeepSeek Harness read the shared `<repo>/.agents/skills`, so a project's
+declared skills live there. OMP reads skills only from the user's home, so for
+OMP a project's declared skills are installed user-wide instead and are owned
+there.
+
+### Pi
+
+Pi reads a project's skills from `.pi/skills` and from `.agents/skills` in the
+working directory and each directory above it, up to the repository root,
+once it trusts the project. Trust is the project's `:trust` for pi when the
+config places one, else the nearest decision in pi's `trust.json`, else pi's
+`defaultProjectTrust` setting: `"always"` trusts every project, `"never"`
+none, and `"ask"` (the default) asks at startup and reads nothing until the
+project is trusted. The plan says when a project's skills sit where pi asks
+first or does not read them. Pi's own `~/.pi/agent/skills` and
+`~/.agents/skills` are its user-wide directories. Earlier versions of
+agentctl installed a project's skills for pi user-wide; `apply!` now moves
+each one into the project, removing the user-wide link it made. In a project
+pi does not trust, that takes the skill away from pi until the project is
+trusted.
+
+Pi keys a skill on the `name:` in its SKILL.md, keeps the first one it finds —
+a trusted project's before the user's, `~/.pi/agent/skills` before
+`~/.agents/skills` — and warns at startup about every later one. Two paths to
+the same SKILL.md are one skill to it, but an identical copy is a second one.
+So for pi agentctl:
+
+- removes a project copy, in `.agents/skills` or `.pi/skills`, that is
+  identical to a skill installed user-wide for pi, as it does for the other
+  agents, and only in a project pi trusts (and keeps it in the cases listed
+  above — a copy codex also reads stays until codex has the skill user-wide);
+- reports a project skill that differs from a user-wide one of the same name:
+  pi loads the project's one there and warns of the collision. Rename one, or
+  leave `:pi` out of the user-wide skill to keep the project's quietly;
+- reports a skill in `~/.agents/skills` that has the name of a user-wide one;
+- says when a project's skills are placed where pi asks before reading them,
+  or does not read them at all. Removals and collisions are left alone there.
+
+These reports are warnings: `apply` shows them while it has changes to make,
+and `validate` repeats them under SKILLS once the plan has converged.
 
 ## Remote hosts
 
@@ -716,6 +890,31 @@ one project. Ops writing one file for one project collapse into a single block,
 their ids in braces (`mcps/{docs search}`); a shared prefix is factored out
 (`permissions.{allow ask}`). A `=` block is a check that already passes — the
 setting is declared, it was read, and the file agrees.
+
+A plan with nothing to change prints `no changes — environment matches
+agents.edn`, unless it carries a warning: a `=` block whose indented line says
+why a declared setting went nowhere, such as an unsupported setting. That plan
+is printed in full — by `apply`, `apply!`, `--host` and the GUI alike, and under
+`--json` as ops with `"warn": true` — and still exits 0, since nothing would
+change.
+
+Under `--json`, `apply`, `apply!` and `validate` print one JSON document on
+stdout: the plan's `ops`, the selector `warnings`, the config's own warnings
+and this machine's (the status line's) in `findings` (`level`, `where`,
+`message`, as `validate --json` prints them), the number of changes that write
+a resolved secret in `secrets`, and the `summary`. `apply!` adds `applied` —
+`done` and `failed`, each op with its `tool`, `kind`, `id` and `action`, a
+failed one with its `error` — and `backups`. A confirmation prompt cannot share
+stdout with that document, so `apply! --json` needs `-y`. An error is
+`{"error": …}` with exit 1 instead — a config with errors carries its
+`findings` too; an unknown command or option, or a config file missing,
+unreadable or not a file, only the message. Without `--json` the same errors
+are one `error: …` line.
+
+A skill whose source is not on disk, such as a `:per-tool :path` into a
+project copy that has since gone, is not linked: the plan says `source
+missing: <path> — link not changed` and leaves whatever link is there, so it
+does not plan the same change on every run. `validate` repeats it under SKILLS.
 
 `AGENTCTL_HOME` repoints every path (and the `codex`/`claude`/`llm` CLIs it
 drives) at a scratch tree — that is how the end-to-end tests provision a

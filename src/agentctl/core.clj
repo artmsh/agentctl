@@ -46,13 +46,71 @@
    tool. An old-format config plans a project's trust and settings as
    `:projects`, and extensions have no DSL section. `-k` and
    `--only` are checked against this, because a kind no op carries selects
-   nothing, and an empty plan reads exactly like a converged machine."
+   nothing, and an empty plan reads exactly like a converged machine — and,
+   once a config is loaded, against `kinds-for` its format."
   (vec (sort (conj (into (set scope/kinds) (mapcat val config/capabilities)) statusline/kind))))
 
+(def dsl-refiled
+  "The kinds the two config formats name differently. Adapters plan a
+   project's trust, permissions and settings as `:projects` ops in either
+   format, the old format's project registry being where all three are
+   declared. The entity DSL has no `:projects` section, and `build-plan`
+   refiles each such op under the section that declared it (`dsl-section`).
+   So `:projects` carries nothing in the DSL, and a target no adapter plans
+   under its own name — `:trust` — carries nothing in the old format."
+  {:projects #{:trust :permissions :settings}})
+
+(defn- dsl-section
+  "The DSL section a `:projects` op is refiled under — one of `dsl-refiled`'s."
+  [o]
+  (cond
+    (str/includes? (name (:id o)) "permissions.") :permissions
+    (or (= "trust" (name (:id o))) (= (:id o) (:project o))) :trust
+    :else :settings))
+
+(defn kinds-for
+  "The kinds an op can carry under `cfg`'s format: `kinds` less those only the
+   other format plans (see `dsl-refiled`)."
+  [cfg]
+  (let [adapter-kinds (set (mapcat val config/capabilities))
+        dead (if (:entity-dsl? cfg)
+               (set (keys dsl-refiled))
+               (set (remove adapter-kinds (mapcat val dsl-refiled))))]
+    (vec (remove dead kinds))))
+
+(defn- format-name [cfg] (if (:entity-dsl? cfg) "an entity-DSL config" "an old-format config"))
+
 (defn kind-problem
-  "Why `k` is no kind to select."
-  [k]
-  (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
+  "Why `k` is no kind to select — with `cfg`, also a kind `cfg`'s format
+   plans nothing as. A config whose format nothing decides yet (`{}`, or only
+   format-neutral keys; see `config/config-format`) is planned the old way,
+   so the same kinds select nothing in it, but the reason names no format."
+  ([k]
+   (str "unknown kind " k " (kinds: " (str/join ", " (map name kinds)) ")"))
+  ([cfg k]
+   (when (and (some #{k} kinds) (not (some #{k} (kinds-for cfg))))
+     (if-not (:format cfg)
+       (str "selects nothing in this config: nothing in it decides between the entity DSL"
+            " and the old format yet")
+       (let [instead (map name (sort (if (:entity-dsl? cfg)
+                                       (get dsl-refiled k)
+                                       (for [[from to] dsl-refiled :when (contains? to k)] from))))]
+         (str (format-name cfg) " plans nothing as " (name k) "; it files those ops under "
+              (if (next instead) (str (str/join ", " (butlast instead)) " or " (last instead)) (first instead))
+              " (kinds for this config: " (str/join ", " (map name (kinds-for cfg))) ")"))))))
+
+(defn dead-selectors
+  "`[flag value message level]` for each `-k` kind, and each `--only` kind,
+   that is a kind but one `cfg`'s format plans nothing as: `-k projects` on
+   an entity-DSL config, `-k trust` on an old-format one. Such a run plans
+   nothing and exits 0 — exactly what a converged machine looks like — so it
+   is an `:error`. Where the format is still undecided the run is only told,
+   with a `:warn`: the next section added may decide it either way."
+  [cfg {:keys [kinds only]}]
+  (let [level (if (:format cfg) :error :warn)]
+    (concat
+     (for [k kinds :let [p (kind-problem cfg k)] :when p] ["-k" (name k) p level])
+     (for [[k id] only :let [p (kind-problem cfg k)] :when p] ["--only" (str (name k) "/" id) p level]))))
 
 (defn unknown-selectors
   "`[flag value message]` for each `:tools` / `:kinds` value that selects
@@ -328,10 +386,10 @@
 (def project-skill-dirs
   {:claude claude/project-skills-dir :codex codex/project-skills-dir
    :antigravity antigravity/project-skills-dir :kimi kimi/project-skills-dir
-   :dsh dsh/project-skills-dir})
+   :dsh dsh/project-skills-dir :pi pi/project-skills-dir})
 
 (defn- share-project-skill-links
-  "Codex, antigravity, kimi and the DeepSeek Harness read one
+  "Codex, antigravity, kimi, pi and the DeepSeek Harness read one
    `<repo>/.agents/skills`. A link any of them wants is planned once, and
    never removed on behalf of another."
   [cfg ops]
@@ -388,6 +446,9 @@
                    :in-projects (when-not global? (not-empty ps))))))
       :skills
       (let [s (get-in cfg [:skills sid])
+            ;; what this tool's link actually points at: the line must name
+            ;; the source the op links, or a repointed link reads as converged
+            override (get-in s [:per-tool (:tool o) :path])
             from (or (:from s)
                      (when-let [proj (get-in cfg [:projects (:project o)])]
                        (some #(when (and (get-in cfg [:skill-packs %])
@@ -397,6 +458,7 @@
                              (:skills proj))))
             pack (get-in cfg [:skill-packs from])]
         (cond
+          override {:kind "skill" :entity sid :source (u/tilde (u/abs-path override))}
           (and (nil? s) (get-in cfg [:skill-packs sid])) (pack-line sid [])
           (and pack (or (nil? s) (:via-pack s))) (pack-line from [(name sid)])
           (and pack (:implicit pack)) {:kind "skill" :entity sid :source (sources/source-label pack)}
@@ -441,6 +503,16 @@
              o))
          ops)))
 
+(defn- skill-readers
+  "The agents that read project `p`'s shared `.agents/skills`: those placed
+   there, pi unless it never reads the project's skills. A copy there is
+   theirs as much as the agent's whose user-wide skill it repeats."
+  [p]
+  (let [as-pi (cond-> p (:trust-by-tool p) (assoc :trusted (get (:trust-by-tool p) :pi)))]
+    (set (filter #(and (contains? sources/shared-readers %)
+                       (or (not= :pi %) (not= :untrusted (pi/trust as-pi))))
+                 (:for-tools p)))))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -458,6 +530,7 @@
                                        #(merge {:id pid :path p :tools {}} %
                                                {:for-tools (conj (set (:for-tools %)) t)})) c)) c))
                     cfg (:managed st))
+        cfg (update cfg :projects #(into {} (map (fn [[id p]] [id (assoc p :skill-readers (skill-readers p))])) %))
         tool-ops (mapcat (fn [t]
                            (let [tcfg (tool-cfg cfg t)]
                              (concat
@@ -468,21 +541,21 @@
         dups (skills-cli/global-duplicate-ops cfg tool-cfg selected
                                               {:claude claude/skills-dir :codex codex/skills-dir
                                                :antigravity antigravity/skills-dir
-                                               :kimi kimi/skills-dir :dsh dsh/skills-dir})
+                                               :kimi kimi/skills-dir :dsh dsh/skills-dir
+                                               :pi pi/skills-dir})
         tool-ops (if (:entity-dsl? cfg)
                    (map (fn [o]
                           (cond-> o
                             (:project o) (assoc :project-path (get-in cfg [:projects (:project o) :path]))
-                            (= :projects (:kind o))
-                            (assoc :kind (cond
-                                           (str/includes? (name (:id o)) "permissions.") :permissions
-                                           (or (= "trust" (name (:id o)))
-                                               (= (:id o) (:project o))) :trust
-                                           :else :settings)))) tool-ops) tool-ops)]
+                            (= :projects (:kind o)) (assoc :kind (dsl-section o)))) tool-ops)
+                   tool-ops)]
     (-> (concat (sources/pack-ops cfg)
                 (extensions/source-ops cfg selected)
                 (skills-cli/plan-ops cfg st tool-cfg selected)
-                (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) ((:drop dups) (:target %)))
+                ;; a collision report names the copy as well, but says what pi
+                ;; loads there, which holds whether the copy is kept or removed
+                (share-project-skill-links cfg (remove #(and (= :skills (:kind %)) (not (:collision %))
+                                                             ((:drop dups) (:target %)))
                                                        tool-ops))
                 ;; after the user-wide installs they check for
                 (:ops dups)
@@ -532,7 +605,12 @@
    (for [[id decl] (:hooks (get-in cfg [:tools :claude]))
          :let [path [:hooks (keyword (u/kw->str (:event decl)))]]]
      [:claude :hooks id {:path path :value (claude/hook-group decl)}])
-   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))] [t :mcps id])
+   ;; claude's servers carry the env and header names they declare: one
+   ;; dropped from the declaration is agentctl's to remove, the rest the user's
+   (for [[id m] (:mcps cfg) t (:tools m) :when (= :global (common/mcp-scope m t))]
+     (if (= :claude t)
+       [t :mcps id (claude/declared-names (common/for-this-tool m t))]
+       [t :mcps id]))
    (for [[pid proj] (:projects cfg)
          mid (:mcp proj)
          :let [m (get-in cfg [:mcps mid])]
@@ -540,7 +618,9 @@
          t (:tools m)
          :when (and (common/project-scopes (common/mcp-scope m t))
                     (contains? common/project-mcp-tools t))]
-     [t :mcps (keyword (name pid) (name mid)) {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}])
+     [t :mcps (keyword (name pid) (name mid))
+      (merge {:entity-id mid :project-id pid :project-path (:path proj) :scope (common/mcp-scope m t)}
+             (when (= :claude t) (claude/declared-names m)))])
    ;; a project's skill is owned user-wide only by tools that cannot host one
    ;; inside a project — for them the user's home is the only place it fits
    (for [[id s] (sources/all-skills cfg) t (:tools s)
@@ -600,6 +680,31 @@
           :when (not-any? #(contains? (id-names %) id) (declared kind))]
       (str (name kind) "/" (second sel)))))
 
+(declare op-keys)
+
+(defn- mark-approvals
+  "A Claude `.mcp.json` server whose name agentctl added to the project's
+   `enabledMcpjsonServers` is marked `:approved`, so removing the server can
+   take the approval with it; a name that was there already is the user's,
+   and never marked. Recording rebuilds an entry from the declaration, so
+   the mark is carried over while the server stays at `:project` scope, and
+   set for the servers a completed approval op added (`:approves`)."
+  [s old cfg failed done]
+  (let [ok? (fn [o] (let [k (first (op-keys o))]
+                      (and (not (failed k)) (or (nil? done) (done k)))))
+        project? (fn [s k] (= :project (get-in s [:managed k :scope])))
+        s (reduce (fn [s [k e]]
+                    (cond-> s
+                      (and (:approved e) (= :project (:scope e)) (project? s k))
+                      (assoc-in [:managed k :approved] true)))
+                  s (:managed old))]
+    (reduce (fn [s o]
+              (reduce (fn [s id]
+                        (let [k (state/key-for :claude :mcps id)]
+                          (cond-> s (project? s k) (assoc-in [:managed k :approved] true))))
+                      s (when (ok? o) (:approves o))))
+            s (:planned-ops cfg))))
+
 (defn sync-state!
   "Record what we now own; forget resources dropped from the config.
    `failed` (tool kind id) triples are left unrecorded — claiming ownership of
@@ -641,6 +746,7 @@
                    (state/record s t k id (or (data-for t k id data) {})) s))
                $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)
+       (mark-approvals $ st cfg failed done)
        (ownership/record $ cfg failed done)))))
 
 ;; ---------------------------------------------------------------- apply
@@ -656,6 +762,15 @@
    installs a skill for several agents."
   [o]
   (or (:owns o) [[(:tool o) (:kind o) (:id o)]]))
+
+(defn unresolved
+  "Ops held back because a secret did not resolve (`common/unresolved-op`).
+   Nothing was written for them, so a run holding one has not converged:
+   `apply` exits 2 and `apply!` exits 1, and like a failed op none of them is
+   claimed as owned — a later removal from agents.edn would otherwise prune a
+   hand-made server of the same name that agentctl never wrote."
+  [ops]
+  (filter :unresolved ops))
 
 (defn execute!
   "Run every mutating op. Returns {:done [...] :failed [...]}."

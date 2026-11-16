@@ -47,7 +47,15 @@
   (let [p (abs-path p)]
     (try (str (fs/real-path p)) (catch Exception _ p))))
 
-(defn exists? [p] (and p (fs/exists? (fs/path (expand (str p))) {:nofollow-links true})))
+(defn exists?
+  "Is anything at `p`, a dangling symlink included? That is the question a
+   removal asks: a link that points nowhere is still there to unlink."
+  [p] (and p (fs/exists? (fs/path (expand (str p))) {:nofollow-links true})))
+
+(defn resolves?
+  "Does `p` lead to something on disk, following links? A dangling link does
+   not: there is nothing behind it to read, hash or keep."
+  [p] (boolean (and p (fs/exists? (fs/path (expand (str p)))))))
 
 ;; ---------------------------------------------------------------- hashing
 
@@ -57,9 +65,14 @@
          (map #(format "%02x" %))
          (apply str))))
 
-(defn path-sha256 [p]
-  (when (exists? p)
-    (let [p (fs/path (expand (str p)))]
+(defn path-sha256
+  "Content hash of a file or a directory tree; nil when nothing is behind `p`,
+   which is the case for a dangling link. A link is hashed as what it leads
+   to: walked as written, a link to a directory is an empty tree, so every
+   such link would hash alike and none would match its own target."
+  [p]
+  (when (resolves? p)
+    (let [p (fs/real-path (fs/path (expand (str p))))]
       (if (fs/directory? p)
         (sha256 (->> (fs/glob p "**")
                      (sort)
@@ -67,6 +80,14 @@
                                        (when (fs/regular-file? f) (sha256 (slurp (fs/file f)))))))
                      (str/join "\n")))
         (sha256 (slurp (fs/file p)))))))
+
+(defn same-content?
+  "Do `a` and `b` hold the same bytes? Never when either is missing: two nil
+   hashes are equal, and a dangling copy would pass for its vanished source —
+   the evidence a removal is allowed to act on."
+  [a b]
+  (let [h (path-sha256 a)]
+    (boolean (and h (= h (path-sha256 b))))))
 
 ;; ---------------------------------------------------------------- io
 

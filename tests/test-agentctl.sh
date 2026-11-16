@@ -1074,4 +1074,783 @@ grep -q 'git clone exited' "$FAILSB/apply.txt" || { cat "$FAILSB/apply.txt"; fai
 [ ! -e "$SB/.pi/agent/skills/gone-skill" ] || fail "a skill was linked against a pack that failed to clone"
 if grep -q ":gone" "$SB/.config/agentctl/state.edn" 2>/dev/null; then fail "a failed clone was recorded as owned"; fi
 
+echo "23. a converged plan still prints its warnings, and exits 0"
+CW="$SB/converged-warn"
+mkdir -p "$CW"
+cw() { (cd "$CW" && AGENTCTL_HOME="$CW" run "$@"); }
+# claude has no :bogus-setting: every plan reports it, converged or not
+cat > "$CW/agents.edn" <<'EDN'
+{:executors {:claude {:model "opus" :bogus-setting true}}}
+EDN
+cw apply! -f "$CW/agents.edn" -t claude -y > "$CW/first.txt"
+grep -q '"model" *: *"opus"' "$CW/.claude/settings.json" || { cat "$CW/first.txt"; fail "setup: claude settings not written"; }
+for cmd in apply apply!; do
+  set +e
+  cw "$cmd" -f "$CW/agents.edn" -t claude -y > "$CW/$cmd.txt"; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning exited $code"; }
+  grep -q 'unsupported setting :bogus-setting' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd hid its warning behind no changes"; }
+  grep -q '^0 to add, 0 to change, 0 to remove' "$CW/$cmd.txt" \
+    || { cat "$CW/$cmd.txt"; fail "a converged $cmd with a warning planned a change"; }
+done
+set +e
+cw apply -f "$CW/agents.edn" -t claude --json > "$CW/plan.json"; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$CW/plan.json"; fail "a converged apply --json with a warning exited $code"; }
+python3 - "$CW/plan.json" <<'PY' || { cat "$CW/plan.json"; fail "--json dropped the warning of a converged plan"; }
+import json, sys
+ops = json.load(open(sys.argv[1]))["ops"]
+assert not [o for o in ops if o["action"] in ("create", "update", "delete")], ops
+assert any(o.get("warn") and "bogus-setting" in o["summary"] for o in ops), ops
+PY
+
+echo "24. --json prints one JSON document: config findings and refusals included"
+JO="$SB/json-out"
+mkdir -p "$JO"
+jo() { (cd "$JO" && AGENTCTL_HOME="$JO" run "$@"); }
+# jo_json <want-exit> <out-file> <args…>: the run exits as wanted and its
+# stdout parses as JSON on its own
+jo_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  jo "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$JO/warn.edn" <<'EDN'
+{:cli-code {:pi {:model "m"}}}
+EDN
+cat > "$JO/error.edn" <<'EDN'
+{:mcps {:x {:cmd "a"}} :projects {:p {:mcp [:nope]}}}
+EDN
+# a structural warning travels in `findings`, beside the plan
+jo_json 2 "$JO/warn.json" apply -f "$JO/warn.edn" -t pi
+python3 - "$JO/warn.json" <<'PY' || { cat "$JO/warn.json"; fail "--json lost the config warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ops"], d
+assert any(f["level"] == "warn" and f["where"] == ["cli-code"] and ":cli-code" in f["message"]
+           for f in d["findings"]), d["findings"]
+PY
+jo_json 0 "$JO/validate.json" validate -f "$JO/warn.edn" -t pi
+# so does this machine's word on the status line, checked once the scope is known
+cat > "$JO/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+AGENT_STATUSLINE_CONFIG="$JO/elsewhere.json" jo_json 2 "$JO/statusline.json" apply -f "$JO/statusline.edn" --all
+python3 - "$JO/statusline.json" <<'PY' || { cat "$JO/statusline.json"; fail "--json lost the status-line warning"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and f["where"] == ["statusline", "env"] for f in d["findings"]), d["findings"]
+PY
+# a config with errors is refused as JSON, and plans nothing
+for cmd in apply apply!; do
+  jo_json 1 "$JO/error-$cmd.json" "$cmd" -f "$JO/error.edn" -y
+  python3 - "$JO/error-$cmd.json" <<'PY' || { cat "$JO/error-$cmd.json"; fail "$cmd --json refused a config without saying why"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "refusing to plan" in d["error"], d
+assert "ops" not in d, d
+assert any(f["level"] == "error" and f["where"] == ["projects", "p", "mcp"] for f in d["findings"]), d
+PY
+done
+# so is every other error: a selector, a missing file
+jo_json 1 "$JO/kind.json" apply -f "$JO/warn.edn" -k bogus-kind
+python3 -c 'import json,sys; sys.exit(0 if "unknown kind" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/kind.json" \
+  || { cat "$JO/kind.json"; fail "-k bogus-kind --json lost the error"; }
+jo_json 1 "$JO/missing.json" apply -f "$JO/nowhere.edn"
+python3 -c 'import json,sys; sys.exit(0 if "not found" in json.load(open(sys.argv[1]))["error"] else 1)' "$JO/missing.json" \
+  || { cat "$JO/missing.json"; fail "a missing config under --json lost the error"; }
+# text output is unchanged
+set +e
+jo apply -f "$JO/warn.edn" -t pi > "$JO/warn.txt"; code=$?
+set -e
+[ "$code" = 2 ] && grep -q '⚠ cli-code — :cli-code is the old name' "$JO/warn.txt" \
+  || { cat "$JO/warn.txt"; fail "the text plan stopped printing config warnings"; }
+
+echo "25. -k refuses a kind the config's format never plans"
+FK="$SB/format-kinds"
+mkdir -p "$FK/proj"
+fk() { (cd "$FK" && AGENTCTL_HOME="$FK" run "$@"); }
+# the same trusted project, once per format: the DSL plans its trust as
+# `trust`, the old format as `projects`
+cat > "$FK/dsl.edn" <<EDN
+{:trust [{:in "$FK/proj" :acli [:codex]}]}
+EDN
+cat > "$FK/old.edn" <<EDN
+{:projects {:p {:path "$FK/proj" :trusted true :executors #{:codex}}}}
+EDN
+# fk_code <want-exit> <out-file> <args…>
+fk_code() {
+  local want=$1 out=$2; shift 2
+  set +e
+  fk "$@" > "$out" 2>&1; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* exited $code, wanted $want"; }
+}
+for cmd in apply apply!; do
+  fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: agents, extensions, ' "$FK/dsl-$cmd.txt" \
+    || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
+  grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
+  fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y
+  grep -q '^error: -k trust: an old-format config plans nothing as trust; it files those ops under projects (kinds for this config: .*projects' "$FK/old-$cmd.txt" \
+    || { cat "$FK/old-$cmd.txt"; fail "$cmd -k trust on an old-format config did not name its kinds"; }
+done
+[ -e "$FK/.codex/config.toml" ] && fail "a refused kind wrote the codex config"
+# the counterpart in each format plans the trust
+fk_code 2 "$FK/dsl-trust.txt" apply -f "$FK/dsl.edn" --all -t codex -k trust
+grep -q 'trust' "$FK/dsl-trust.txt" || { cat "$FK/dsl-trust.txt"; fail "-k trust planned nothing on a DSL config"; }
+fk_code 2 "$FK/old-projects.txt" apply -f "$FK/old.edn" --all -t codex -k projects
+grep -q 'projects' "$FK/old-projects.txt" || { cat "$FK/old-projects.txt"; fail "-k projects planned nothing on an old-format config"; }
+# --only's kind is held to the same rule, and --json carries the refusal
+fk_code 1 "$FK/only.txt" apply -f "$FK/dsl.edn" --only projects/p
+grep -q '^error: --only projects/p: an entity-DSL config plans nothing as projects' "$FK/only.txt" \
+  || { cat "$FK/only.txt"; fail "--only projects/p on a DSL config was not refused"; }
+fk_code 1 "$FK/dead.json" apply -f "$FK/old.edn" -k trust --json
+python3 -c 'import json,sys; sys.exit(0 if "old-format" in json.load(open(sys.argv[1]))["error"] else 1)' "$FK/dead.json" \
+  || { cat "$FK/dead.json"; fail "-k trust --json lost the refusal"; }
+# --help marks the old format's own kind
+run --help | tr -s ' \n' ' ' \
+  | grep -q "legacy (old-format configs only, in place of trust, and of a project's permissions and settings): projects " \
+  || { run --help; fail "--help does not mark projects as legacy"; }
+# The steps below each get a home of their own: what the steps above own would
+# otherwise turn into prunes and change the exit codes asserted here.
+fresh_home() { local h="$SB/homes/$1"; rm -rf "$h"; mkdir -p "$h"; printf '%s' "$h"; }
+# mkskill DIR [NAME [BODY]]: a skill directory whose SKILL.md says NAME
+mkskill() { mkdir -p "$1"; printf -- "---\nname: ${2:-$(basename "$1")}\ndescription: ${3:-d}.\n---\n\nbody ${3:-d}\n" > "$1/SKILL.md"; }
+# commit everything in repo DIR
+commit_all() { git -C "$1" add -A && git -C "$1" -c user.email=t@e -c user.name=t commit -qm "${2:-c}"; }
+
+echo "26. a stale lock entry beside a dangling project link is cleaned up, not a crash"
+(
+  H=$(fresh_home stale-lock); export AGENTCTL_HOME="$H"
+  PK="$H/projects/shared"; P="$H/projects/game"
+  mkdir -p "$PK/skills/wrap-up" "$PK/skills/other" "$P/.agents/skills" "$P/.claude/skills"
+  printf -- '---\nname: wrap-up\ndescription: Demo.\n---\n' > "$PK/skills/wrap-up/SKILL.md"
+  printf -- '---\nname: other\ndescription: Demo.\n---\n' > "$PK/skills/other/SKILL.md"
+  # the CLI's copy is gone; claude's link into it and the lock entry are not
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' \
+    > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$PK/skills"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex]}
+          [shared "other"] {:in "projects/game" :acli [:claude]}}}
+EDN
+  set +e
+  run apply -f "$H/agents.edn" --all > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "a dangling project link: expected drift (exit 2), got $code"; }
+  grep -q "^exec: '.*skills-stub remove wrap-up -y'" "$H/plan.txt" || { cat "$H/plan.txt"; fail "the stale lock entry is not dropped"; }
+  grep -q "^exec: 'unlink ~/projects/game/.claude/skills/wrap-up'" "$H/plan.txt" || { cat "$H/plan.txt"; fail "the dangling link is not unlinked"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed on a dangling project link"; }
+  [ ! -L "$P/.claude/skills/wrap-up" ] || fail "the dangling link survived apply!"
+  grep -q '"wrap-up"' "$P/skills-lock.json" && fail "the stale lock entry survived apply!"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "a second apply did not converge"; }
+)
+
+echo "27. a project copy pi is pinned to survives its skill going user-wide, in one apply!"
+(
+  H=$(fresh_home pinned-copy); export AGENTCTL_HOME="$H"
+  PK="$H/projects/shared"; P="$H/projects/game"
+  mkdir -p "$PK/skills/wrap-up" "$PK/skills/other" "$P/.agents/skills" "$P/.claude/skills"
+  printf -- '---\nname: wrap-up\ndescription: Demo.\n---\n\nbody\n' > "$PK/skills/wrap-up/SKILL.md"
+  printf -- '---\nname: other\ndescription: Demo.\n---\n' > "$PK/skills/other/SKILL.md"
+  # what the skills CLI left behind: a copy, claude's relative link into it, a lock entry
+  cp -R "$PK/skills/wrap-up" "$P/.agents/skills/wrap-up"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' \
+    > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$PK/skills"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]
+                              :per-tool {:pi {:path "~/projects/game/.agents/skills/wrap-up"}}}
+          [shared "other"] {:in "projects/game" :acli [:claude]}}}
+EDN
+  set +e
+  run apply -f "$H/agents.edn" --all > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "the pinned copy: expected drift (exit 2), got $code"; }
+  grep -q "copy ~/projects/game/.agents/skills/wrap-up kept — pi's wrap-up is linked from it" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the kept copy is not reported with its reason"; }
+  grep -q "skills-stub remove wrap-up" "$H/plan.txt" && { cat "$H/plan.txt"; fail "the copy pi is pinned to is planned for removal"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed"; }
+  [ -f "$H/.pi/agent/skills/wrap-up/SKILL.md" ] || { ls -l "$H/.pi/agent/skills"; fail "pi's user-wide wrap-up dangles"; }
+  [ -d "$P/.agents/skills/wrap-up" ] && [ ! -L "$P/.agents/skills/wrap-up" ] || fail "the copy pi is pinned to was removed"
+  [ ! -e "$P/.claude/skills/wrap-up" ] && [ ! -L "$P/.claude/skills/wrap-up" ] || fail "claude's redundant project link survived"
+  grep -q '"wrap-up"' "$P/skills-lock.json" || fail "the kept copy lost its lock entry"
+  set +e
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 0 ] || { cat "$H/plan2.txt"; fail "one apply! did not converge (exit $code)"; }
+)
+
+echo "28. a skill committed in the project's own .agents/skills is linked, never moved"
+(
+  H=$(fresh_home committed-skill); export AGENTCTL_HOME="$H"
+  P="$H/projects/sample"
+  mkdir -p "$P/.agents/skills/shared"
+  printf -- '---\nname: shared\ndescription: Demo.\n---\n' > "$P/.agents/skills/shared/SKILL.md"
+  git -C "$P" init -q
+  git -C "$P" add -A
+  git -C "$P" -c user.email=t@e -c user.name=t commit -qm init
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$P/.agents/skills"] {:alias sample-skills}}
+ :skills {[sample-skills "shared"] {:in "projects/sample" :acli [:claude]}}}
+EDN
+  set +e
+  run apply -f "$H/agents.edn" --all -k skills -k skill-packs > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "the committed skill: expected drift (exit 2), got $code"; }
+  [ "$(grep -c "^exec:" "$H/plan.txt")" = 1 ] \
+    && grep -q "^exec: 'ln -sfn ../../.agents/skills/shared ~/projects/sample/.claude/skills/shared'" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the plan is not one relative link"; }
+  for i in 1 2; do
+    run apply! -f "$H/agents.edn" --all -k skills -k skill-packs -y > "$H/apply$i.txt" 2>&1 || { cat "$H/apply$i.txt"; fail "apply! $i failed"; }
+  done
+  [ -f "$P/.agents/skills/shared/SKILL.md" ] && [ ! -L "$P/.agents/skills/shared" ] || fail "the committed source was moved"
+  [ "$(readlink "$P/.claude/skills/shared")" = "../../.agents/skills/shared" ] || fail "claude's link is not relative"
+  [ -f "$P/.claude/skills/shared/SKILL.md" ] || fail "claude's link does not resolve"
+  [ ! -e "$P/skills-lock.json" ] || fail "a skills-lock.json was written"
+  # the new .claude/ is untracked by design; nothing git tracks may change
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "apply! changed tracked files"; }
+  # a relative link is committable: once committed, the tree stays clean
+  git -C "$P" add -A
+  git -C "$P" -c user.email=t@e -c user.name=t commit -qm link
+  run apply -f "$H/agents.edn" --all -k skills -k skill-packs > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "not idempotent"; }
+  [ -z "$(git -C "$P" status --porcelain)" ] || { git -C "$P" status; fail "git status is not clean"; }
+)
+
+echo "29. a per-tool path is the source the plan shows, and --verbose shows the link"
+(
+  H=$(fresh_home per-tool-path); export AGENTCTL_HOME="$H"
+  for d in "$H/projects/shared/skills/wrap-up" "$H/projects/sample/.agents/skills/wrap-up"; do
+    mkdir -p "$d"
+    printf -- '---\nname: wrap-up\ndescription: Demo.\n---\n' > "$d/SKILL.md"
+  done
+  cat > "$H/base.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}}}
+EDN
+  run apply! -f "$H/base.edn" --all -t pi -k skills -y > /dev/null
+  sed 's#:acli \[:pi\]}#:acli [:pi] :per-tool {:pi {:path "~/projects/sample/.agents/skills/wrap-up"}}}#' \
+    "$H/base.edn" > "$H/agents.edn"
+  (run apply -f "$H/agents.edn" --all -t pi -k skills || true) > "$H/plan.txt" 2>&1
+  grep -q '~ skill \[agents: pi\] ~/projects/sample/.agents/skills/wrap-up' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the plan names the base source, not the per-tool path"; }
+  (run apply -f "$H/agents.edn" --all -t pi -k skills --verbose || true) > "$H/plan-v.txt" 2>&1
+  grep -q "^exec: 'ln -sfn ~/projects/sample/.agents/skills/wrap-up ~/.pi/agent/skills/wrap-up'" "$H/plan-v.txt" \
+    && grep -q '^    link ~/.pi/agent/skills/wrap-up -> ~/projects/sample/.agents/skills/wrap-up (was ~/projects/shared/skills/wrap-up)' "$H/plan-v.txt" \
+    || { cat "$H/plan-v.txt"; fail "--verbose does not show the user-wide link it changes"; }
+  (run apply -f "$H/agents.edn" --all -t pi -k skills --json || true) 2>/dev/null | python3 -c '
+import json, sys
+o = [o for o in json.load(sys.stdin)["ops"] if o.get("kind") == "skills"][0]
+assert o["display"]["source"] == o["from"] == "~/projects/sample/.agents/skills/wrap-up", o
+' || fail "the JSON display source disagrees with from"
+)
+
+echo "30. pi reads a project's skills in the project, and is told where one shadows a user-wide skill"
+(
+  H=$(fresh_home pi-project-skills); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  for s in wrap-up audit review; do
+    mkdir -p "$K/$s"; printf -- "---\nname: $s\ndescription: Shared $s.\n---\n" > "$K/$s/SKILL.md"
+  done
+  # the project's own wrap-up, and an identical copy of audit in pi's own directory
+  mkdir -p "$P/.agents/skills/wrap-up" "$P/.pi/skills"
+  printf -- '---\nname: wrap-up\ndescription: Ours.\n---\n' > "$P/.agents/skills/wrap-up/SKILL.md"
+  cp -R "$K/audit" "$P/.pi/skills/audit"
+  git -C "$P" init -q
+  cat > "$H/untrusted.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}
+          [shared "audit"] {:in :all :acli [:pi]}
+          [shared "review"] {:in "projects/proj" :acli [:pi]}}}
+EDN
+  { sed '$ s/}$//' "$H/untrusted.edn"; echo ' :trust [{:in "projects/proj" :acli [:pi]}]}'; } > "$H/agents.edn"
+  (run apply -f "$H/untrusted.edn" --all -t pi || true) > "$H/plan0.txt" 2>&1
+  grep -q 'pi asks before reading project skills here' "$H/plan0.txt" \
+    && ! grep -q 'in place of the user-wide' "$H/plan0.txt" \
+    || { cat "$H/plan0.txt"; fail "an untrusted project: no trust warning, or a collision pi never sees"; }
+  set +e
+  run apply -f "$H/agents.edn" --all -t pi > "$H/plan.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 2 ] || { cat "$H/plan.txt"; fail "pi project skills: expected drift (exit 2), got $code"; }
+  grep -q "^exec: 'ln -sfn ~/projects/shared/skills/review ~/projects/proj/.agents/skills/review'" "$H/plan.txt" \
+    && grep -q "^exec: 'rm -r ~/projects/proj/.pi/skills/audit'" "$H/plan.txt" \
+    && grep -q 'pi loads ~/projects/proj/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
+    && ! grep -q '\.pi/agent/skills/review' "$H/plan.txt" \
+    && ! grep -q 'pi asks before reading' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the plan does not place review in the project, drop the audit copy and report the wrap-up collision"; }
+  run apply! -f "$H/agents.edn" --all -t pi -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "apply! failed"; }
+  [ -f "$P/.agents/skills/review/SKILL.md" ] || fail "review is not in the project's .agents/skills"
+  [ ! -e "$H/.pi/agent/skills/review" ] || fail "a project skill was installed user-wide for pi"
+  [ ! -e "$P/.pi/skills/audit" ] || fail "the identical audit copy is still there"
+  grep -q 'Ours' "$P/.agents/skills/wrap-up/SKILL.md" || fail "the project's own wrap-up was touched"
+  run apply -f "$H/agents.edn" --all -t pi > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "not converged after one apply!"; }
+  (run validate -f "$H/agents.edn" -t pi -k skills || true) > "$H/validate.txt" 2>&1
+  grep -q '! ~/projects/proj/.agents/skills/wrap-up .*pi loads' "$H/validate.txt" \
+    || { cat "$H/validate.txt"; fail "validate does not repeat the collision once converged"; }
+)
+
+echo "31. pi's collision with a kept copy the skills CLI installed is still reported"
+(
+  H=$(fresh_home pi-kept-collision); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q; commit_all "$P"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex :pi]}}
+ :trust [{:in "projects/game" :acli [:pi]}]}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/game/.agents/skills/wrap-up kept — it is tracked by git' "$H/plan.txt" \
+    && grep -q 'pi loads ~/projects/game/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the kept copy's collision report is missing"; }
+)
+
+echo "32. a shared project copy stays while an agent that reads it has no user-wide skill"
+(
+  # pi_copy NAME OTHER-ACLI TRUST: wrap-up user-wide for pi only, beside an
+  # identical, untracked copy in the project's shared .agents/skills
+  pi_copy() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    K="$H/projects/shared/skills"; P="$H/projects/proj"
+    mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+    mkdir -p "$P/.agents/skills"
+    if [ "${4:-}" = link ]; then ln -s "$K/wrap-up" "$P/.agents/skills/wrap-up"
+    else cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"; fi
+    git -C "$P" init -q
+    cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:pi]}
+          [shared "other"] {:in "projects/proj" :acli [$2]}}
+ $3}
+EDN
+    (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+  }
+  trust=':trust [{:in "projects/proj" :acli [:pi]}]'
+  rm_line="exec: 'rm -r ~/projects/proj/.agents/skills/wrap-up'"
+
+  pi_copy codex-reads ":codex :pi" "$trust"
+  ! grep -q "$rm_line" "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/proj/.agents/skills/wrap-up kept — codex reads it here and has no user-wide wrap-up' "$H/plan.txt" \
+    && grep -q 'pi loads ~/projects/proj/.agents/skills/wrap-up here in place of the user-wide wrap-up' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the copy codex reads is planned for removal, or not reported"; }
+  [ -f "$P/.agents/skills/wrap-up/SKILL.md" ] || fail "pi removed the copy codex reads"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "codex-reads: not converged"; }
+
+  # a link there is how codex gets the skill, as much as a copy is
+  pi_copy codex-link ":codex :pi" "$trust" link
+  ! grep -q "unlink ~/projects/proj/.agents/skills/wrap-up" "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/proj/.agents/skills/wrap-up kept — codex reads it here' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "the link codex reads is planned for removal"; }
+  [ -L "$P/.agents/skills/wrap-up" ] || fail "pi removed the link codex reads"
+
+  pi_copy pi-asks ":codex :pi" ""
+  ! grep -q "$rm_line" "$H/plan.txt" && grep -q 'pi asks before reading project skills here' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "an untrusted project's copy is planned for removal"; }
+  [ -f "$P/.agents/skills/wrap-up/SKILL.md" ] || fail "pi removed a copy in a project it does not trust"
+
+  pi_copy pi-alone ":pi" "$trust"
+  grep -q "$rm_line" "$H/plan.txt" || { cat "$H/plan.txt"; fail "the copy only pi reads is not removed"; }
+  [ ! -e "$P/.agents/skills/wrap-up" ] || fail "the copy only pi reads is still there"
+)
+
+echo "33. a link or an install never lands on a project directory that stays"
+(
+  # committed NAME DIR ACLI [same]: shared's foo declared for ACLI in a project
+  # that already commits its own foo (identical with "same") at DIR
+  committed() {
+    H=$(fresh_home "$1"); export AGENTCTL_HOME="$H"
+    K="$H/projects/shared/skills"; P="$H/projects/proj"
+    mkskill "$K/foo" foo theirs; mkskill "$P/$2/foo" foo ours
+    [ -n "${4:-}" ] && cp "$K/foo/SKILL.md" "$P/$2/foo/SKILL.md"
+    git -C "$P" init -q; commit_all "$P"
+    cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "foo"] {:in "projects/proj" :acli [$3]}}}
+EDN
+    (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+    grep -q "project copy ~/projects/proj/$2/foo kept — it is tracked by git" "$H/plan.txt" \
+      && ! grep -q "ln -sfn .* ~/projects/proj/$2/foo'" "$H/plan.txt" \
+      || { cat "$H/plan.txt"; fail "$1: the committed $2/foo is not kept, or a link is planned onto it"; }
+    # the entity alone first: --only narrows the plan, never the rules behind it
+    run apply! -f "$H/agents.edn" --all --only skills/foo -y > "$H/apply-only.txt" 2>&1 \
+      || { cat "$H/apply-only.txt"; fail "$1: apply! --only failed"; }
+    [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "$1: --only changed tracked files"; }
+    run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "$1: apply! failed"; }
+    [ -d "$P/$2/foo" ] && [ ! -L "$P/$2/foo" ] || fail "$1: the committed copy was replaced"
+    [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "$1: tracked files changed"; }
+    run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "$1: not converged"; }
+    (run validate -f "$H/agents.edn" || true) > "$H/validate.txt" 2>&1
+    grep -q "! ~/projects/proj/$2/foo .*kept — it is tracked by git" "$H/validate.txt" \
+      || { cat "$H/validate.txt"; fail "$1: validate does not report the kept copy"; }
+  }
+  committed codex-differs .agents/skills :codex
+  committed codex-same .agents/skills :codex same
+  committed claude-differs .claude/skills :claude
+
+  # a copy pi is pinned to, and another pack's skill that goes by the same name
+  H=$(fresh_home pinned-name); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; O="$H/projects/other/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other; mkskill "$O/wu2" wrap-up second
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}
+               [:uri "file://$O"] {:alias other}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex :pi]
+                              :per-tool {:pi {:path "~/projects/game/.agents/skills/wrap-up"}}}
+          [other "wu2"] {:in "projects/game" :acli [:codex]}
+          [shared "other"] {:in "projects/game" :acli [:claude]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  ! grep -q "ln -sfn ~/projects/other/skills/wu2" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "another skill is linked onto the copy pi is pinned to"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "pinned-name: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "pinned-name: an op failed"; }
+  grep -q "body shared" "$P/.agents/skills/wrap-up/SKILL.md" || fail "the copy pi is pinned to was replaced"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "pinned-name: not converged"; }
+
+  # skills add from a git pack only the project uses, beside a committed review
+  H=$(fresh_home git-pack-add); export AGENTCTL_HOME="$H"
+  G="$H/remote/kit"; P="$H/projects/proj"
+  mkskill "$G/review" review theirs; mkskill "$G/audit" audit theirs
+  git -C "$G" init -q; commit_all "$G"
+  mkskill "$P/.agents/skills/review" review ours
+  git -C "$P" init -q; commit_all "$P"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$G"] {:alias kit :type :git}}
+ :skills {[kit "review"] {:in "projects/proj" :acli [:codex]}
+          [kit "audit"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/proj/.agents/skills/review kept — it is tracked by git' "$H/plan.txt" \
+    && ! grep -q -- "-s review" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "skills add is planned over the committed review"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "git-pack-add: apply! failed"; }
+  [ -f "$P/.agents/skills/audit/SKILL.md" ] || fail "audit was not installed"
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "skills add changed the committed review"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "git-pack-add: not converged"; }
+)
+
+echo "34. a hand-made copy that differs from the source is another skill: kept"
+(
+  H=$(fresh_home hand-made); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/foo" foo theirs; mkskill "$K/bar" bar theirs
+  # foo: left over in .agents/skills, which nothing placed there reads;
+  # bar: where claude's link would go
+  mkskill "$P/.agents/skills/foo" foo ours; mkskill "$P/.claude/skills/bar" bar ours
+  git -C "$P" init -q
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$H/projects/shared"] {:alias shared :dir "skills"}}
+ :skills {[shared "foo"] {:in "projects/proj" :acli [:claude]}
+          [shared "bar"] {:in "projects/proj" :acli [:claude]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/proj/.agents/skills/foo kept — it differs from ~/projects/shared/skills/foo' "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/proj/.claude/skills/bar kept — it differs from ~/projects/shared/skills/bar' "$H/plan.txt" \
+    && ! grep -q "rm -r ~/projects/proj/.agents/skills/foo" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a differing hand-made copy is planned for removal"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "hand-made: apply! failed"; }
+  grep -q "body ours" "$P/.agents/skills/foo/SKILL.md" && grep -q "body ours" "$P/.claude/skills/bar/SKILL.md" \
+    || fail "a differing hand-made copy was removed"
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "hand-made: not converged"; }
+)
+
+echo "35. skills remove is never asked to take a directory that stays in any agent's directory"
+(
+  H=$(fresh_home other-agent-dir); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/game"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  # another agent's committed copy, which the skills CLI counts as its own
+  mkdir -p "$P/.cursor/skills"; cp -R "$K/wrap-up" "$P/.cursor/skills/wrap-up"
+  git -C "$P" init -q; commit_all "$P"
+  # the CLI's own, untracked install of the same name
+  mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+  cp -R "$K/wrap-up" "$P/.agents/skills/wrap-up"
+  ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+  printf '{"version":2,"skills":{"wrap-up":{"source":"../shared/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "wrap-up"] {:in :all :acli [:claude :codex]}
+          [shared "other"] {:in "projects/game" :acli [:claude :codex]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  ! grep -q "remove wrap-up" "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/game/.cursor/skills/wrap-up kept — it is tracked by git' "$H/plan.txt" \
+    && grep -q 'project copy ~/projects/game/.agents/skills/wrap-up kept — `skills remove` would take ~/projects/game/.cursor/skills/wrap-up with it' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "skills remove is planned while another agent's committed copy would go with it"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "other-agent-dir: apply! failed"; }
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "another agent's committed copy was removed"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "other-agent-dir: not converged"; }
+
+  # the same for a project's own skill: the CLI's older copy stays with its
+  # lock entry, rather than being linked over while the lock still names it
+  H=$(fresh_home blocked-project-skill); export AGENTCTL_HOME="$H"
+  K="$H/projects/shared/skills"; P="$H/projects/proj"
+  mkskill "$K/foo" foo theirs; mkskill "$P/.cursor/skills/foo" foo cursor
+  git -C "$P" init -q; commit_all "$P"
+  mkskill "$P/.agents/skills/foo" foo cli-old
+  printf '{"version":2,"skills":{"foo":{"source":"../shared/skills/foo","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias shared}}
+ :skills {[shared "foo"] {:in "projects/proj" :acli [:codex]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all --show-noop || true) > "$H/plan.txt" 2>&1
+  grep -q 'project copy ~/projects/proj/.agents/skills/foo kept — `skills remove` would take ~/projects/proj/.cursor/skills/foo with it' "$H/plan.txt" \
+    && ! grep -q "ln -sfn" "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a blocked CLI copy is linked over"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "blocked-project-skill: apply! failed"; }
+  ! grep -q "✗" "$H/apply.txt" || { cat "$H/apply.txt"; fail "blocked-project-skill: an op failed"; }
+  [ -z "$(git -C "$P" status --porcelain --untracked-files=no)" ] || { git -C "$P" status; fail "the committed .cursor copy changed"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "blocked-project-skill: not converged"; }
+)
+
+echo "36. a user-wide link whose source is gone is reported, and the plan still converges"
+(
+  H=$(fresh_home missing-source); export AGENTCTL_HOME="$H"
+  K="$H/projects/kit/skills"
+  mkskill "$K/wrap-up" wrap-up shared; mkskill "$K/other" other other
+  # what an earlier cleanup leaves: a stale lock entry beside dangling links,
+  # and pi's user-wide link into the project copy that went with them
+  for p in app lib; do
+    P="$H/projects/$p"; mkdir -p "$P/.agents/skills" "$P/.claude/skills"
+    ln -s ../../.agents/skills/wrap-up "$P/.claude/skills/wrap-up"
+    printf '{"version":2,"skills":{"wrap-up":{"source":"../kit/skills/wrap-up","sourceType":"local"}}}\n' > "$P/skills-lock.json"
+    git -C "$P" init -q
+  done
+  mkdir -p "$H/.pi/agent/skills"
+  ln -s "$H/projects/lib/.agents/skills/wrap-up" "$H/.pi/agent/skills/wrap-up"
+  cat > "$H/agents.edn" <<EDN
+{:skill-packs {[:uri "file://$K"] {:alias kit}}
+ :skills {[kit "wrap-up"] {:in :all :acli [:claude :codex :pi]
+                           :per-tool {:pi {:path "~/projects/lib/.agents/skills/wrap-up"}}}
+          [kit "other"] {:in ["projects/app" "projects/lib"] :acli [:claude]}}}
+EDN
+  (run apply -f "$H/agents.edn" --all || true) > "$H/plan.txt" 2>&1
+  grep -q 'source missing: ~/projects/lib/.agents/skills/wrap-up — link not changed' "$H/plan.txt" \
+    && ! grep -q '~ skill \[agents: pi\]' "$H/plan.txt" \
+    || { cat "$H/plan.txt"; fail "a missing source is planned as a link update"; }
+  run apply! -f "$H/agents.edn" --all -y > "$H/apply.txt" 2>&1 || { cat "$H/apply.txt"; fail "missing-source: apply! failed"; }
+  run apply -f "$H/agents.edn" --all > "$H/plan2.txt" 2>&1 || { cat "$H/plan2.txt"; fail "a missing source keeps the plan from converging"; }
+  (run validate -f "$H/agents.edn" || true) > "$H/validate.txt" 2>&1
+  grep -q '! .*source missing: ~/projects/lib/.agents/skills/wrap-up' "$H/validate.txt" \
+    || { cat "$H/validate.txt"; fail "validate does not report the missing source"; }
+)
+
+echo "37. apply! --json needs -y, and prints one document with what it applied"
+AJ="$SB/apply-json"
+mkdir -p "$AJ"
+aj() { (cd "$AJ" && AGENTCTL_HOME="$AJ" run "$@"); }
+# aj_json <want-exit> <out-file> <args…>: exits as wanted, stdout is one JSON document
+aj_json() {
+  local want=$1 out=$2; shift 2
+  set +e
+  aj "$@" --json > "$out"; local code=$?
+  set -e
+  [ "$code" = "$want" ] || { cat "$out"; fail "$* --json exited $code, wanted $want"; }
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" \
+    || { cat "$out"; fail "$* --json printed something besides JSON"; }
+}
+cat > "$AJ/ok.edn" <<'EDN'
+{:executors {:pi {:model "m1"}}}
+EDN
+# a prompt cannot share stdout with JSON: without -y it is refused before
+# anything is planned — on a host too, before it is looked up
+aj_json 1 "$AJ/noyes.json" apply! -f "$AJ/ok.edn" -t pi
+aj_json 1 "$AJ/noyes-host.json" apply! -f "$AJ/ok.edn" --host nowhere
+for f in noyes noyes-host; do
+  python3 -c 'import json,sys; sys.exit(0 if "-y" in json.load(open(sys.argv[1]))["error"] else 1)' "$AJ/$f.json" \
+    || { cat "$AJ/$f.json"; fail "apply! --json without -y did not ask for -y"; }
+done
+[ -e "$AJ/.pi/agent/settings.json" ] && fail "apply! --json without -y wrote settings"
+aj_json 0 "$AJ/apply.json" apply! -f "$AJ/ok.edn" -t pi -y
+python3 - "$AJ/apply.json" <<'PY' || { cat "$AJ/apply.json"; fail "apply! --json did not report what it applied"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(o["action"] == "create" for o in d["ops"]), d
+assert d["applied"]["failed"] == [], d
+assert any(o["tool"] == "pi" and o["kind"] == "settings" for o in d["applied"]["done"]), d
+assert d["backups"] and d["summary"], d
+assert d["findings"] == [] and d["warnings"] == [], d
+PY
+grep -q 'm1' "$AJ/.pi/agent/settings.json" || fail "apply! --json -y did not converge"
+aj_json 0 "$AJ/again.json" apply! -f "$AJ/ok.edn" -t pi -y
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["applied"] == {"done": [], "failed": []} else 1)' "$AJ/again.json" \
+  || { cat "$AJ/again.json"; fail "a converged apply! --json reported something applied"; }
+# a failed op is in the document with its error, and the run exits 1
+cat > "$AJ/fail.edn" <<EDN
+{:executors {:pi {:model "m1"}}
+ :skill-packs {:gone {:uri "file://$AJ/no-such-repo" :type :git :dir "skills"}}
+ :skills {:gone-skill {:from :gone :tools [:pi]}}}
+EDN
+aj_json 1 "$AJ/fail.json" apply! -f "$AJ/fail.edn" -t pi -y
+python3 - "$AJ/fail.json" <<'PY' || { cat "$AJ/fail.json"; fail "apply! --json lost a failed op"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["kind"] == "skill-packs" and "git clone exited" in f["error"] for f in d["applied"]["failed"]), d
+PY
+# the text output is unchanged
+cat > "$AJ/ok2.edn" <<'EDN'
+{:executors {:pi {:model "m2"}}}
+EDN
+aj apply! -f "$AJ/ok2.edn" -t pi -y > "$AJ/text.txt"
+grep -q '^applied 1 change(s)$' "$AJ/text.txt" && grep -q '^backups: ' "$AJ/text.txt" \
+  || { cat "$AJ/text.txt"; fail "apply! text output changed"; }
+
+echo "38. every failure is one error line, or one JSON document under --json"
+EF="$SB/errors"
+mkdir -p "$EF/dir.edn"
+printf '{}\n' > "$EF/locked.edn"
+chmod 000 "$EF/locked.edn"
+ef() { (cd "$EF" && AGENTCTL_HOME="$EF" run "$@"); }
+# ef_fails <out-stem> <expect-in-message> <args…>: exit 1 in both modes, a
+# one-line "error: …" in text, {"error": …} under --json, and no stack trace
+ef_fails() {
+  local stem=$1 want=$2; shift 2
+  set +e
+  ef "$@" > "$EF/$stem.txt" 2> "$EF/$stem.err"; local code=$?
+  ef "$@" --json > "$EF/$stem.json" 2> "$EF/$stem.jerr"; local jcode=$?
+  set -e
+  [ "$code" = 1 ] && [ "$jcode" = 1 ] || { cat "$EF/$stem".*; fail "$* exited $code / $jcode under --json, wanted 1"; }
+  [ "$(wc -l < "$EF/$stem.txt")" -eq 1 ] && grep -q "^error: .*$want" "$EF/$stem.txt" \
+    || { cat "$EF/$stem.txt" "$EF/$stem.err"; fail "$* did not fail with one error line"; }
+  python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["error"] else 1)' "$EF/$stem.json" "$want" \
+    || { cat "$EF/$stem.json" "$EF/$stem.jerr"; fail "$* --json did not fail with a JSON error"; }
+  if grep -q 'Error ---\|Location:' "$EF/$stem.err" "$EF/$stem.jerr"; then
+    cat "$EF/$stem.err" "$EF/$stem.jerr"; fail "$* printed a stack trace"
+  fi
+}
+ef_fails dir 'Is a directory' apply -f "$EF/dir.edn"
+ef_fails dir-validate 'Is a directory' validate -f "$EF/dir.edn"
+# root reads a file whatever its mode; the check means nothing there
+if [ ! -r "$EF/locked.edn" ]; then
+  ef_fails locked 'Permission denied' apply -f "$EF/locked.edn"
+fi
+chmod 600 "$EF/locked.edn"
+# a mistyped command, under --json, is an error and not the usage text
+set +e
+ef bogus --json > "$EF/bogus.json"; code=$?
+set -e
+[ "$code" = 1 ] || { cat "$EF/bogus.json"; fail "bogus --json exited $code"; }
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) == {"error": "unknown command: bogus"} else 1)' "$EF/bogus.json" \
+  || { cat "$EF/bogus.json"; fail "bogus --json did not print a JSON error"; }
+set +e
+ef bogus > "$EF/bogus.txt"; code=$?
+set -e
+[ "$code" = 1 ] && grep -q '^unknown command: bogus' "$EF/bogus.txt" && grep -q '^USAGE' "$EF/bogus.txt" \
+  || { cat "$EF/bogus.txt"; fail "bogus without --json stopped printing the usage"; }
+
+echo "39. gui -k and -p are the page's starting filter, as -t is"
+GD="$SB/gui-filter"
+mkdir -p "$GD/sub/web"
+cat > "$GD/agents.edn" <<'EDN'
+{:mcps [{:id :inproj :cmd "/bin/echo" :in "sub/web" :acli [:claude]}
+        {:id :global :cmd "/bin/echo" :in :all :acli [:claude]}]
+ :settings [{:model "opus" :acli [:claude] :in :all}]}
+EDN
+(cd "$GD" && AGENTCTL_HOME="$GD" exec "$ROOT/agentctl" gui -f "$GD/agents.edn" -k mcps -p sub/web \
+   --port 0 --no-open) > "$GD/gui.log" 2>&1 &
+GD_PID=$!
+trap 'kill ${GUI_PID:-} ${GD_PID:-} 2>/dev/null || true; rm -rf "$SB"' EXIT
+for _ in $(seq 1 100); do grep -q 'http://127.0.0.1' "$GD/gui.log" && break; sleep 0.1; done
+GD_URL=$(grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$GD/gui.log" | head -1)
+[ -n "$GD_URL" ] || { cat "$GD/gui.log"; fail "gui -k -p did not start"; }
+gd_post() { # gd_post <extra-json> <out>: plan the file's text with extra request fields
+  python3 -c 'import json,sys; d=json.loads(sys.argv[2]); d["text"]=open(sys.argv[1]).read(); print(json.dumps(d))' \
+    "$GD/agents.edn" "$1" > "$GD/req.json"
+  curl -sS -X POST -H "X-Agentctl-Token: ${GD_URL##*t=}" -H 'content-type: application/json' \
+    --data-binary "@$GD/req.json" "${GD_URL%%/\?t=*}/api/plan" > "$2"
+}
+curl -sS -H "X-Agentctl-Token: ${GD_URL##*t=}" "${GD_URL%%/\?t=*}/api/config" > "$GD/config.json"
+python3 - "$GD/config.json" <<'PY' || { cat "$GD/config.json"; fail "gui did not hand the page its -k and -p"; }
+import json, sys
+o = json.load(open(sys.argv[1]))["opts"]
+assert o["kinds"] == ["mcps"] and o["projects"] == ["sub/web"], o
+PY
+# a request that says nothing about kinds or projects gets the command line's
+gd_post '{"tools": ["claude"]}' "$GD/narrow.json"
+python3 - "$GD/narrow.json" <<'PY' || { cat "$GD/narrow.json"; fail "gui ignored -k / -p"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"], d
+assert "inproj" in d["plan"], d["plan"]
+assert "global" not in d["plan"] and "opus" not in d["plan"], d["plan"]
+PY
+# one that does say overrides them, an empty list meaning none
+gd_post '{"tools": ["claude"], "kinds": [], "projects": []}' "$GD/whole.json"
+python3 - "$GD/whole.json" <<'PY' || { cat "$GD/whole.json"; fail "the page could not widen the gui's filter"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ok"] and "inproj" in d["plan"] and "global" in d["plan"] and "opus" in d["plan"], d["plan"]
+PY
+# a -p that selects nothing is said, as the cli says it
+gd_post '{"tools": ["claude"], "projects": ["sub/nope"]}' "$GD/nope.json"
+python3 - "$GD/nope.json" <<'PY' || { cat "$GD/nope.json"; fail "gui -p naming nothing was not reported"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any(f["level"] == "warn" and "sub/nope" in f["where"] for f in d["findings"]), d["findings"]
+PY
+kill "$GD_PID" 2>/dev/null || true
+
+echo "40. a config that decides no format claims none; --host holds -k to the format"
+UF="$SB/undecided"
+mkdir -p "$UF/proj"
+uf() { (cd "$UF" && AGENTCTL_HOME="$UF" run "$@"); }
+printf '{}\n' > "$UF/empty.edn"
+cat > "$UF/statusline.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+# -k trust selects nothing in either, and is told so — as a warning, since the
+# next section added may decide the format either way
+for f in empty statusline; do
+  set +e
+  uf apply -f "$UF/$f.edn" --all -k trust > "$UF/$f.txt" 2>&1; code=$?
+  uf apply -f "$UF/$f.edn" --all -k trust --json > "$UF/$f.json"; jcode=$?
+  set -e
+  [ "$code" = 0 ] && [ "$jcode" = 0 ] || { cat "$UF/$f.txt" "$UF/$f.json"; fail "-k trust on $f.edn exited $code / $jcode"; }
+  grep -q '⚠ -k trust — selects nothing in this config' "$UF/$f.txt" \
+    || { cat "$UF/$f.txt"; fail "-k trust on $f.edn was not reported"; }
+  python3 -c 'import json,sys; sys.exit(0 if any(w.startswith("-k trust — selects nothing in this config") for w in json.load(open(sys.argv[1]))["warnings"]) else 1)' "$UF/$f.json" \
+    || { cat "$UF/$f.json"; fail "-k trust --json on $f.edn lost the warning"; }
+  if grep -q 'old-format\|entity-DSL' "$UF/$f.txt" "$UF/$f.json"; then
+    cat "$UF/$f.txt" "$UF/$f.json"; fail "$f.edn was said to be in a format it does not have"
+  fi
+done
+# a host is planned under the same config: a kind its format never plans is
+# refused there too, before the host is looked up
+cat > "$UF/dsl.edn" <<EDN
+{:trust [{:in "$UF/proj" :acli [:codex]}]}
+EDN
+cat > "$UF/old.edn" <<EDN
+{:projects {:p {:path "$UF/proj" :trusted true :executors #{:codex}}}}
+EDN
+for pair in "dsl projects entity-DSL" "old trust old-format"; do
+  set -- $pair
+  set +e
+  uf apply -f "$UF/$1.edn" --host nowhere -k "$2" > "$UF/host-$1.txt" 2>&1; code=$?
+  set -e
+  [ "$code" = 1 ] && grep -q "^error: -k $2: an $3 config plans nothing as $2" "$UF/host-$1.txt" \
+    || { cat "$UF/host-$1.txt"; fail "--host -k $2 on the $1 config was not refused"; }
+done
+
 echo "all agentctl e2e checks passed"
