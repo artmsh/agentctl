@@ -6,6 +6,7 @@
             [agentctl.adapters.dsh :as dsh]
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.llm :as llm]
+            [agentctl.adapters.omp :as omp]
             [agentctl.adapters.pi :as pi]
             [agentctl.config :as config]
             [agentctl.core :as core]
@@ -258,7 +259,11 @@
     (testing "any other name the item lacks is missing, never the login password"
       (let [r (resolve (item nil) "!bw://vendor/KEYY")]
         (is (= :missing (:status r)))
-        (is (= "field not found on bw item: vendor/KEYY" (:message r)))))
+        (is (= "field not found on bw item: vendor/KEYY — the item has a login: did you mean vendor/password?"
+               (:message r)))))
+    (testing "an item with no login gets no hint"
+      (is (= "field not found on bw item: vendor/KEYY"
+             (:message (resolve (dissoc (item nil) :login) "!bw://vendor/KEYY")))))
     (reset! @#'refs/cache {})))
 
 ;; ---------------------------------------------------------------- config
@@ -1880,6 +1885,38 @@
       (is (= "0 to add, 0 to change, 0 to remove, 1 unchanged, 1 unresolved"
              (plan/summary-line [o (plan/op {:tool :claude :kind :mcps :id :plain})]))))))
 
+(deftest every-adapter-holds-back-what-an-unresolved-secret-would-leave-partial
+  ;; a locked vault: every ref below stays unresolved, and `bw` never runs
+  (let [ref "!bw://vendor/KEY"
+        cfg (fn [tool]
+              (config/normalize
+               {:mcps {:docs {:command "/bin/echo" :env {"TOKEN" ref "MODE" "fast"} :tools [tool]}
+                       :web {:url "https://mcp.example.com/w" :headers {"x-key" ref} :tools [tool]}}
+                :extra-providers {:gw {:url "https://api.example.com/v1" :api "openai-completions"
+                                       :key ref :models ["m1"] :tools [tool]}}}
+               "x"))
+        held (fn [ops id] (first (filter #(= id (:id %)) ops)))
+        held? (fn [ops id]
+                (let [o (held ops id)]
+                  (and (:unresolved o) (nil? (:exec! o))
+                       (= [o] (filter #(= id (:id %)) ops))
+                       (str/includes? (:summary o) "bitwarden vault locked"))))]
+    (reset! @#'refs/cache {})
+    (with-redefs [refs/bw-state (delay :locked)
+                  codex/mcp-list (fn [] {})]
+      (doseq [[tool ops ids] [[:pi pi/mcp-ops [:docs]]
+                              [:omp omp/mcp-ops [:docs]]
+                              [:antigravity antigravity/mcp-ops [:docs :web]]
+                              [:kimi kimi/mcp-ops [:docs :web]]
+                              [:codex codex/mcp-ops [:docs :web]]]
+              id ids]
+        (testing (str (name tool) " MCP server " (name id))
+          (is (held? (ops (cfg tool) state/empty-state) id))))
+      (doseq [[tool ops] [[:pi pi/provider-ops] [:omp omp/provider-ops] [:kimi kimi/provider-ops]]]
+        (testing (str (name tool) " provider key")
+          (is (held? (ops (cfg tool)) :gw)))))
+    (reset! @#'refs/cache {})))
+
 (deftest a-secret-env-value-is-masked-and-a-rotation-still-shows
   (let [ks (common/secret-keys {"X" (refs/parse "!bw://vendor/KEY") "MODE" (refs/parse "fast")}
                                {"X" "!bw://vendor/KEY" "MODE" "fast"})]
@@ -2276,7 +2313,7 @@
 (deftest every-kind-an-op-carries-is-one-k-accepts-and-help-names
   ;; `-k` is checked against `core/kinds`; a kind missing from it would be
   ;; refused, and one missing from --help is a kind nobody knows to ask for
-  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins
+  (is (= #{:settings :permissions :hooks :mcps :skills :skill-packs :plugins :agents
            :providers :memory :trust :extensions :projects :statusline}
          (set core/kinds)))
   (let [lines (->> (str/split-lines main/usage)
@@ -2334,7 +2371,7 @@
       (is (= ["-k" "projects"] [flag v]))
       (is (str/includes? msg "entity-DSL"))
       (is (str/includes? msg "under permissions, settings or trust"))
-      (is (str/includes? msg "kinds for this config: extensions"))
+      (is (str/includes? msg "kinds for this config: agents, extensions"))
       (is (not (str/includes? msg " projects,")))
       (let [[[flag v msg]] (core/dead-selectors old {:kinds #{:trust}})]
         (is (= ["-k" "trust"] [flag v]))
@@ -3909,7 +3946,19 @@
   (testing "a host has no projects to place anything in"
     (is ((host-errors {:ssh "h" :os :linux
                        :skill-packs {[:uri "file:///p"] {:in ["projects/x"]}}}) [:hosts :win]))
-    (is ((host-errors {:ssh "h" :os :linux :skills {:legacy {:path "/p"}}}) [:hosts :win]))))
+    (is ((host-errors {:ssh "h" :os :linux :skills {:legacy {:path "/p"}}}) [:hosts :win]))
+    (is ((host-errors {:ssh "h" :os :linux :settings [{:acli [:codex] :model "m" :in "projects/x"}]}) [:hosts :win]))
+    (is ((host-errors {:ssh "h" :os :linux :settings {:codex {:model "m"}}}) [:hosts :win])))
+  (testing "settings rows, user-wide"
+    (is (empty? (host-errors {:ssh "h" :os :linux :settings [{:acli [:codex] :model "m"}]})))))
+
+(deftest a-host-carries-codex-settings-of-its-own
+  (let [cfg (config/normalize {:settings [{:acli [:codex] :model "local"}]
+                               :hosts {:box {:ssh "h" :os :linux
+                                             :settings [{:acli [:codex] :sandbox "net"}]}}} "/x")]
+    (is (= {:sandbox "net"} (get-in cfg [:hosts :box :cfg :tools :codex])))
+    (is (= "local" (get-in cfg [:tools :codex :model])))
+    (is (nil? (get-in cfg [:tools :codex :sandbox])))))
 
 (deftest a-kind-a-host-cannot-take-is-named-not-dropped
   (let [fs (config/structural-findings
@@ -3963,6 +4012,34 @@
           (is (ascii? @script))))
       (remote/inventory host [:codex] ["skïll"])
       (is (ascii? @script)))))
+
+(deftest a-host-file-is-read-whole-and-written-back-checked
+  (let [e #(remote/b64-str %)
+        inv (remote/parse-inventory
+             [(str "F\tcodex-config\t" (e "/h/.codex/config.toml") "\t" (e "model = \"x\"\n"))
+              (str "F\tempty\t" (e "/h/e"))
+              (str "F\tnone\t" (e "/h/n") "\t-") "OK"])]
+    (is (= "model = \"x\"\n" (String. ^bytes (get-in inv [:host-files :codex-config :bytes]) "UTF-8")))
+    (is (= "/h/.codex/config.toml" (get-in inv [:host-files :codex-config :path])))
+    (testing "an empty file is not an absent one"
+      (is (= 0 (count (get-in inv [:host-files :empty :bytes])))))
+    (is (nil? (get-in inv [:host-files :none :bytes]))))
+  (let [script (atom nil)
+        ascii? #(every? (fn [c] (< (int c) 128)) %)]
+    (with-redefs [remote/exec (fn [_ s] (reset! script s) ["OK"])]
+      (doseq [os [:linux :windows]
+              :let [host {:id :w :ssh "h" :os os}]]
+        (testing (name os)
+          (remote/write-file! host :codex-config (.getBytes "model = \"ünï\"" "UTF-8") "abc")
+          (is (ascii? @script))
+          (is (str/includes? @script "abc"))
+          (is (str/includes? @script "_.codex_config.toml"))
+          (is (str/includes? @script "changed on the host since it was read"))
+          (remote/write-file! host :codex-config (.getBytes "") nil)
+          (is (str/includes? @script "appeared on the host since it was read"))
+          (remote/inventory host [:codex] [] [:codex-config])
+          (is (ascii? @script))
+          (is (str/includes? @script "config.toml")))))))
 
 (deftest each-root-has-its-own-place-and-backup-name
   ;; a run that moves a skill between roots parks the same id from both
@@ -4018,7 +4095,13 @@
   (is (false? (hosts/codex-reads-agents? "codex-cli 0.94.9")))
   (is (false? (hosts/codex-reads-agents? "codex-cli 0.9.100")))
   (is (nil? (hosts/codex-reads-agents? "")))
-  (is (nil? (hosts/codex-reads-agents? nil))))
+  (is (nil? (hosts/codex-reads-agents? nil)))
+  (testing "a version not codex's is no version"
+    (is (nil? (hosts/codex-reads-agents? "Error: Node.js v18.19.1 is not supported")))
+    (is (nil? (hosts/codex-reads-agents? "warning: v1.2.3 codex-cli"))))
+  (testing "a pre-release comes before its release"
+    (is (false? (hosts/codex-reads-agents? "codex-cli 0.95.0-alpha.2")))
+    (is (true? (hosts/codex-reads-agents? "codex-cli 0.95.1-alpha.1")))))
 
 (deftest a-skill-both-want-goes-where-both-read-it
   (testing "codex reads ~/.agents/skills: one copy, there"

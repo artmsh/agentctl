@@ -66,6 +66,17 @@
                        (fs/create-dirs root-dir)
                        (doseq [c cmds] (exec (if present "update" "clone") nil c)))})))
 
+(defn run-build!
+  "Run the shell command `build` in `root`, then write `(stamp-of)` to
+   `stamp-file`. The old stamp goes first: a build that fails halfway leaves
+   no claim behind it. Claude plugins with a `:build` take the same path."
+  [root build stamp-file stamp-of]
+  (when-not (fs/directory? root)
+    (throw (ex-info (str "nothing to build: " (u/tilde root) " is not there") {:root root})))
+  (fs/delete-if-exists stamp-file)
+  (exec "build" root ["sh" "-c" build])
+  (u/write-text! stamp-file (stamp-of)))
+
 (defn- build-op [ext]
   (let [{:keys [id root build]} ext
         rebuilt? (u/exists? (stamp-file id))]
@@ -77,13 +88,8 @@
               :target (stamp-file id)
               :summary (str "build `" build "` in " (u/tilde root))
               :cmds [["sh" "-c" build]]
-              :exec! (fn []
-                       (when-not (fs/directory? root)
-                         (throw (ex-info (str "nothing to build: " (u/tilde root) " is not there") {:root root})))
-                       ;; a build that fails halfway leaves no claim behind it
-                       (fs/delete-if-exists (stamp-file id))
-                       (exec "build" root ["sh" "-c" build])
-                       (u/write-text! (stamp-file id) (stamp (sources/git-head root) build)))})))
+              :exec! #(run-build! root build (stamp-file id)
+                                  (fn [] (stamp (sources/git-head root) build)))})))
 
 (defn source-ops
   "Ops that fetch, update and build the extensions the `selected` tools load."

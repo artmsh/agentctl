@@ -82,8 +82,12 @@ cat > "$SB/bin/bw" <<'STUB'
 #!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
+state = os.path.join(os.environ["HOME"], "bw-state")
 if a[:1] == ["status"]:
-    print(json.dumps({"status": os.environ.get("BW_STATE", "unlocked")})); sys.exit(0)
+    # a file can change the state under a running process (the GUI); the
+    # variable cannot
+    s = open(state).read().strip() if os.path.exists(state) else os.environ.get("BW_STATE", "unlocked")
+    print(json.dumps({"status": s})); sys.exit(0)
 if a[:2] == ["get", "item"]:
     items = json.load(open(os.path.join(os.environ["HOME"], "bw-items.json")))
     if a[2] not in items:
@@ -687,6 +691,12 @@ STUB_REFUSE=add apply -k mcps
 [ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused add exited $code"; }
 grep -qF "Authorization: Bear…34" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the carried header is not shown masked"; }
 grep -q "handmade-token" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the carried header"; }
+# the remove went through and the add did not: the server is put back as it was
+grep -qF "failed: Error: refused by the stub" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the add's own error is not reported"; }
+grep -qF "the previous definition was restored" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "the restore is not reported"; }
+[ "$(user_entry hdocs)" = '{"headers": {"Authorization": "'"$HAND"'", "api-key": "'$PLAIN'"}, "type": "http", "url": "https://mcp.example.com/h2"}' ] \
+  || { user_entry hdocs; fail "a refused add left the server removed"; }
+grep -q '\[:claude :mcps "hdocs"\]' "$SB/.config/agentctl/state.edn" || fail "the restored server is no longer owned"
 
 echo "32. an env var, file or command that yields nothing is missing, not an empty secret"
 export AGENTCTL_TEST_EMPTY=""
@@ -719,38 +729,49 @@ EDN
 vault '{"login": {"KEY": "sk-test-field", "_login": {"username": "u", "password": "'$PLAIN'"}}}'
 plan -k mcps
 [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a misspelt field read as converged: exit $code"; }
-grep -qF "⚠ secret unresolved: field not found on bw item: login/KEYY (headers.x-key)" "$SB/plan.txt" \
-  || { cat "$SB/plan.txt"; fail "the misspelt field is not reported"; }
+# a ref that used to reach the login through the fallback says where to point it
+hint='field not found on bw item: login/KEYY — the item has a login: did you mean login/password?'
+grep -qF "⚠ secret unresolved: $hint (headers.x-key)" "$SB/plan.txt" \
+  || { cat "$SB/plan.txt"; fail "the misspelt field is not reported with the login hint"; }
 apply -k mcps
+grep -qF "$hint" "$SB/apply.txt" || { cat "$SB/apply.txt"; fail "apply! does not give the login hint"; }
+validate
+grep -qF "$hint" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "validate does not give the login hint"; }
 [ "$(user_entry typo)" = null ] || { user_entry typo; fail "a misspelt field was written"; }
 grep -q "$PLAIN" "$SB/.claude.json" && fail "the login password was written for a misspelt field"
 
 echo "34. import brings settings env and every header back as placeholders, and apply! keeps the env"
-python3 - "$SB" "$SECRET" "$PLAIN" <<'PY'
+python3 - "$SB" "$SECRET" "$PLAIN" "$PLAIN2" <<'PY'
 import json, sys
-sb, secret, plain = sys.argv[1:]
+sb, secret, plain, plain2 = sys.argv[1:]
 f = sb + "/.claude/settings.json"
 d = json.load(open(f))
-d["env"] = {"API_TOKEN": secret, "MODE": "fast"}
+d["env"] = {"API_TOKEN": secret, "DOCS_AUTH": plain2, "MODE": "fast"}
 json.dump(d, open(f, "w"), indent=2)
 f = sb + "/.claude.json"
 d = json.load(open(f))
 d["mcpServers"]["hx"] = {"type": "http", "url": "https://mcp.example.com/x", "headers": {"x-docs": plain}}
+d["mcpServers"]["sx"] = {"type": "stdio", "command": "/bin/echo", "args": [], "env": {"UPSTREAM": plain2, "PORT": "8080", "HOME_VAR": "$HOME"}}
 json.dump(d, open(f, "w"), indent=2)
 PY
 run import -f "$SB/none.edn" | grep -v '^;;' > "$SB/imported.edn"
-grep -qE "$SECRET|$PLAIN" "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import wrote a secret in plaintext"; }
+grep -qE "$SECRET|$PLAIN|$PLAIN2" "$SB/imported.edn" && { cat "$SB/imported.edn"; fail "import wrote a secret in plaintext"; }
+# a secret under a name that says nothing about one is a placeholder too
+grep -qF '"DOCS_AUTH" "!bw://claude-env/DOCS_AUTH"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain-named settings env secret is not a placeholder"; }
+grep -qF '!bw://sx/UPSTREAM' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain-named MCP env secret is not a placeholder"; }
+grep -qF '"8080"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a small number was redacted"; }
+grep -qF '"$HOME"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a \$VAR reference was redacted"; }
 grep -qF '"API_TOKEN" "!bw://claude-env/API_TOKEN"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "the settings env secret is not a placeholder"; }
 grep -qF '"MODE" "fast"' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a plain settings env value was not imported"; }
 grep -qF '!bw://hx/x-docs' "$SB/imported.edn" || { cat "$SB/imported.edn"; fail "a header with a plain-looking value is not a placeholder"; }
-vault '{"claude-env": {"API_TOKEN": "'$SECRET'"}, "hx": {"x-docs": "'$PLAIN'"}}'
+vault '{"claude-env": {"API_TOKEN": "'$SECRET'", "DOCS_AUTH": "'$PLAIN2'"}, "hx": {"x-docs": "'$PLAIN'"}}'
 set +e; run apply! -f "$SB/imported.edn" --all -t claude -k settings -y > "$SB/apply.txt" 2>&1; code=$?; set -e
 [ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "apply! of the imported config exited $code"; }
-[ "$(json "$SB/.claude/settings.json" "d.get('env')")" = "{'API_TOKEN': '$SECRET', 'MODE': 'fast'}" ] \
+[ "$(json "$SB/.claude/settings.json" "d.get('env')")" = "{'API_TOKEN': '$SECRET', 'DOCS_AUTH': '$PLAIN2', 'MODE': 'fast'}" ] \
   || { cat "$SB/apply.txt"; fail "apply! of the imported config changed or pruned the env"; }
 set +e; run apply -f "$SB/imported.edn" --all -t claude -k settings > "$SB/plan.txt" 2>&1; code=$?; set -e
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "the imported settings env is not converged: exit $code"; }
-grep -qE "$SECRET|$PLAIN" "$SB/apply.txt" && fail "apply! printed an imported secret"
+grep -qE "$SECRET|$PLAIN|$PLAIN2" "$SB/apply.txt" && fail "apply! printed an imported secret"
 
 for scope in local project; do
   echo "35. $scope: a header or env var the declaration drops is removed, one added by hand is kept"
@@ -812,6 +833,9 @@ cat > "$SB/agents.edn" <<EDN
 EDN
 plan -k mcps
 [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "the dropped approvals are not drift: exit $code"; }
+# aflip's .mcp.json copy is agentctl's, and goes in this plan: no warning about it
+grep -q "also declared in" "$SB/plan.txt" && { cat "$SB/plan.txt"; fail "the plan warns about a copy it prunes"; }
+grep -qF -- '- aflip' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the .mcp.json copy is not pruned"; }
 for id in adocs aflip; do
   grep -qF -- "- enabledMcpjsonServers: \"$id\"" "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not remove the approval of $id"; }
 done
@@ -822,5 +846,37 @@ apply -k mcps
   || { cat "$L2"; fail "an approval agentctl added stayed, or one it did not add went"; }
 plan -k mcps
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after removing approvals: exit $code"; }
+
+echo "37. a refused add masks each value where it sits, and leaves a short plain one in the CLI's output alone"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :rshort :cmd "/bin/echo r" :env {"N" "s" "DOCS_KEY" "!bw://rshort/KEY"} :in :all :acli [:claude]}]}
+EDN
+vault '{"rshort": {"KEY": "'$PLAIN'"}}'
+STUB_REFUSE=add apply -k mcps
+[ "$code" = 1 ] || { cat "$SB/apply.txt"; fail "a refused add exited $code"; }
+line=$(grep "✗ claude mcps rshort" "$SB/apply.txt")
+cmd=${line%% failed: *}
+out=${line#* failed: }
+case "$cmd" in *"-e N=********"*) ;; *) echo "$line"; fail "the command does not mask the value by position";; esac
+case "$cmd" in *"-e DOCS_KEY=plai…34"*) ;; *) echo "$line"; fail "the command does not mask the secret";; esac
+case "$out" in "Error: refused by the stub: mcp add --scope user rshort"*) ;; *) echo "$line"; fail "a short plain value garbled the CLI's output";; esac
+case "$out" in *"N=s"*) ;; *) echo "$line"; fail "a plain value was hidden in the CLI's output";; esac
+grep -q "$PLAIN" "$SB/apply.txt" && { cat "$SB/apply.txt"; fail "the failure printed the secret"; }
+
+echo "38. the gui sees the vault unlocked without a restart"
+cat > "$SB/agents.edn" <<EDN
+{:mcps [{:id :glock :type :http :url "https://mcp.example.com/g" :headers {"x-key" "!bw://glock/KEY"} :in :all :acli [:claude]}]}
+EDN
+vault '{"glock": {"KEY": "'$PLAIN'"}}'
+echo locked > "$SB/bw-state"
+gui plan mcps > "$SB/gui.out"
+grep -q "bitwarden vault locked" "$SB/gui.out" || { cat "$SB/gui.out"; fail "the gui does not see the locked vault"; }
+echo unlocked > "$SB/bw-state"
+gui plan mcps > "$SB/gui.out"
+grep -q "secret unresolved" "$SB/gui.out" && { cat "$SB/gui.out"; fail "the gui kept the vault locked after an unlock"; }
+grep -q "glock" "$SB/gui.out" || { cat "$SB/gui.out"; fail "the gui plan does not create the server"; }
+gui apply mcps > "$SB/gui.out"
+[ "$(json "$SB/.claude.json" "d['mcpServers']['glock']['headers']['x-key']")" = "$PLAIN" ] || { cat "$SB/gui.out"; fail "the gui did not write the secret"; }
+rm "$SB/bw-state"
 
 echo "all claude mcp e2e checks passed"

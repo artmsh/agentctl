@@ -348,7 +348,13 @@ set +e
 # user-wide kinds are expected to come back converged
 run apply -f "$SB/imported15.edn" -t antigravity -k settings -k mcps -k memory > "$SB/plan15b.txt"; code=$?
 set -e
-[ "$code" = 0 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config should already be converged"; }
+# the redacted header is a placeholder the vault does not hold yet: the server
+# is held back on it, and nothing else differs
+[ "$code" = 2 ] || { cat "$SB/plan15b.txt"; fail "imported antigravity config: expected the placeholder held back, got exit $code"; }
+grep -q "0 to add, 0 to change, 0 to remove, .*1 unresolved" "$SB/plan15b.txt" \
+  || { cat "$SB/plan15b.txt"; fail "imported antigravity config should otherwise be converged"; }
+grep -q "secret unresolved: .*(headers.Authorization)" "$SB/plan15b.txt" \
+  || { cat "$SB/plan15b.txt"; fail "the unresolved placeholder is not named"; }
 
 echo "15b. kimi converges, and its own spellings are written the way kimi reads them"
 mkdir -p "$SB/kproj" "$SB/packs/demo/skills/local-skill"
@@ -1193,7 +1199,7 @@ fk_code() {
 }
 for cmd in apply apply!; do
   fk_code 1 "$FK/dsl-$cmd.txt" "$cmd" -f "$FK/dsl.edn" --all -t codex -k projects -y
-  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: extensions, ' "$FK/dsl-$cmd.txt" \
+  grep -q '^error: -k projects: an entity-DSL config plans nothing as projects; it files those ops under permissions, settings or trust (kinds for this config: agents, extensions, ' "$FK/dsl-$cmd.txt" \
     || { cat "$FK/dsl-$cmd.txt"; fail "$cmd -k projects on a DSL config did not name the DSL's kinds"; }
   grep -q 'projects,\|, projects)' "$FK/dsl-$cmd.txt" && { cat "$FK/dsl-$cmd.txt"; fail "the DSL's kinds listed projects"; }
   fk_code 1 "$FK/old-$cmd.txt" "$cmd" -f "$FK/old.edn" --all -t codex -k trust -y
@@ -1885,7 +1891,7 @@ set -e
 python3 -c 'import sys,tomllib; t=tomllib.load(open(sys.argv[1],"rb")); assert t["tui"]["model_availability_nux"] == {"m-a": 4}, t; assert t["tui"]["status_line"] == ["model-with-reasoning", "context-used"], t' \
   "$SB/.codex/config.toml" || fail "codex [tui] state or footer wrong"
 
-echo "30. what a config no longer declares is pruned, whatever is left of it"
+echo "47. what a config no longer declares is pruned, whatever is left of it"
 PR="$SB/prune-any"
 # pr <home> <args…>: each case gets a home of its own
 pr() { local h="$PR/$1"; shift; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }
@@ -1920,7 +1926,7 @@ pr switch apply! -f "$PR/switch/dsl.edn" --all -t codex -y > /dev/null
 pr switch apply! -f "$PR/switch/old.edn" --all -t codex -y > "$PR/switch/old.txt"
 trusted switch || { cat "$PR/switch/old.txt"; fail "rewriting the DSL trust the old way pruned it"; }
 
-echo "31. --debug and AGENTCTL_DEBUG add the stack trace on stderr, nothing on stdout"
+echo "48. --debug and AGENTCTL_DEBUG add the stack trace on stderr, nothing on stdout"
 DB="$SB/debug"
 mkdir -p "$DB/dir.edn"
 db() { (cd "$DB" && AGENTCTL_HOME="$DB" run "$@"); }

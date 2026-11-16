@@ -417,8 +417,9 @@ the private one.
 
 When a reference does not resolve — the vault is locked, the variable is unset,
 the Bitwarden field is empty or holds the text `null`, the variable, file or
-command yields nothing but whitespace, the reference is malformed — Claude's server, or the settings `env` object, is not written at
-all, in any scope. Writing the rest of it would leave a server that is
+command yields nothing but whitespace, the reference is malformed — the MCP server, the
+provider, or Claude's settings `env` object holding it is not written at all, in
+any scope and for every tool. Writing the rest of it would leave a server that is
 configured and cannot authenticate, and because the missing value would then be
 missing from the desired entry too, the next plan would report no drift. The plan
 names the server, the key and the reason instead:
@@ -432,14 +433,16 @@ Every other change in the run still applies. `apply` exits 2 while such a server
 remains and `apply!` exits 1, listing what it held back, so a partial run is never
 reported as converged. A server held back this way is not recorded as owned: one
 that never got written cannot be pruned later, and a hand-made server of the same
-name stays the user's.
+name stays the user's. The GUI asks the vault again for every plan, so unlocking
+it or rotating a secret shows without restarting `agentctl gui`.
 
 For a user-wide server, whose secret `claude mcp add` stores and agentctl does
 not read back, drift is decided by the env and header *names*: a declared name
 missing from `~/.claude.json` is drift, a changed value is not. A name added by
 hand, such as an `Authorization` header, is not drift either. `claude mcp add`
 cannot edit an entry, so an update removes the server and adds it again, after
-backing up `~/.claude.json`; the add carries every env var (stdio) or header
+backing up `~/.claude.json`. If the add fails, the previous entry is put back
+and the op fails, naming both. The add carries every env var (stdio) or header
 (http) the declaration does not name, so a hand-added one survives. A name
 agentctl declared and the declaration has since dropped is removed: the
 manifest records the names each server declares.
@@ -753,8 +756,113 @@ marketplace; other URLs are `git`, or `url` for a hosted `marketplace.json`.
 Dropping a placement uninstalls the plugin there and removes its
 `enabledPlugins` entry; the marketplace declaration stays.
 
-Marketplace names are global to Claude: two declarations whose sources share a
-marketplace name re-register it, and every project follows the last one.
+`:ref` pins a git marketplace (`[:gh …]` or a git URL) to a branch, tag or
+commit:
+
+```clojure
+{:plugins {[:gh "example/plugins" "lint"] {:in :all :acli [:claude] :ref "next"}}}
+```
+
+It becomes `source.ref` in `extraKnownMarketplaces`, and `apply!` adds the
+marketplace as `example/plugins#next` (`<git-url>#ref` for a git URL), the
+spelling the CLI reads a ref from. A changed ref is drift on the marketplace
+entry. Claude refuses to re-point a marketplace whose user settings name another
+source, so `apply!` writes the new entry first and puts the file back if the
+CLI then fails. A `:ref` on a directory or a hosted `marketplace.json` is an
+error: neither has revisions.
+
+When the source of a marketplace changes while its plugin is installed, Claude
+keeps the installed copy until the new source offers a different version, and
+`claude plugin update` does nothing at the same version. `apply!` therefore
+reinstalls the plugin (`claude plugin uninstall`, then `install`), and the plan
+says why.
+
+### Plugin versions
+
+Without `:version` a plugin is converged once it is installed, whatever its
+version. `:version` adds a version check:
+
+```clojure
+{:plugins {[:gh "example/plugins" "lint"] {:in :all :acli [:claude] :version :latest}
+           [:gh "example/tools" "fmt"]   {:in :all :acli [:claude] :version "1.4.0" :ref "v1.4.0"}}}
+```
+
+- `:latest` follows the marketplace. `apply` compares the installed version
+  with the one the marketplace on disk offers, and asks the remote, read-only
+  (`git ls-remote`), whether the marketplace has moved since it was fetched; a
+  moved one shows as `version: "1.0.0" -> "latest @ <commit>"`. `apply!` runs
+  `claude plugin marketplace update <marketplace>` and `claude plugin update`
+  at the placement's scope.
+- A string pins a version. Claude has no command that installs a given
+  version: it installs what the marketplace offers. A pin the marketplace does
+  not offer fails `apply!` before anything is installed, and the plan says so.
+  Pin the marketplace too, with `:ref` on a tag that carries that version.
+
+The version is the one Claude computes for a plugin kept inside its
+marketplace: `plugin.json`'s, else the marketplace entry's, else the first 12
+hex digits of the marketplace commit. A plugin whose marketplace entry points
+at another repository has no version until Claude fetches it, so `:latest`
+then follows only the marketplace's commit. A directory marketplace has no
+remote; Claude reads it live.
+
+`:build` is a shell command run in the plugin's install path
+(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`), for a plugin that
+ships sources rather than a built tree:
+
+```clojure
+{:plugins {[:gh "example/plugins" "graph"]
+           {:in :all :acli [:claude] :version :latest
+            :build "pnpm install --frozen-lockfile && pnpm --filter core build"}}}
+```
+
+It runs once per install path, and again after an install or update moves the
+plugin. A stamp under `~/.agents/plugins/.built` records the path, the commit
+and the command. A failing build fails `apply!` and leaves no stamp, so the
+next run builds again; the install it follows stays, and stays owned, so
+dropping the row still uninstalls it. Claude runs a
+plugin from a directory marketplace out of that directory, not the install
+path, so a build there does not change what Claude loads.
+
+Marketplace names are global to Claude: it keeps one source per name and
+refuses to add a marketplace from another. Rows naming one marketplace from
+different sources or refs are a `validate` error, and the plan flags them.
+Claude adds a marketplace to a project only from the source the user settings
+name for it, spelled the same way; when `~/.claude/settings.json` names it from
+elsewhere, the plan says so and `apply!` fails for that project.
+
+A `[:uri …]` source is read the way `claude plugin marketplace add` reads it:
+a URL ending in `.git`, an scp-style address, or a `github.com` or `gitlab.com`
+repository URL (written with `.git` appended) is a git marketplace; any other
+`http(s)` URL serves a `marketplace.json`, has no revisions, and takes no
+`:ref`. Keys of a marketplace entry the row does not declare, such as
+`autoUpdate`, are kept: the CLI drops them when it re-adds the marketplace, and
+`apply!` puts them back.
+
+## Claude subagents
+
+`:agents` links subagent definitions kept in a skill pack's `agents/` directory
+into the place Claude Code reads them from:
+
+```clojure
+{:skill-packs {[:gh "example/team-agents"] {:alias team}}
+ :agents {[team "reviewer"]            {:in :all}
+          [team ["planner" "tester"]]  {:in "projects/app"}}}
+```
+
+`:in :all` links `~/.claude/agents/reviewer.md`; a project placement links
+`<project>/.claude/agents/<name>.md`. Each is a symlink to
+`<pack root>/agents/<name>.md`, so a pack update reaches Claude without an
+apply, and the pack is cloned even when it is declared `:in :none`. The plan
+line is `+ agent [agents: claude-code] <source>`.
+
+A link agentctl made is recorded in the state file with the file it points at.
+Dropping the row removes that link, and only while it still points there: a
+file or another link in its place is left alone, and the plan says so. A
+hand-made definition at the destination is backed up before it is replaced,
+and the plan flags it. `validate` reports a name the pack has no `.md` for.
+`import` reads back links in `~/.claude/agents` and the projects'
+`.claude/agents` that point into a known pack; a plain file there is the
+user's own and is not imported.
 
 ## Project skills
 
@@ -873,23 +981,42 @@ Declare one host for each side you want provisioned; neither sees the other's sk
 
 Host sections take the keyed `:skills` and `:skill-packs` forms, and a pack there
 defaults to `:in :all`. A source already placed at the top level can be placed
-again on a host, for different tools. User-wide skills for codex and awl are
-provisioned so far: other tools and kinds are reported in the plan and by
+again on a host, for different tools. User-wide skills for codex and awl, and
+codex's settings, are provisioned so far: other tools and kinds are reported in the plan and by
 `validate`, never dropped silently. `:home` overrides the remote home, for a
 scratch tree.
+
+`:settings` on a host takes the top level's rows, user-wide only:
+
+```clojure
+{:hosts {:box {:ssh "box.example.com" :os :linux
+               :settings [{:acli [:codex] :sandbox "net"
+                           :permission-profiles {:net {:extends ":workspace"
+                                                       :network {:enabled true}}}}]}}}
+```
+
+The host's `config.toml` (`$CODEX_HOME/config.toml`) is read with the
+inventory, edited in a local copy by the same ops a local run plans, and written
+back whole. The plan names the host's path. Keys and tables the declaration does
+not name stay as they are. The write is refused if the file changed on the host
+since it was read, and the file it replaces goes into the host's backups. A
+setting dropped from a host's declaration is not removed from the host yet. Other
+tools' settings are reported, not written.
 
 Locally awl reads its skills out of `agents.edn`, but a host has none, so there
 `:acli [:awl]` copies a skill into `~/.agents/skills/<name>`. That directory is
 not awl's alone: codex 0.95.0 and later read it as well, and list a skill once
 for each copy. So a skill for `[:codex :awl]` goes into `~/.agents/skills` alone
-when the host's `codex --version` is 0.95.0 or later. An older codex gets its own
-copy in `~/.codex/skills`, and so does a codex whose version can't be read, with a
-warning. Changing the declaration or the codex version moves the copy on the next
+when the host's `codex --version` reports `codex-cli` 0.95.0 or later (a
+pre-release of 0.95.0 counts as older). An older codex gets its own copy in
+`~/.codex/skills`, with a warning, and so does a codex whose version can't be
+read, or that hasn't answered within 5 seconds where the host has `timeout`. Changing the declaration or the codex version moves the copy on the next
 apply. A `[:codex]` skill stays in `~/.codex/skills`. Codex is probed but awl isn't,
 since it is often a shell alias, so an awl skill is placed whether or not `awl` is
 on the host's `PATH`. When codex reads both directories and one holds a hand-made
 copy of a skill agentctl places in the other, the plan warns that codex lists the
-skill twice. `-t awl` selects `~/.agents/skills`; it is valid only with `--host`.
+skill twice. `-t awl` selects `~/.agents/skills`, and the codex copies that
+placing a skill there made redundant; it is valid only with `--host`.
 
 Skills are copied, not linked: sources are read on this machine (a git pack is
 fetched here) and sent over SSH. Drift is a per-file comparison of byte hashes,
