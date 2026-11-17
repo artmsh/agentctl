@@ -372,4 +372,16 @@ set +e; "$ROOT/agentctl" apply! --all -t pi -f "$SB/two.edn" -y > "$SB/apply.txt
 [ "$(pi_args twodocs)" = '["--creds=argsecretvalue888:Zq9x", "argsecretvalue888 Zq9x"]' ] \
   || { cat "$SB/apply.txt"; pi_args twodocs; fail "two references in one string were not both resolved"; }
 
+echo "17. a !cmd:// inside an argument is text with a warning, never run"
+cat > "$SB/cmd.edn" <<'EDN'
+{:mcps [{:id :cmddocs :command "/bin/echo" :args ["--opt=!cmd://echo hi" "pre !cmd://echo t"] :in :all :acli [:pi]}]}
+EDN
+set +e
+"$ROOT/agentctl" apply --all -t pi -f "$SB/cmd.edn" > "$SB/cmd.txt" 2>&1
+"$ROOT/agentctl" apply! --all -t pi -f "$SB/cmd.edn" -y > "$SB/apply.txt" 2>&1
+set -e
+[ "$(pi_args cmddocs)" = '["--opt=!cmd://echo hi", "pre !cmd://echo t"]' ] || { pi_args cmddocs; fail "an embedded command ran"; }
+grep -qF 'args[0] holds `!cmd://…`' "$SB/cmd.txt" && grep -qF 'args[1] holds `!cmd://…`' "$SB/cmd.txt" \
+  || { cat "$SB/cmd.txt"; fail "an embedded command is not reported"; }
+
 echo "all secrets e2e checks passed"

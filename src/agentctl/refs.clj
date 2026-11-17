@@ -355,7 +355,8 @@
             rv (when f (secret-ref-text v))
             ra (secret-ref-text a)]
         (cond
-          (and rv (or (takes-credential? f) (not (dollar-ref? rv))))
+          ;; `--opt=!cmd://…` is a command inside a longer argument: text
+          (and rv (not= :cmd (:ref/kind rv)) (or (takes-credential? f) (not (dollar-ref? rv))))
           (recur (inc i) (next xs) nil (conj acc [i f rv (str f "=")]))
 
           (and ra (or flag (not (dollar-ref? ra))))

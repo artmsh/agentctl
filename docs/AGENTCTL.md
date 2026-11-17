@@ -774,9 +774,13 @@ every output, and held back like an env value when it does not resolve;
 config is read. A value after `-t` or `-k` is masked unless it is plainly
 something else (a number, a common word, a path).
 
+A `!cmd://` runs to the end of its value, so it is a reference only as a
+whole argument, env value, header or URL. Inside a longer one —
+`--opt=!cmd://…` included — its command cannot be told from the text after
+it, and it is written as text, never run.
+
 A spelling that would still be written as text — a `$VAR` left in argv
-because nothing set it, a `!cmd://` inside a longer env value, header or URL,
-whose command cannot be told from the text after it — is reported by the plan
+because nothing set it, a `!cmd://` inside a longer value — is reported by the plan
 and by `validate`: `⚠ args[1] holds `$DOCS_TOKEN`, which nothing resolves
 there — written as text`.
 
