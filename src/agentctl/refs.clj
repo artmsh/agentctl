@@ -576,25 +576,39 @@
       st
       (assoc st :secret-salt salt :secret-digests kept))))
 
-(def ^:private token-pattern #"[^\s\"'=:,;&@?#\[\]{}()<>]+")
+(def ^:private delimiter
+  ;; what may sit between two values in one string: `=`, `:`, a space, `@`,
+  ;; `/`, `?`, `&`, `,`, a quote or a bracket
+  "[\\s\"'=:@/?&#,;()\\[\\]{}<>]")
+
+(def ^:private known-pattern
+  ;; a recorded value as a segment of its own: delimited on both sides
+  (memoize
+   (fn [tok]
+     (re-pattern (str "(?<!" "[^" (subs delimiter 1) ")" (java.util.regex.Pattern/quote tok)
+                      "(?!" "[^" (subs delimiter 1) ")")))))
 
 (defn- mask-known
-  "`s` with every token whose digest a past run recorded masked."
+  "`s` with every value whose digest a past run recorded masked. `s` is
+   split at every delimiter, and each segment is checked: values joined in
+   one string (`--creds=<user>:<pw>`) are each found. A value that holds a
+   delimiter itself (base64 `=` padding, a `user:pass`) is found as a word
+   between spaces or quotes, or as what follows a word's first `=`."
   [s]
   (let [{:keys [salt digests]} @known-digests]
     (if (or (empty? digests) (nil? salt))
       s
-      (reduce (fn [t tok]
-                (if (and (not (masked? tok)) (contains? digests (digest salt tok)))
-                  (str/replace t (embedded-pattern tok) (java.util.regex.Matcher/quoteReplacement (mask tok)))
-                  t))
-              s
-              ;; a secret may hold `=`, `:` or `@` itself (base64 padding,
-              ;; a `user:pass`): a word between spaces or quotes is one
-              ;; candidate too, and so is what follows its first `=`
-              (let [words (re-seq #"[^\s\"']+" s)]
-                (distinct (concat [s] (re-seq token-pattern s) words
-                                  (keep #(second (re-matches #"[^=]*=(.+)" %)) words))))))))
+      (let [words (re-seq #"[^\s\"']+" s)
+            candidates (concat [s] words
+                               (keep #(second (re-matches #"[^=]*=(.+)" %)) words)
+                               (remove str/blank? (str/split s (re-pattern delimiter))))]
+        (reduce (fn [t tok]
+                  (if (and (not (masked? tok)) (contains? digests (digest salt tok)))
+                    (str/replace t (known-pattern tok) (java.util.regex.Matcher/quoteReplacement (mask tok)))
+                    t))
+                s
+                ;; longest first: a value is masked before a part of it
+                (sort-by (comp - count) (distinct candidates)))))))
 
 (defn scrub
   "`x` with every resolved value masked, at any depth and inside any string,

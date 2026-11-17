@@ -493,4 +493,24 @@ PY
 set +e; "$ROOT/agentctl" apply --all -t claude -k mcps -f "$SB/cuser.edn" > "$SB/cuser.txt" 2>&1; set -e
 grep -q 'mcps/cuser' "$SB/cuser.txt" && { cat "$SB/cuser.txt"; fail "a header kept as \${VAR} is drift on the next plan"; }
 
+echo "25. references chained by any delimiter, dropped, leave none of their secrets printed"
+python3 - "$SB/chain.edn" <<'PY'
+import sys
+r = ["!{bw://plant/ENV}", "!{bw://plant/HDR}", "!{bw://plant/ARG}"]
+args = [f"--c{i}{n}=" + d.join(r[:n]) for i, d in enumerate([":", "=", " ", "@", "/", "?", "&", ","]) for n in (2, 3)]
+open(sys.argv[1], "w").write('{:mcps [{:id :chain :command "/bin/echo" :args [%s] :in :all :acli [:pi]}]}\n'
+                             % " ".join('"%s"' % a for a in args))
+PY
+set +e; "$ROOT/agentctl" apply! --all -t pi -f "$SB/chain.edn" -y > "$SB/apply.txt" 2>&1; set -e
+pi_args chain | grep -qF '"--c03=envsecretvalue444:hdrsecretvalue555:argsecretvalue888"' || { cat "$SB/apply.txt"; pi_args chain; fail "the chained references were not written"; }
+python3 - "$SB/chain.edn" <<'PY'
+import re, sys
+f = sys.argv[1]
+s = open(f).read()
+open(f, "w").write(re.sub(r':args \[.*\] :in', ':args ["--c=x"] :in', s))
+PY
+CFG="$SB/chain.edn" outputs
+grep -qF '"--c=x"' "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped chain is not planned"; }
+leaks envsecretvalue444 hdrsecretvalue555 argsecretvalue888
+
 echo "all secrets e2e checks passed"
