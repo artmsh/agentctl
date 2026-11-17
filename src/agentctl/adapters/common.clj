@@ -128,6 +128,26 @@
   [m]
   (merge (:env m) (:headers m) (:arg-refs m) (when (:url-ref m) {"url" (:url-ref m)})))
 
+(defn text-refs
+  "`[place spelling]` for every reference spelling a server would still be
+   written with as text once its references are resolved: a `$VAR` left in
+   argv (nothing set it), or a `!cmd://` inside a longer env value, header or
+   URL, which cannot be told from the text after it. A server held back on
+   an unresolved reference has nothing written, and nothing to report."
+  [m]
+  (let [m (-> m resolve-args resolve-url)]
+    (when-not (seq (mcp-issues m))
+      (let [scheme (fn [v] (when-let [hit (refs/literal-ref v)] (when (str/starts-with? hit "!") hit)))
+            literal (fn [r] (when (= :literal (:ref/kind r)) (:ref/value r)))]
+        (concat
+         (keep-indexed (fn [i a] (some->> (refs/literal-ref a) (vector (str "args[" i "]")))) (:args m))
+         (some->> (scheme (:url m)) (vector "url") vector)
+         (keep (fn [[k r]] (some->> (scheme (literal r)) (vector (str "env." (u/kw->str k))))) (:env m))
+         (keep (fn [[k r]] (some->> (scheme (literal r)) (vector (str "headers." (u/kw->str k))))) (:headers m)))))))
+
+(defn text-ref-message [[place spelling]]
+  (str "⚠ " place " holds `" spelling "`, which nothing resolves there — written as text"))
+
 (defn provider-issues
   "A provider's unresolved refs: its key, unless `key?` is false (a key the
    tool reads from the environment itself), its headers, and each declared

@@ -344,4 +344,19 @@ PY
 sed -i.bak 's|k=!bw://plant/ARG|k=!bw://plant/NOPE|' "$SB/query.edn"
 held "$SB/query.edn" 'url.url' omp kimi antigravity codex
 
+echo "15. a spelling nothing resolves is a plan and validate finding, never silent"
+cat > "$SB/text.edn" <<'EDN'
+{:mcps [{:id :xdocs :command "/bin/echo" :args ["--opt" "$AGENTCTL_TEST_NEVER_SET"] :env {"MODE" "x !cmd://echo hi"}
+         :in :all :acli [:pi :kimi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply --all -t pi -t kimi -f "$SB/text.edn" > "$SB/text.txt" 2>&1; set -e
+for t in PI KIMI; do
+  sed -n "/^$t\$/,/^\$/p" "$SB/text.txt" | grep -qF 'args[1] holds `$AGENTCTL_TEST_NEVER_SET`, which nothing resolves there — written as text' \
+    || { cat "$SB/text.txt"; fail "$t: the plan does not report the unset variable"; }
+done
+grep -qF 'env.MODE holds `!cmd://…`' "$SB/text.txt" || { cat "$SB/text.txt"; fail "the plan does not report the embedded command"; }
+set +e; "$ROOT/agentctl" validate -f "$SB/text.edn" > "$SB/text.txt" 2>&1; set -e
+grep -qF 'xdocs.args[1]' "$SB/text.txt" && grep -qF 'xdocs.env.MODE' "$SB/text.txt" \
+  || { cat "$SB/text.txt"; fail "validate does not report the spellings written as text"; }
+
 echo "all secrets e2e checks passed"

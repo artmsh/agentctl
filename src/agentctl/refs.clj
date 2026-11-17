@@ -349,6 +349,19 @@
 
           :else (recur (inc i) (next xs) (when (and (not f) (takes-credential? a)) a) acc))))))
 
+(def ^:private literal-ref-pattern
+  #"!(?:bw|env|file|cmd)://|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+(defn literal-ref
+  "The reference spelling `s` still carries once everything that resolves
+   has been resolved — a `$VAR` nothing expanded, a `!cmd://` inside other
+   text — or nil. It would be written as text. Only the scheme or the
+   variable's name is returned, never what follows."
+  [s]
+  (when (string? s)
+    (when-let [hit (re-find literal-ref-pattern s)]
+      (if (str/starts-with? hit "!") (str hit "…") hit))))
+
 (def credential-value-patterns
   "Vendor prefixes nothing but a credential carries."
   [#"^sk-[A-Za-z0-9\-_]{10,}"

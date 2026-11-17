@@ -588,6 +588,18 @@
       (throw (ex-info (:summary (first gates)) {:path [:executors :codex :sandbox]}))
       (concat ops (map #(dissoc % :refuse-if-settings-change) gates)))))
 
+(defn- text-ref-ops
+  "A report per server and tool for a reference spelling written as text
+   (`common/text-refs`): the server is written, and its credential is not."
+  [cfg selected]
+  (for [[id m] (:mcps cfg)
+        t (sort-by name (:tools m))
+        :when (selected t)
+        :let [hits (common/text-refs (common/for-this-tool m t))]
+        :when (seq hits)]
+    (plan/op {:tool t :kind :mcps :id id :warn true
+              :summary (str/join "; " (map common/text-ref-message hits))})))
+
 (defn build-plan
   "All ops for the current config. Pure: touches no state on disk."
   [cfg st opts]
@@ -636,6 +648,7 @@
                 ;; after the user-wide installs they check for
                 (:ops dups)
                 (statusline/plan-ops cfg st opts)
+                (text-ref-ops cfg selected)
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
                 (when (and (:entity-dsl? cfg) (selected :claude)) (project-hook-ops cfg st))

@@ -766,6 +766,16 @@ every output, and held back like an env value when it does not resolve;
 config is read. A value after `-t` or `-k` is masked unless it is plainly
 something else (a number, a common word, a path).
 
+A spelling that would still be written as text — a `$VAR` left in argv
+because nothing set it, a `!cmd://` inside a longer env value, header or URL,
+whose command cannot be told from the text after it — is reported by the plan
+and by `validate`: `⚠ args[1] holds `$DOCS_TOKEN`, which nothing resolves
+there — written as text`.
+
+```clojure
+{:mcps [{:id :docs :cmd "docs-mcp --api-key !bw://vendor/docs/api-key" :in :all}]}
+```
+
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
 `!bw://` references; apply resolves them and writes the native

@@ -154,6 +154,8 @@
       (ref-findings [:mcps id :env] (:env m))
       (ref-findings [:mcps id :headers] (:headers m))
       (when-let [r (common/url-ref m)] (ref-findings [:mcps id] {:url r}))
+      (for [[place spelling :as hit] (common/text-refs m)]
+        (f :warn [:mcps id place] (subs (common/text-ref-message hit) 2)))
       (ref-findings [:mcps id :args] (into {} (map (fn [[_ label r]] [label r])) (refs/arg-refs (:args m))))
       (when (and deep? (= :http (:transport m)))
         (let [{:keys [exit]} (u/sh "curl" "-sS" "-o" "/dev/null" "--max-time" "8" (:url m))]
