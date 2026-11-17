@@ -409,4 +409,11 @@ CFG="$SB/gone.edn" outputs
 grep -q gdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped reference is not planned"; }
 leaks argsecretvalue888
 
+echo "20. a plain value after -k or -t is shown"
+cat > "$SB/plainflag.edn" <<'EDN'
+{:mcps [{:id :kdocs2 :command "/bin/echo" :args ["-k" "json" "-t" "fastmode"] :in :all :acli [:pi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply --all -t pi -f "$SB/plainflag.edn" -v > "$SB/pf.txt" 2>&1; set -e
+grep -qF '["-k" "json" "-t" "fastmode"]' "$SB/pf.txt" || { cat "$SB/pf.txt"; fail "a plain value after -k or -t was masked"; }
+
 echo "all secrets e2e checks passed"

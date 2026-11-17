@@ -466,7 +466,8 @@
 
 (def ^:private short-credential-flags
   "One-letter flags that take a token in many CLIs (`-t`, `-k`). Too common
-   to mask whatever follows them, but a reference after one is a credential."
+   to mask whatever follows them, but a reference after one is a credential,
+   and is masked as any resolved value is."
   #{"-t" "-k"})
 
 (defn- dollar-ref? [r]
@@ -475,36 +476,28 @@
 (defn- takes-credential? [flag]
   (boolean (or (credential-flag flag) (short-credential-flags flag))))
 
-(defn- plain-arg?
-  "A value after `-t` or `-k` that is plainly no credential: those letters
-   take a timeout, a type or a key path as often as a token."
-  [v]
-  (boolean (or (re-matches #"-?\d+(\.\d+)?[a-z]{0,2}" v)
-               (contains? plain-words (str/lower-case v))
-               (re-find #"^[/~.]" v))))
-
 (defn mask-argv
   "argv with the value at every credential position masked: the argument
    after a credential-looking flag, and such a flag's `=value`. Whatever
    the value is — resolved this run, read back from disk, or short enough
-   to be found nowhere else — the position says what it is. After `-t` or
-   `-k` a value is masked unless it is plainly something else."
+   to be found nowhere else — the position says what it is. `-t` and `-k`
+   take a timeout or a type as often as a token: a value after them is
+   masked when it came from a reference, as any is."
   [args]
   (loop [xs (seq args), flag nil, out []]
     (if-not xs
       out
       (let [a (first xs)
             [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
-            hide? (fn [flag v] (and (not (shown-as-is? v))
-                                    (or (credential-flag flag) (not (plain-arg? v)))))]
+            hide? (fn [v] (not (shown-as-is? v)))]
         (cond
-          (and f (takes-credential? f))
-          (recur (next xs) nil (conj out (if (hide? f v) (str f "=" (mask v)) a)))
+          (and f (credential-flag f))
+          (recur (next xs) nil (conj out (if (hide? v) (str f "=" (mask v)) a)))
 
           (and flag (string? a) (not (str/starts-with? a "-")))
-          (recur (next xs) nil (conj out (if (hide? flag a) (mask a) a)))
+          (recur (next xs) nil (conj out (if (hide? a) (mask a) a)))
 
-          :else (recur (next xs) (when (and (not f) (takes-credential? a)) a) (conj out a)))))))
+          :else (recur (next xs) (when (and (not f) (credential-flag a)) a) (conj out a)))))))
 
 (def ^:private flag-value-pattern
   #"(?<![\w-])(--?[A-Za-z][A-Za-z0-9_-]*)(=|\s+)([^\s\"',\]})]+)")
@@ -515,8 +508,7 @@
   [s]
   (str/replace s flag-value-pattern
                (fn [[whole f sep v]]
-                 (if (and (takes-credential? f) (not (str/starts-with? v "-")) (not (shown-as-is? v))
-                          (or (credential-flag f) (not (plain-arg? v))))
+                 (if (and (credential-flag f) (not (str/starts-with? v "-")) (not (shown-as-is? v)))
                    (str f sep (mask v))
                    whole))))
 

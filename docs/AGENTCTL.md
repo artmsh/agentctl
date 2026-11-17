@@ -774,8 +774,9 @@ A whole `$VAR` is one after a flag whose name says credential (`--token`,
 such a flag's `=value`. Each is resolved when the plan is made, masked in
 every output, and held back like an env value when it does not resolve;
 `validate` checks it. Anywhere else in argv a `$VAR` is expanded when the
-config is read. A value after `-t` or `-k` is masked unless it is plainly
-something else (a number, a common word, a path).
+config is read. `-t` and `-k` take a timeout or a type as often as a token,
+so a value after them is masked only when a reference resolved to it:
+`-k json` reads as written.
 
 A `!cmd://` runs to the end of its value, so it is a reference only as a
 whole argument, env value, header or URL. Inside a longer one —
