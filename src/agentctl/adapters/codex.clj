@@ -480,12 +480,12 @@
                    :note (when secret? "⚠ secret value written into the project — .codex/ may be tracked")
                    :diffs (plan/field-diffs (or have {}) want)
                    :risk (if secret? :secret :low)
-                   ;; the whole table is rewritten: a key left from an
-                   ;; earlier shape (stdio → http) would change what codex runs
+                   ;; the whole table is replaced: a key left from an
+                   ;; earlier shape (stdio → http) would change what codex
+                   ;; runs. It is edited where it stands, comments kept.
                    :exec! (fn []
                             (u/backup! file)
-                            (toml/update-file! file #(-> (toml/remove-table % ["mcp_servers" name*])
-                                                         (toml/set-keys ["mcp_servers" name*] want))))}))))))
+                            (toml/update-file! file #(toml/replace-table % ["mcp_servers" name*] want)))}))))))
 
 (defn- project-mcp-prune-ops
   "A project's server dropped from agents.edn. The path comes from the state
@@ -616,12 +616,18 @@
    apply! 1, as for a secret that did not resolve. `shown` is the path the
    plan names."
   [ops file shown]
-  (let [{hit true keep false} (group-by #(boolean (and (plan/mutating? %) (= file (:target %)))) ops)]
+  (let [{hit true others false} (group-by #(boolean (and (plan/mutating? %) (= file (:target %)))) ops)]
     (if (empty? hit)
       ops
-      (concat keep
+      (concat others
               [(plan/op {:tool tool :kind :settings :id :config-link :warn true :target shown
                          :withheld (count hit)
+                         ;; what --json prints for each
+                         :withheld-changes (vec (for [o hit]
+                                                  {:tool (name tool) :project (some-> (:project o) u/kw->str)
+                                                   :action (name (:action o)) :kind (name (:kind o))
+                                                   :id (u/kw->str (:id o)) :target shown
+                                                   :keys (vec (distinct (keep #(some-> (:key %) u/kw->str) (:diffs o))))}))
                          :summary (str/join "\n    "
                                             (cons (str (u/tilde shown) " is a symlink: agentctl does not write through it — "
                                                        (count hit) " change(s) withheld")

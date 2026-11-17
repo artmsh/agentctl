@@ -176,7 +176,10 @@ For MCPs, `:at :machine` (the default) uses the machine-local placement;
 `:at :repo` writes the project's `.mcp.json`. `:scope` remains a deprecated
 alias. Tool support still applies, and unsupported placements produce warnings.
 The ownership manifest records resolved paths so a repository that disappears
-from a selector can still have its owned entries pruned.
+from a selector can still have its owned entries pruned. An old-format run
+records none of its writes. It takes over from the manifest each key of a DSL
+write that it declares again at the same project or home, so a later `{}` leaves
+that key in place. A later DSL run that declares the key claims it back.
 
 The older project-registry form remains readable for compatibility. The
 following example and its project-specific sections describe that legacy form;
@@ -623,8 +626,10 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
-codex, pi, omp and antigravity have no project-level MCP config; they report the
-skip as a warning rather than silently installing the server user-wide.
+codex writes a project's servers to `<project>/.codex/config.toml` (read for a
+trusted project only). pi, omp and antigravity have no project-level MCP config;
+they report the skip as a warning rather than silently installing the server
+user-wide.
 
 A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
 the project's `.claude/settings.local.json`, the list Claude Code reads, so it
@@ -980,7 +985,9 @@ stdin in the OEM codepage. An operation that does not end with a final `OK` line
 {:statusline {:defaults {:segments [:model :context] :context-style :full
                          :warning-percent 50 :critical-percent 80}
               :agents {:pi {:segments [:model :context :cost]}}
-              :bin "~/.local/bin/agent-statusline"}}  ; optional, agentctl's own
+              :bin "~/.local/bin/agent-statusline"     ; optional, agentctl's own
+              :source "~/src/agent-statusline" ; optional: the renderer's checkout
+              :acli [:cc :pi]}}                        ; optional: derive Claude's and Pi's hooks
 ```
 
 The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
@@ -988,11 +995,22 @@ The shared status-line file, `$XDG_CONFIG_HOME/agent-statusline/config.json` or
 resource by path. Keys are the renderer's JSON keys in kebab-case, keyword values
 become strings and `nil` becomes `null` (shown `∅` in a plan). Nothing else is
 interpreted: the renderer's `--check` decides what is valid. Its ops are
-`agentctl statusline/config`, selected by `-k statusline` (which `-t` does not
-narrow) and never by `-t` alone. A symlinked file is replaced, never written through,
+`agentctl statusline/config`, selected by `-k statusline` or `--only statusline/config`
+(which `-t` does not narrow) and never by `-t` alone. `config` is the only id `--only`
+accepts for it. A symlinked file is replaced, never written through,
 and `import` reads the file back. An `:awl` override plans nothing for awl,
 which reads the same file only when built with `-Dstatusline`. `validate` and
-`apply` report whether the `awl` on `PATH` was built that way. See
+`apply` report whether the `awl` on `PATH` was built that way.
+
+`:acli` derives each listed CLI's own hook into the renderer. For `:cc`, that is Claude's
+user `statusLine`, `'<bin>' --agent cc`, plus `--config` when the file is not at the
+renderer's default path. `<bin>` is `:bin`, else `<source>/zig-out/bin/agent-statusline`.
+For `:pi`, it is the extension `agent-statusline`, linked from
+`<source>/adapters/pi-extension` and built with `zig build` in the checkout. Precedence: a
+hand-written user-wide Claude `:status-line` wins, and so does an extension with that id
+or from the same directory. Derived ops are `settings` and `extensions`, selected by `-t`
+and `-k` like any other. Removing a CLI from `:acli` prunes only what was derived for it,
+and a `statusLine` edited since it was written is kept. See
 [the guide](GUIDE.md#shared-status-line) for validation, paths, ownership and awl.
 
 ### Secret references

@@ -64,6 +64,52 @@
       (testing "a changed value keeps the line's comment"
         (is (str/starts-with? (toml/set-keys text [] [[:a 2]]) "a = 2  # one\n")))))
 
+  (testing "a multi-line array is written again in place, its comments kept"
+    (let [text (str "[tui]\n"
+                    "status_line = [ # what the footer shows\n"
+                    "  # the model first\n"
+                    "  \"model\", # always\n"
+                    "  \"cwd\",\n"
+                    "  # more go here\n"
+                    "] # end\n")
+          out (toml/set-key text ["tui"] "status_line" ["model" "branch"])]
+      (is (= (str "[tui]\n"
+                  "status_line = [ # what the footer shows\n"
+                  "  # the model first\n"
+                  "  \"model\", # always\n"
+                  "  \"branch\",\n"
+                  "  # more go here\n"
+                  "] # end\n")
+             out))
+      (is (nil? (toml/parse-error out)) out))
+    (testing "one written several elements a line is written on one"
+      (is (= "a = [\"x\"]\n" (toml/set-key "a = [\"p\", \"q\",\n  \"r\"]\n" [] "a" ["x"])))))
+
+  (testing "a table replaced whole is edited where it stands, comments kept"
+    (let [text (str "[mcp_servers.docs] # the docs server\n"
+                    "command = \"docs\" # the binary\n"
+                    "url = \"http://old\"\n"
+                    "\n"
+                    "[mcp_servers.docs.env]\n"
+                    "A = \"1\" # first\n"
+                    "\n"
+                    "[mcp_servers.docs.http_headers]\n"
+                    "X = \"y\"\n"
+                    "\n"
+                    "[other]\n"
+                    "k = 1\n")
+          out (toml/replace-table text ["mcp_servers" "docs"]
+                                  {"command" "docs" "args" ["--quiet"] "env" {"A" "1" "B" "2"}})]
+      (is (nil? (toml/parse-error out)) out)
+      (is (= {"command" "docs" "args" ["--quiet"] "env" {"A" "1" "B" "2"}}
+             (get-in (toml/parse-text out) ["mcp_servers" "docs"])))
+      (is (= {"k" 1} (get (toml/parse-text out) "other")))
+      (is (str/includes? out "[mcp_servers.docs] # the docs server"))
+      (is (str/includes? out "command = \"docs\" # the binary"))
+      (is (str/includes? out "A = \"1\" # first"))
+      (is (not (str/includes? out "http_headers")))
+      (is (not (str/includes? out "url")))))
+
   (testing "a new table is appended, quoted where required"
     (let [out (toml/set-key sample-toml ["projects" "/Users/example/y"] :trust_level "trusted")]
       (is (str/includes? out "[projects.\"/Users/example/y\"]"))

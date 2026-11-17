@@ -269,6 +269,17 @@ c=$(code_of run apply -f "$SB/l.edn" --all -t codex)
 [ "$c" = 2 ] || { cat "$SB/out.txt"; fail "a linked config.toml hid its drift (exit $c, not 2)"; }
 grep -q 'is a symlink' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the plan does not say config.toml is a link"; }
 grep -q 'withheld.*model' "$SB/out.txt" || { cat "$SB/out.txt"; fail "the withheld changes are not listed"; }
+run apply -f "$SB/l.edn" --all -t codex --json > "$SB/l.json" || true
+python3 - "$SB/l.json" <<'PY2' || { cat "$SB/l.json"; fail "--json does not carry the withheld changes"; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+w = d["withheld"]
+assert any(e["kind"] == "settings" and e["id"] == "global" and "model" in e["keys"] and e["action"] == "update"
+           and e["target"].endswith(".codex/config.toml") for e in w), w
+assert all(e["tool"] == "codex" and "project" in e for e in w), w
+assert not any("withheld-changes" in o for o in d.get("ops", [])), "the per-op copy is still printed"
+assert "withheld" in d["summary"], d["summary"]
+PY2
 c=$(code_of run apply! -f "$SB/l.edn" --all -t codex -y)
 [ "$c" = 1 ] || { cat "$SB/out.txt"; fail "apply! with changes withheld exited $c, not 1"; }
 cmp -s "$SB/dotfiles/config.toml" "$SB/before.toml" || fail "written through the config.toml link"

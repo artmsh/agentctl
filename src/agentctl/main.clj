@@ -133,7 +133,8 @@
 (defn- op->data
   "An op as `--json` prints it: masked exactly as the text plan is."
   [o]
-  (-> o (dissoc :exec!) plan/mask-op
+  ;; withheld changes are listed once, under the document's `withheld`
+  (-> o (dissoc :exec! :withheld-changes) plan/mask-op
       (update :tool u/kw->str) (update :kind u/kw->str) (update :id u/kw->str)))
 
 (defn- load! [opts]
@@ -259,7 +260,8 @@
              :skipped (map name (:skipped planned))
              :warnings warnings
              :findings (mapv finding->data findings)
-             :summary (plan/summary-line ops)}]
+             :summary (plan/summary-line ops)
+             :withheld (plan/withheld-changes ops)}]
     (when-not (:json opts)
       (doseq [w warnings] (println (str "  ⚠ " w)))
       (println (str "host: " (name (:id host)) " (" (:ssh host) ", " (name (:os host)) ")"))
@@ -331,7 +333,8 @@
                        :warnings (vec warnings)
                        :findings (mapv finding->data findings)
                        :secrets (count (filter #(= :secret (:risk %)) changes))
-                       :summary (plan/summary-line ops)}
+                       :summary (plan/summary-line ops)
+                       :withheld (plan/withheld-changes ops)}
                 scope (assoc :scope {:where (u/kw->str (:where scope))
                                      :path (:path scope)
                                      :projects (mapv u/kw->str (sort (:projects scope)))}))]
@@ -454,6 +457,10 @@
                           (nil? k) (throw (ex-info (str "--only " s ": want KIND/ID, e.g. --only skills/review") {}))
                           (not (some #{kind} core/kinds))
                           (throw (ex-info (str "--only " s ": " (core/kind-problem kind)) {}))
+                          ;; one file, one id: any other names nothing
+                          (and (= :statusline kind) (not= (name statusline/id) id))
+                          (throw (ex-info (str "--only " s ": the status-line file has one id, "
+                                               "statusline/" (name statusline/id)) {}))
                           ;; both filters apply, so this one could select nothing
                           (not (core/kind-selected? opts kind))
                           (throw (ex-info (str "--only " s ": -k " (str/join " -k " (map name (sort (:kinds opts))))

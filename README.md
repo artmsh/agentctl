@@ -13,7 +13,7 @@
 
 > [!WARNING]
 > **Alpha.** Config keys change without migration: `:#let` became `:#def` with no alias, and an
-> old file's `$name` references fall back to environment variables. 170 unit tests and five
+> old file's `$name` references fall back to environment variables. 229 unit tests and ten
 > end-to-end suites pass in CI, but no `apply!` over a whole config on a real home has been done
 > yet. Beta when that run is verified.
 
@@ -158,8 +158,9 @@ releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describ
 
 ## Limitations
 
-- Codex, Pi, OMP, Kimi and Antigravity have no project-level MCP config, so a project-scoped
-  server is skipped for them with a warning.
+- Pi, OMP, Kimi and Antigravity have no project-level MCP config, so a project-scoped
+  server is skipped for them with a warning. Codex writes it to the project's
+  `.codex/config.toml`, which Codex reads only for a trusted project.
 - The DeepSeek Harness keeps settings, MCP servers and providers in Cordis patch files that
   agentctl does not write; `:dsh` entries there are reported by `validate` and the plan.
 - Removing a project from the config leaves its project-scoped MCP entries behind.
@@ -171,10 +172,10 @@ bb test
 ```
 
 ```text
-Ran 170 tests containing 1014 assertions.
+Ran 229 tests containing 1682 assertions.
 0 failures, 0 errors.
 …
-all statusline e2e checks passed
+all gui e2e checks passed
 ```
 
 `tests/run.sh` stubs every agent CLI and points `AGENTCTL_HOME` at a temp dir, so the suite does

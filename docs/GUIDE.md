@@ -156,7 +156,13 @@ config with nothing that decides the format yet — `{}`, or only `:statusline`,
 `:extensions` and `:hosts` — is in neither: `-k trust` there selects nothing
 and is reported with `⚠`, naming no format. Such a config declares nothing,
 so a DSL config emptied to `{}` prunes what it wrote — trust, settings,
-permissions — as `{:mcps []}` does. An `--only` or `-p` that nothing
+permissions — as `{:mcps []}` does. An old-format config prunes none of
+its own writes, and takes over, key by key, the DSL writes it declares again
+at the same place: a settings key, a permissions bucket, a project's trust.
+Switching to the old format and then to `{}` leaves those in place, and still
+prunes every key only the DSL declared. A DSL run that declares a taken-over
+key again claims it back, even when it is already converged, so DSL, then old,
+then DSL, then `{}` prunes it. An `--only` or `-p` that nothing
 declares or owns is reported with `⚠` too (under `--json`, in `warnings`),
 because a run narrowed to a typo plans nothing and would otherwise read as
 converged.
@@ -181,7 +187,8 @@ setting below is written key by key into its own table, so that state survives.
 A `config.toml` that is a symlink, into a dotfiles checkout say, is left alone:
 agentctl does not write through it. The plan says so in one warning that lists
 each change withheld, and counts them as pending: `apply` exits 2 and `apply!` 1
-until the link is replaced or the declaration matches the file.
+until the link is replaced or the declaration matches the file. Under `--json` each
+one is an entry of `withheld`: `{action, kind, id, target, keys}`.
 
 A model switch two keys away: bind the presets browser and put `/model` in slot 0.
 
@@ -341,8 +348,10 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
-Codex, Pi and OMP have no project-level MCP config; they report the skip as a
-warning rather than silently installing the server user-wide.
+Codex writes a project's servers to `<project>/.codex/config.toml`, which it
+reads for a trusted project only; an untrusted one gets a warning to add a
+`:trust` row. Pi and OMP have no project-level MCP config; they report the skip
+as a warning rather than silently installing the server user-wide.
 
 A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
 the project's `.claude/settings.local.json`, the list Claude Code reads, so it
@@ -665,8 +674,52 @@ which in an agent's override means "inherit the default"; the plan shows it as `
 translation knows no option or value. A key agentctl has never heard of is written as
 given, and the renderer judges it, so new renderer options need no agentctl release. Two
 spellings that land on one JSON key (`:context-style` and `:context_style`) are a config
-error. `:bin` is agentctl's own and is not written. Each override lands under its own agent
-only.
+error. `:bin`, `:source` and `:acli` are agentctl's own and are not written. Each override
+lands under its own agent only.
+
+**Claude and Pi, derived.** Claude runs the renderer as its `statusLine` command and Pi
+loads it as an extension. `:acli` asks agentctl to declare those from this one place, so
+they never drift from the file:
+
+```clojure
+{:statusline {:acli [:cc :pi]
+              :source "~/src/agent-statusline"   ; the renderer's checkout
+              :defaults {:segments [:model :context]}}}
+```
+
+- `:cc` sets Claude's user `statusLine` to `'<bin>' --agent cc`, where `<bin>` is `:bin`,
+  else `<source>/zig-out/bin/agent-statusline`. When agentctl writes the file somewhere the
+  renderer does not look unasked (an `XDG_CONFIG_HOME` other than `~/.config`), the command
+  adds `--config '<path>'`. Without `:bin` or `:source` it is a config error.
+- `:pi` declares the extension `agent-statusline`, linked from
+  `<source>/adapters/pi-extension` and built first with
+  `cd ../.. && zig build -Doptimize=ReleaseFast`, as a hand-written `:extensions` entry is.
+  Without `:source` it is a config error.
+- Any other CLI is a warning, since awl reads the file itself and codex draws its own status
+  line. A name that is no CLI is a config error.
+- `:source` is also where the renderer comes from for `--check`, after `:bin` and once it is
+  built. With `:cc` but neither `:bin` nor `:pi`, nothing builds it, and `validate` and
+  `apply` warn until it is built.
+
+Derivation is opt-in. Without `:acli`, `:statusline` writes the file and nothing else.
+
+A hand-written declaration always wins:
+
+- A user-wide Claude `:status-line`, in either config format, is written as declared, and
+  nothing is derived for Claude. Derivation is user-wide only, so a project's
+  `:status-line` is never touched.
+- An `:extensions` entry with the id `agent-statusline`, or from the same directory under
+  any id (such as `shared-statusline`), is the one Pi loads, and no second copy is linked.
+
+The derived ops are ordinary Claude settings and Pi extensions. `-t claude`, `-t pi`,
+`-k settings` and `-k extensions` select them, and `-k statusline` does not. Each planned
+change is marked "derived from :statusline :acli". Dropping `:cc` from `:acli` removes the
+`statusLine` agentctl wrote, but only while it still holds that value. One edited by hand
+is left in place, with a warning on every run until it is removed or put back,
+and the Pi extension stays. Dropping `:pi` unlinks the
+extension the same way any removed extension is unlinked. `import` reads a derived
+`statusLine` back as a hand-written `:status-line`, and it does not recover `:acli` or
+`:source`.
 
 **Validation** is the renderer's. `validate` and `apply` write the candidate JSON to a
 temporary file and run `agent-statusline --check --config <tmp>`, which reads no stdin and
@@ -706,7 +759,9 @@ at an owned path on removal is left in place. `import` reads an existing file ba
 `:statusline`, so `import! --replace` does not drop the declaration and with it the file.
 
 The file belongs to no single CLI, so `-t` leaves it out and `-k statusline` selects it,
-whatever `-t` says.
+whatever `-t` says. `--only statusline/config` names it the same way. `config` is its only
+id: any other is refused, and `--only statusline/config` with neither a declaration nor an
+owned file warns that it names nothing, as any `--only` that matches nothing does.
 A run narrowed to projects, whether by the working directory or by `-p`, leaves it out as
 well, as it does every user-wide resource; `--all` includes it. Codex does not read this
 file: its status line is a native setting, and the `codex` override only feeds the

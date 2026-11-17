@@ -9,6 +9,7 @@
             [agentctl.adapters.kimi :as kimi]
             [agentctl.adapters.antigravity :as antigravity]
             [agentctl.scope :as scope]
+            [agentctl.statusline :as statusline]
             [agentctl.plan :as plan]
             [agentctl.toml :as toml]
             [agentctl.util :as u]
@@ -59,16 +60,86 @@
   (or (:entity-dsl? cfg)
       (and (contains? cfg :format) (nil? (:format cfg)))))
 
+(defn- field
+  "The key one recorded diff of a write stands for: a settings key, a
+   permissions bucket, or, for trust and memory, the whole write."
+  [w diff]
+  (case (:kind w)
+    :permissions (u/kw->str (last (:path w)))
+    (u/kw->str (:key diff))))
+
+(defn- declares?
+  "Does `cfg` declare this field of write `w` at the place it was written?
+   `o` is `w` with `:project` naming `cfg`'s own project there, nil at home.
+   `$schema` goes with any other key: the adapter writes it beside them."
+  [cfg o k]
+  (case (:kind o)
+    :settings (let [fs (desired-fields cfg o)] (boolean (or (fs k) (and (= "$schema" k) (seq fs)))))
+    :permissions (contains? (if (:project o) (get-in cfg [:projects (:project o) :permissions])
+                                (get-in cfg [:tools :claude :permissions]))
+                            (keyword k))
+    :trust (let [p (get-in cfg [:projects (:project o)])]
+             (boolean (and p (contains? (set (:for-tools p)) (:tool o))
+                           (or (:trusted p) (get (:trust-by-tool p) (:tool o))))))
+    :memory (boolean (some #(contains? (set (:tools %)) (:tool o)) (vals (:memory cfg))))
+    false))
+
+(defn- split-diffs
+  "[kept moved]: write `w`'s diffs split by `move?`, each nil when empty."
+  [w move?]
+  (let [{moved true kept false} (group-by (comp boolean move?) (:diffs w))]
+    [(when (seq kept) (assoc w :diffs (vec kept))) (when (seq moved) (assoc w :diffs (vec moved)))]))
+
+(defn- merge-write [m k w]
+  (if-let [old (get m k)]
+    (assoc m k (assoc w :diffs (vec (vals (into {} (map (juxt :key identity)) (concat (:diffs old) (:diffs w)))))))
+    (assoc m k w)))
+
+(defn- hand-over
+  "An old-format config keeps no record of its own writes and prunes none of
+   them. Each key of a DSL write it declares again, at the same place, is its
+   now: moved to `:handed-over`, so a later empty config does not prune what
+   the old format still declares. A key it does not declare stays recorded,
+   and is pruned as before."
+  [st cfg]
+  (let [project-at (fn [place] (some (fn [[id p]] (when (= place (u/abs-path (:path p))) id)) (:projects cfg)))]
+    (reduce
+     (fn [s [k w]]
+       (let [pid (some-> (:project-path w) u/abs-path project-at)
+             o (assoc w :project pid)
+             [kept moved] (if (and (:project-path w) (nil? pid))
+                            [w nil]
+                            (split-diffs w #(declares? cfg o (field w %))))]
+         (cond-> (if kept (assoc-in s [:writes k] kept) (update s :writes dissoc k))
+           moved (update :handed-over merge-write k (dissoc moved :owners)))))
+     st (:writes st))))
+
+(defn- take-back
+  "A DSL run claims again what an old-format run took over, key by key, where
+   it declares that key at that place once more: converged, it plans no op
+   that would record it."
+  [st cfg]
+  (reduce
+   (fn [s [k w]]
+     (let [os (owners cfg w)
+           [kept moved] (if (seq os) (split-diffs w #(declares? cfg w (field w %))) [w nil])]
+       (cond-> (if kept (assoc-in s [:handed-over k] kept) (update s :handed-over dissoc k))
+         moved (update :writes merge-write k (assoc moved :owners os)))))
+   st (:handed-over st)))
+
 (defn record
   "Keep the exact destinations of successful writes; planning never claims ownership."
   [st cfg failed done]
-  (if-not (tracked? cfg) st
-    (let [st (assoc st :placements (merge (:placements st) (placements cfg)))]
+  (if-not (tracked? cfg) (hand-over st cfg)
+    (let [st (cond-> (assoc st :placements (merge (:placements st) (placements cfg)))
+               (:entity-dsl? cfg) (take-back cfg))]
       (reduce
        (fn [s o]
          (let [triple ((juxt :tool :kind :id) o) k (write-key o)]
            (cond
              (or (failed triple) (and (some? done) (not (done triple)))) s
+             ;; owned by the `:statusline` that derived it, and pruned there
+             (statusline/derived? cfg o) s
              (= :delete (:action o))
              (let [remaining (when (:pruned-keys o)
                                (vec (remove #(contains? (set (:pruned-keys o)) (:key %))

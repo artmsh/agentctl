@@ -308,6 +308,25 @@ STUB
   CODEX_HANG=spawn AGENTCTL_SSH_CMD="$SB/dash-ssh" expect 2 apply $W
   sleep 1
   if pgrep -f 'sleep 312[34]' >/dev/null; then pkill -f 'sleep 312[34]'; fail "the version probe left a stray process under dash"; fi
+  echo "    nor under dash with neither setsid nor perl, nor pgrep"
+  # the system's tools, less those that make a process group, and pkill
+  mkdir -p "$SB/sysbin"
+  for d in /usr/bin /bin; do
+    for f in "$d"/*; do
+      case "${f##*/}" in setsid|perl|perl5*|pkill|pgrep|sh) continue;; esac
+      [ -e "$SB/sysbin/${f##*/}" ] || [ -L "$SB/sysbin/${f##*/}" ] || ln -s "$f" "$SB/sysbin/${f##*/}"
+    done
+  done
+  # the remote command is `sh -s`: that sh is dash too
+  ln -sf "$(command -v dash)" "$SB/sysbin/sh"
+  cat > "$SB/bare-dash-ssh" <<STUB
+#!/bin/sh
+exec env PATH="$SB/bin:$SB/sysbin" dash -c "\$2"
+STUB
+  chmod +x "$SB/bare-dash-ssh"
+  CODEX_HANG=spawn AGENTCTL_SSH_CMD="$SB/bare-dash-ssh" expect 2 apply $W
+  sleep 1
+  if pgrep -f 'sleep 312[34]' >/dev/null; then pkill -f 'sleep 312[34]'; fail "the version probe left a stray process without setsid or perl"; fi
 fi
 
 echo "21. a hand-made copy codex reads beside agentctl's is reported, never touched"
@@ -504,6 +523,9 @@ cp "$G/dotfiles/config.toml" "$SB/gl.before"
 expect 2 apply $S
 grep -q 'is a symlink' "$SB/out" || fail "a linked host config.toml not reported: $(cat "$SB/out")"
 grep -q 'withheld: .*default_permissions' "$SB/out" || fail "the withheld changes are not listed: $(cat "$SB/out")"
+run apply $S --json > "$SB/gl.json" || true
+python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["withheld"]; assert any("default_permissions" in e["keys"] for e in w), w' "$SB/gl.json" \
+  || fail "--json does not carry the withheld changes: $(cat "$SB/gl.json")"
 grep -q 'withheld$\|[0-9] withheld' "$SB/out" || fail "the summary does not count them: $(cat "$SB/out")"
 expect 1 apply! $S -y
 cmp -s "$G/dotfiles/config.toml" "$SB/gl.before" || fail "written through the host's config.toml link"

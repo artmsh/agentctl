@@ -2173,4 +2173,184 @@ PY
   grep -q vendor-stop "$H/.claude/settings.json" || fail "the vendor's Stop hook went with the moved one"
 )
 
+echo "54. --only statusline/ID: config is its one id, and it is named like -k statusline"
+SO="$SB/statusline-only"
+mkdir -p "$SO"
+so() { (cd "$SO" && AGENTCTL_HOME="$SO" run "$@"); }
+cat > "$SO/sl.edn" <<'EDN'
+{:statusline {:defaults {:segments [:model :context]}}}
+EDN
+printf '{}\n' > "$SO/empty.edn"
+# an id other than config names nothing: refused, not a silent empty plan
+set +e
+so apply -f "$SO/sl.edn" --only statusline/conf > "$SO/typo.txt" 2>&1; code=$?
+set -e
+[ "$code" = 1 ] && grep -q '^error: --only statusline/conf: .*config' "$SO/typo.txt" \
+  || { cat "$SO/typo.txt"; fail "--only statusline/conf was not refused"; }
+# -t narrows CLIs; an --only that names the file still plans it
+set +e
+so apply -f "$SO/sl.edn" --only statusline/config -t claude --json > "$SO/t.json"; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SO/t.json"; fail "--only statusline/config -t claude exited $code"; }
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(0 if any(o["kind"]=="statusline" and o["action"]=="create" for o in ops) else 1)' "$SO/t.json" \
+  || { cat "$SO/t.json"; fail "--only statusline/config -t claude planned no write"; }
+# nothing declared or owned: said, like any --only naming nothing
+set +e
+so apply -f "$SO/empty.edn" --only statusline/config > "$SO/none.txt" 2>&1; code=$?
+set -e
+[ "$code" = 0 ] && grep -q -- '--only statusline/config — nothing declared or owned' "$SO/none.txt" \
+  || { cat "$SO/none.txt"; fail "--only statusline/config with nothing declared was silent"; }
+
+echo "55. :statusline :acli derives Claude's statusLine and Pi's extension; a hand-written one wins"
+SD="$SB/statusline-derive"
+mkdir -p "$SD/bin" "$SD/renderer/adapters/pi-extension"
+printf 'export default function () {}\n' > "$SD/renderer/adapters/pi-extension/index.ts"
+# the derived build runs `zig build` in the checkout; this one records where
+printf '#!/bin/sh\npwd -P > "%s/built-in"\n' "$SD" > "$SD/bin/zig"
+chmod +x "$SD/bin/zig"
+sd() { (cd "$SD" && PATH="$SD/bin:$PATH" AGENTCTL_HOME="$SD" run "$@"); }
+sd_cfg() {
+  cat > "$SD/agents.edn" <<EDN
+{$2
+ :statusline {:acli $1 :source "$SD/renderer" :defaults {:color :never}}}
+EDN
+}
+status_line() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("statusLine",{}).get("command",""))' "$SD/.claude/settings.json"; }
+LINK="$SD/.pi/agent/extensions/agent-statusline"
+
+sd_cfg "[:cc :pi]" ""
+set +e
+sd apply -f "$SD/agents.edn" > "$SD/plan.txt" 2>&1; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SD/plan.txt"; fail "a derived status line planned nothing (exit $code)"; }
+grep -q "derived from :statusline :acli" "$SD/plan.txt" || { cat "$SD/plan.txt"; fail "a derived op did not say where it came from"; }
+sd apply! -y -f "$SD/agents.edn" > "$SD/apply.txt" 2>&1 || { cat "$SD/apply.txt"; fail "apply! of a derived status line failed"; }
+[ "$(status_line)" = "'$SD/renderer/zig-out/bin/agent-statusline' --agent cc" ] \
+  || fail "derived statusLine is '$(status_line)'"
+[ "$(readlink "$LINK")" = "$SD/renderer/adapters/pi-extension" ] || fail "the Pi extension was not linked"
+[ "$(cat "$SD/built-in")" = "$(cd "$SD/renderer" && pwd -P)" ] || fail "the renderer was not built in its checkout"
+sd apply -f "$SD/agents.edn" > "$SD/again.txt" 2>&1 || { cat "$SD/again.txt"; fail "a derived status line did not converge"; }
+
+# the file somewhere the renderer would not look unasked: Claude is told where
+set +e
+XDG_CONFIG_HOME="$SD/xdg" sd apply -f "$SD/agents.edn" -t claude > "$SD/xdg.txt" 2>&1
+set -e
+grep -q -- "--config '$SD/xdg/agent-statusline/config.json'" "$SD/xdg.txt" \
+  || { cat "$SD/xdg.txt"; fail "a moved config file did not reach Claude's command"; }
+
+# dropping :cc takes only the statusLine it wrote
+sd_cfg "[:pi]" ""
+sd apply! -y -f "$SD/agents.edn" > "$SD/drop-cc.txt" 2>&1 || { cat "$SD/drop-cc.txt"; fail "apply! dropping :cc failed"; }
+[ -z "$(status_line)" ] || fail "dropping :cc left statusLine '$(status_line)'"
+grep -q '"\$schema"' "$SD/.claude/settings.json" || fail "dropping :cc took more than statusLine"
+[ -L "$LINK" ] || fail "dropping :cc removed the Pi extension"
+
+# a hand-written Claude :status-line wins, and dropping :cc leaves it
+sd_cfg "[:cc :pi]" ':executors {:claude {:status-line {:type "command" :command "my-line"}}}'
+sd apply! -y -f "$SD/agents.edn" > "$SD/mine.txt" 2>&1 || { cat "$SD/mine.txt"; fail "apply! with a hand-written statusLine failed"; }
+[ "$(status_line)" = "my-line" ] || fail "the derived statusLine beat the hand-written one: '$(status_line)'"
+sd_cfg "[:pi]" ':executors {:claude {:status-line {:type "command" :command "my-line"}}}'
+sd apply! -y -f "$SD/agents.edn" > "$SD/mine2.txt" 2>&1 || { cat "$SD/mine2.txt"; fail "apply! dropping :cc failed"; }
+[ "$(status_line)" = "my-line" ] || fail "dropping :cc took a hand-written statusLine"
+
+# dropping :pi unlinks the extension
+sd_cfg "[]" ""
+sd apply! -y -f "$SD/agents.edn" > "$SD/drop-pi.txt" 2>&1 || { cat "$SD/drop-pi.txt"; fail "apply! dropping :pi failed"; }
+[ ! -e "$LINK" ] && [ ! -L "$LINK" ] || fail "dropping :pi left the extension linked"
+
+# entity DSL beside another user-wide Claude row: the derived statusLine is
+# the :statusline's alone, removed once, and kept once edited by hand
+rm -f "$SD/.claude/settings.json"
+dsl_cfg() {
+  cat > "$SD/agents.edn" <<EDN
+{:settings [{:id :base :in :all :acli [:cc] :model "m"}]
+ :statusline {:acli $1 :source "$SD/renderer"}}
+EDN
+}
+dsl_cfg "[:cc]"
+sd apply! -y -f "$SD/agents.edn" > "$SD/dsl.txt" 2>&1 || { cat "$SD/dsl.txt"; fail "DSL apply! of a derived statusLine failed"; }
+[ "$(status_line)" = "'$SD/renderer/zig-out/bin/agent-statusline' --agent cc" ] || fail "DSL derived statusLine is '$(status_line)'"
+dsl_cfg "[]"
+set +e
+sd apply -f "$SD/agents.edn" --json > "$SD/dsl-drop.json"; code=$?
+set -e
+[ "$code" = 2 ] || { cat "$SD/dsl-drop.json"; fail "DSL dropping :cc exited $code"; }
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; d=[o for o in ops if o["action"]=="delete"]; sys.exit(0 if len(d)==1 and d[0]["id"]=="status-line" else 1)' "$SD/dsl-drop.json" \
+  || { cat "$SD/dsl-drop.json"; fail "DSL dropping :cc did not plan exactly one statusLine removal"; }
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["statusLine"]["command"]="edited"; json.dump(d, open(p,"w"))' "$SD/.claude/settings.json"
+set +e
+sd apply -f "$SD/agents.edn" --json > "$SD/dsl-edited.json"; code=$?
+set -e
+python3 -c 'import json,sys; ops=json.load(open(sys.argv[1]))["ops"]; sys.exit(1 if any(o["action"]=="delete" for o in ops) else 0)' "$SD/dsl-edited.json" \
+  || { cat "$SD/dsl-edited.json"; fail "a hand-edited derived statusLine was planned for removal"; }
+# and it is said on every run while it differs, not once
+for n in 1 2; do
+  sd apply! -y -f "$SD/agents.edn" > "$SD/edited-$n.txt" 2>&1 || { cat "$SD/edited-$n.txt"; fail "apply! with an edited statusLine failed"; }
+  grep -q "edited since agentctl derived it" "$SD/edited-$n.txt" \
+    || { cat "$SD/edited-$n.txt"; fail "run $n did not warn about the hand-edited statusLine"; }
+done
+[ "$(status_line)" = edited ] || fail "the hand-edited statusLine was changed"
+
+echo "56. an old-format run takes over, key by key, what a DSL run wrote that it declares too"
+OT="$SB/old-takes-over"
+# ot <case> <args…>: each case gets a home of its own
+ot() { local h="$OT/$1"; shift; mkdir -p "$h/proj"; (cd "$h" && AGENTCTL_HOME="$h" run "$@"); }
+ot_trusted() { grep -q 'trust_level = "trusted"' "$OT/$1/.codex/config.toml" 2>/dev/null; }
+# ot_key <case> <file under the home> <key>: the key's value, empty when absent
+ot_key() { python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except FileNotFoundError: print("")' "$OT/$1/$2" "$3"; }
+ot_cfg() { mkdir -p "$OT/$1"; cat > "$OT/$1/$2.edn"; }
+ot_apply() { ot "$1" apply! -f "$OT/$1/$2.edn" --all -y > "$OT/$1/$2.out" 2>&1 || { cat "$OT/$1/$2.out"; fail "$1: apply! $2 failed"; }; }
+for c in proj user partial back; do printf '{}\n' | ot_cfg "$c" empty; done
+
+# a project's trust and model, declared both ways: {} after the old format prunes neither
+ot_cfg proj dsl <<EDN
+{:trust [{:in "$OT/proj/proj" :acli [:codex]}]
+ :settings [{:in "$OT/proj/proj" :acli [:claude] :model "m1"}]}
+EDN
+ot_cfg proj old <<EDN
+{:projects {:p {:path "$OT/proj/proj" :trusted true
+                :executors {:codex {} :claude {:model "m1"}}}}}
+EDN
+ot_apply proj dsl; ot_apply proj old
+set +e
+ot proj apply -f "$OT/proj/empty.edn" --all > "$OT/proj/after.txt" 2>&1; code=$?
+set -e
+[ "$code" = 0 ] || { cat "$OT/proj/after.txt"; fail "{} after an old-format run plans to prune what the old format declares"; }
+
+# the old format declares model, not theme: {} keeps model, prunes theme
+ot_cfg user dsl <<EDN
+{:settings [{:in :all :acli [:claude] :model "m1" :theme "dark"}]}
+EDN
+ot_cfg user old <<EDN
+{:executors {:claude {:model "m1"}}}
+EDN
+ot_apply user dsl; ot_apply user old; ot_apply user empty
+[ "$(ot_key user .claude/settings.json model)" = m1 ] || { cat "$OT/user/empty.out"; fail "{} pruned the model the old format declares"; }
+[ -z "$(ot_key user .claude/settings.json theme)" ] || { cat "$OT/user/empty.out"; fail "{} left the theme only the DSL run declared"; }
+
+# trust only, the old way: the DSL's project model is still the DSL's
+ot_cfg partial dsl <<EDN
+{:trust [{:in "$OT/partial/proj" :acli [:codex]}]
+ :settings [{:in "$OT/partial/proj" :acli [:claude] :model "m1"}]}
+EDN
+ot_cfg partial old <<EDN
+{:projects {:p {:path "$OT/partial/proj" :trusted true :executors {:codex {}}}}}
+EDN
+ot_apply partial dsl; ot_apply partial old; ot_apply partial empty
+ot_trusted partial || { cat "$OT/partial/empty.out"; fail "{} pruned trust the old format had taken over"; }
+[ -z "$(ot_key partial proj/.claude/settings.json model)" ] || { cat "$OT/partial/empty.out"; fail "{} left the model only the DSL run declared"; }
+
+# DSL, old, DSL again: the DSL takes back what it declares, converged or not, and {} prunes it
+ot_cfg back dsl <<EDN
+{:settings [{:in :all :acli [:claude] :model "m1" :theme "dark"}]}
+EDN
+ot_cfg back old <<EDN
+{:executors {:claude {:model "m1" :theme "dark"}}}
+EDN
+ot_apply back dsl; ot_apply back old; ot_apply back dsl; ot_apply back empty
+[ -z "$(ot_key back .claude/settings.json model)$(ot_key back .claude/settings.json theme)" ] \
+  || { cat "$OT/back/empty.out"; fail "{} after DSL, old, DSL left what the DSL declared"; }
+
 echo "all agentctl e2e checks passed"

@@ -286,15 +286,64 @@
       (subs line (+ col (count (str/trimr (subs line col at)))))
       "")))
 
+(defn- array-in-place
+  "The lines of a multi-line array `lines` (`key = [` … `]`, one element a
+   line) holding `v` instead, written the same way: the opening and closing
+   lines stay as they are, and an element `v` still holds keeps its comment —
+   on its line, and on the lines just above it. nil when the old value is
+   not written one element a line, or `v` is not a vector of plain values:
+   the caller then writes it on one line."
+  [lines v]
+  (let [first-line (first lines)
+        {:keys [value-at]} (parse-key first-line)
+        opening (str/trim (subs first-line value-at))
+        closing (last lines)
+        body (subvec lines 1 (dec (count lines)))
+        element (fn [^String l]
+                  (let [c (trailing-comment l 0)
+                        t (str/trim (subs l 0 (- (count l) (count c))))]
+                    (when-not (str/blank? t)
+                      (when (str/ends-with? t ",") (str/trim (subs t 0 (dec (count t))))))))]
+    (when (and (vector? v) (every? #(or (string? %) (number? %) (boolean? %) (keyword? %)) v)
+               (> (count lines) 2)
+               (or (= "[" opening) (str/starts-with? opening "[ #") (str/starts-with? opening "[#"))
+               (str/starts-with? (str/triml closing) "]")
+               ;; every body line is one element with a trailing comma, a
+               ;; comment, or blank
+               (every? #(or (str/blank? %) (str/starts-with? (str/triml %) "#")
+                            (when-let [t (element %)] (not (str/includes? t ","))))
+                       body))
+      (let [indent (or (some #(when (element %) (re-find #"^\s*" %)) body) "  ")
+            ;; each element's text, with the comment lines just above it
+            ;; and the comment after it
+            kept (loop [ls body above [] acc {}]
+                   (if-let [l (first ls)]
+                     (if-let [t (element l)]
+                       (recur (rest ls) [] (assoc acc t {:above above :after (trailing-comment l 0)}))
+                       (recur (rest ls) (if (str/blank? l) [] (conj above l)) acc))
+                     acc))
+            ;; comments under the last element, before `]`
+            tail (vec (reverse (take-while #(str/starts-with? (str/triml %) "#")
+                                           (reverse (remove str/blank? body)))))]
+        (vec (concat [first-line]
+                     (mapcat (fn [x]
+                               (let [t (encode-value x)
+                                     {:keys [above after]} (get kept t)]
+                                 (concat above [(str indent t "," (str/replace (or after "") #"^(?=#)" " "))])))
+                             v)
+                     tail
+                     [closing]))))))
+
 (defn- set-in-segment [seg k v]
   (let [new-line (str (quote-key k) " = " (encode-value v))
         {:keys [lines]} seg]
     (if-let [[s e] (key-span k lines)]
-      ;; a same-line comment is the reader's note on the key: it stays
-      (let [new-line (if (= s e)
-                       (str new-line (trailing-comment (nth lines s) (:value-at (parse-key (nth lines s)))))
-                       new-line)]
-        (assoc seg :lines (vec (concat (subvec lines 0 s) [new-line] (subvec lines (inc e))))))
+      ;; a same-line comment is the reader's note on the key: it stays, and
+      ;; so do an array's when it is written one element a line
+      (let [new-lines (if (= s e)
+                        [(str new-line (trailing-comment (nth lines s) (:value-at (parse-key (nth lines s)))))]
+                        (or (array-in-place (subvec lines s (inc e)) v) [new-line]))]
+        (assoc seg :lines (vec (concat (subvec lines 0 s) new-lines (subvec lines (inc e))))))
       ;; insert before trailing blank lines so tables stay visually grouped
       (let [tail (count (take-while str/blank? (reverse lines)))
             at (- (count lines) tail)]
@@ -439,6 +488,33 @@
                                  (or (= (:header s) header)
                                      (str/starts-with? (:header s) prefix))))
                           (segments text)))))))
+
+(defn replace-table
+  "Make the table `table-path` hold exactly `m`, edited where it stands:
+   keys it has beyond `m` go, keys `m` keeps keep their lines and comments,
+   and a map `m` holds where the file has a `[sub-table]` is replaced the same
+   way, there. A sub-table `m` does not hold as one goes. A table the file
+   lacks, or holds inline, is written anew."
+  [text table-path m]
+  (let [tp (mapv u/kw->str table-path)
+        segs (segments text)
+        loc (locate segs tp)]
+    (if (or (nil? loc) (:key loc))
+      (set-keys (remove-table text tp) tp m)
+      (let [header-of #(header-for (conj tp (u/kw->str %)))
+            sub? (fn [k] (some? (segment-index segs (conj tp (u/kw->str k)))))
+            as-table (into {} (filter (fn [[k v]] (and (map? v) (sub? k)))) m)
+            prefix (str (header-for tp) ".")
+            kept-prefixes (map #(header-of (key %)) as-table)
+            text (keep-final-newline
+                  text
+                  (render (vec (remove (fn [sg]
+                                         (let [h (:header sg)]
+                                           (and h (str/starts-with? h prefix)
+                                                (not-any? #(or (= h %) (str/starts-with? h (str % "."))) kept-prefixes))))
+                                       segs))))
+            text (set-table text tp (vec (remove (comp (set (keys as-table)) key) m)))]
+        (reduce (fn [t [k v]] (replace-table t (conj tp (u/kw->str k)) v)) text as-table)))))
 
 (def ^:private py-check
   "import sys,tomllib;tomllib.loads(sys.stdin.read())")
