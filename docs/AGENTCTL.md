@@ -44,7 +44,9 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 5. **Unknown ≠ failure.** A locked Bitwarden vault or an unreachable endpoint
    is reported as `?`, not as an error.
 6. Every mutation is backed up under `~/.config/agentctl/backups/<run>/`, one
-   directory per run, first-write-wins so the copy is the pre-run state.
+   directory per run, first-write-wins so the copy is the pre-run state. A
+   backup holds what the file held, resolved secrets included, so its
+   directories are `0700` and its files `0600` (`0700` for an executable).
 
 ## Entities
 
@@ -671,7 +673,8 @@ the entire project declaration still prunes entries agentctl wrote there.
 A user-wide server is written with `claude mcp add`, which cannot edit an
 entry: an update removes the server and adds it again, after backing up
 `~/.claude.json`, and puts the previous entry back if the add fails. Drift there is a declared env or header name the entry lacks,
-never a value and never a name added by hand, and the add carries every env var
+or a declared header whose value differs as a whole (`Bearer <token>` against
+`<token>`), never an env value and never a name added by hand, and the add carries every env var
 or header the declaration does not name, so a hand-added `Authorization`
 survives. A name agentctl declared and the declaration has since dropped is
 removed.
@@ -760,12 +763,33 @@ An MCP argument that follows a credential-looking flag — `--api-key X`,
 (`!bw://docs/api-key`); a flag naming where the credential lives, such as
 `--token-file`, keeps its value.
 
-An MCP server's argv takes a reference wherever a credential goes: the
-argument after a flag whose name says credential (`--token`, `--api-key`,
-`--password`), or such a flag's `=value`. It is resolved when the plan is made,
-masked in every output, and held back like an env value when it does not
-resolve; `validate` checks it. Anywhere else in argv, `$VAR` is expanded when
-the config is read and `!bw://` is plain text.
+An MCP server's argv takes a reference wherever a credential goes. A
+`!bw://`, `!env://`, `!file://` or `!cmd://` argument is one anywhere, and so
+is one embedded in a longer argument (`"Authorization: Bearer !bw://docs/token"`).
+Several may share one argument (`--creds=!bw://db/user:!bw://db/pw`), each
+resolved and the text between them kept: an embedded reference ends at a
+space, a quote, `:`, `!`, `&`, `#`, `,` or `;`. One glued to text that may
+continue it — a DSN's password, a URL's userinfo — is written braced:
+`--dsn=postgres://app:!{bw://db/pw}@db/app`. `!{cmd://…}` is no reference:
+an embedded command is text.
+A whole `$VAR` is one after a flag whose name says credential (`--token`,
+`--api-key`, `--password`, `--auth`, `--key`) or after `-t` or `-k`, and as
+such a flag's `=value`. Each is resolved when the plan is made, masked in
+every output, and held back like an env value when it does not resolve;
+`validate` checks it. Anywhere else in argv a `$VAR` is expanded when the
+config is read. `-t` and `-k` take a timeout or a type as often as a token,
+so a value after them is masked only when a reference resolved to it:
+`-k json` reads as written.
+
+A `!cmd://` runs to the end of its value, so it is a reference only as a
+whole argument, env value, header or URL. Inside a longer one —
+`--opt=!cmd://…` included — its command cannot be told from the text after
+it, and it is written as text, never run.
+
+A spelling that would still be written as text — a `$VAR` left in argv
+because nothing set it, a `!cmd://` inside a longer value — is reported by the plan
+and by `validate`: `⚠ args[1] holds `$DOCS_TOKEN`, which nothing resolves
+there — written as text`.
 
 ```clojure
 {:mcps [{:id :docs :cmd "docs-mcp --api-key !bw://vendor/docs/api-key" :in :all}]}
@@ -782,8 +806,20 @@ manifest records the names agentctl declared, and a name the declaration drops
 is removed from the server, as for Claude.
 
 An http server's `:url` may itself be a reference (`!bw://vendor/docs/url`),
-for an endpoint that carries its credential in the path or the query. It is
-resolved, masked and held back like a header, and `validate` checks it.
+or carry one (`https://mcp.example.com/x?key=!bw://vendor/docs/key`, or
+`…?key=$DOCS_KEY`), for an endpoint that carries its credential in the path or
+the query. A header value may carry one the same way (`"Bearer $DOCS_TOKEN"`).
+Each is resolved, masked and held back like a whole header, and `validate`
+checks it.
+
+Claude Code expands `${VAR}` and `${VAR:-default}` itself, in a server's
+command, args, env, URL and headers, when it starts the server. For Claude
+agentctl writes that spelling as it is — into `.mcp.json` and
+`~/.claude.json` alike — so an unset variable holds nothing back and a set
+one stays out of a tracked file; `validate` does not report it. A bare `$VAR`
+Claude Code does not expand, so agentctl resolves it as for every other tool,
+as it does `!bw://`, `!env://`, `!file://` and `!cmd://`. For every other
+tool agentctl resolves `${VAR}` too.
 
 OMP writes an http or sse server's `:headers` resolved into the server's
 `headers` map in `~/.omp/agent/mcp.json`; a header that does not resolve holds
@@ -1010,6 +1046,7 @@ and a `statusLine` edited since it was written is kept. See
 | `"!bw://item"` | the item's login password |
 | `"!file://~/path"` | file contents, trimmed |
 | `"!cmd://some command"` | stdout of a command |
+| `"x:!{bw://item/field}@y"` | a reference inside other text, bounded by braces (`bw`, `env`, `file`) |
 | `"anything else"` | literal |
 
 Plans print `bw:dev-keys/hosted/api-key`, never the resolved value. Changes that
@@ -1028,7 +1065,11 @@ argument after a credential-looking flag, or such a flag's `=value`, is masked
 in diffs, summaries, command lines and failure messages whatever it holds,
 however short. A resolved value found inside other text is masked only as a
 token of its own, so one that is also a word in a host or a path leaves the
-URL or the path readable.
+URL or the path readable. A value a reference resolved to in an earlier
+`apply!` is masked too after the reference is gone — dropped from inside an
+argument, say — though nothing resolves it now: the state file keeps a salted
+SHA-256 digest of each (never the value), and is then readable by its owner
+only.
 
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an

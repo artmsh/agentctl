@@ -352,9 +352,16 @@
                  carried (carried-values m cur (state/entry st tool :mcps id))
                  ;; the declared names plus the ones carried over: drift is a
                  ;; declared name the entry lacks, or a dropped one it still has
-                 want (desired-shape m carried)
-                 have (some-> cur current-shape)
-                 {:keys [env headers issues]} (resolve-mcp m)]
+                 {:keys [env headers issues]} (resolve-mcp m)
+                 http? (= :http (:transport m))
+                 ;; a declared header is compared whole: `Bearer <token>`
+                 ;; and `<token>` hold one secret, and only one authenticates
+                 want (cond-> (desired-shape m carried)
+                        http? (assoc :header-values (not-empty (:values headers))))
+                 have (some-> cur current-shape
+                              (cond-> http? (assoc :header-values
+                                                   (not-empty (select-keys (str-keys (:headers cur))
+                                                                           (keys (:values headers)))))))]
            ;; an unresolved secret is reported even when the shapes agree: the
            ;; value cannot be checked, so the run cannot call itself converged
            :when (or (seq issues) (not= (u/norm want) (u/norm have)))]

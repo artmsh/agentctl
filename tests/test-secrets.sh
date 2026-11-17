@@ -13,7 +13,7 @@ SB=$(mktemp -d "${TMPDIR:-/tmp}/agentctl-secrets.XXXXXX")
 trap 'rm -rf "$SB"' EXIT
 SB=$(cd "$SB" && pwd -P)
 
-export AGENTCTL_HOME="$SB" HOME="$SB"
+export AGENTCTL_HOME="$SB" HOME="$SB" AUTH_TOK=authtokvalue42
 unset DSH_HOME DSH_AGENTS_HOME KIMI_CODE_HOME
 fail() { echo "FAIL: $1" >&2; exit 1; }
 TOOLS=(-t pi -t omp -t kimi -t antigravity -t codex)
@@ -280,5 +280,253 @@ for t in omp kimi antigravity codex; do
 done
 set +e; "$ROOT/agentctl" validate -f "$SB/url.edn" > "$SB/url.txt" 2>&1; set -e
 grep -qF 'udocs.url' "$SB/url.txt" || { cat "$SB/url.txt"; fail "validate does not report the unresolved URL"; }
+
+held() { # held <cfg> <place> <tool>...: each tool holds the server back, naming the place
+  local cfg=$1 place=$2; shift 2
+  for t in "$@"; do
+    set +e; "$ROOT/agentctl" apply --all -t $t -k mcps -f "$cfg" > "$SB/held.txt" 2>&1; code=$?; set -e
+    [ "$code" = 2 ] && grep -qF "plant/NOPE ($place)" "$SB/held.txt" \
+      || { cat "$SB/held.txt"; fail "$t: an unresolved reference at $place is not held back"; }
+  done
+}
+written() { # written <server> <python expr over its pi entry `e`>
+  python3 - "$SB/.pi/agent/mcp.json" "$1" "$2" <<'PY' || fail "pi's $1 was not written resolved"
+import json, sys
+e = json.load(open(sys.argv[1]))["mcpServers"][sys.argv[2]]
+assert eval(sys.argv[3]), e
+PY
+}
+
+echo "12. a reference after -t, -k, --auth or --key is resolved, masked and held back"
+cat > "$SB/flags.edn" <<'EDN'
+{:mcps [{:id :fdocs :command "/bin/echo" :args ["-t" "!bw://plant/ARG" "--auth" "$AUTH_TOK" "--key" "!bw://plant/ARG" "-k" "$AUTH_TOK"]
+         :in :all :acli [:pi :omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/flags.edn" outputs
+grep -q fdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the flag servers are not planned"; }
+leaks argsecretvalue888 authtokvalue42
+written fdocs 'e["args"] == ["-t", "argsecretvalue888", "--auth", "authtokvalue42", "--key", "argsecretvalue888", "-k", "authtokvalue42"]'
+sed -i.bak 's|"-t" "!bw://plant/ARG"|"-t" "!bw://plant/NOPE"|' "$SB/flags.edn"
+held "$SB/flags.edn" 'args.-t' pi omp kimi antigravity codex
+
+echo "13. a reference inside one argument is resolved, masked and held back"
+cat > "$SB/inner.edn" <<'EDN'
+{:mcps [{:id :idocs :command "/bin/echo" :args ["--header" "Authorization: Bearer !bw://plant/ARG"]
+         :in :all :acli [:pi :omp :kimi :antigravity :codex]}
+        {:id :ihttp :type :http :url "https://mcp.example.com/i" :headers {"Authorization" "Bearer $AUTH_TOK"}
+         :in :all :acli [:omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/inner.edn" outputs
+leaks argsecretvalue888 authtokvalue42
+written idocs 'e["args"] == ["--header", "Authorization: Bearer argsecretvalue888"]'
+python3 - "$SB/.kimi-code/mcp.json" <<'PY' || fail "a variable inside a header was not resolved"
+import json, sys
+assert json.load(open(sys.argv[1]))["mcpServers"]["ihttp"]["headers"] == {"Authorization": "Bearer authtokvalue42"}
+PY
+sed -i.bak 's|Bearer !bw://plant/ARG|Bearer !bw://plant/NOPE|' "$SB/inner.edn"
+held "$SB/inner.edn" 'args.args[1]' pi omp kimi antigravity codex
+
+echo "14. a reference inside a URL is resolved, masked and held back"
+cat > "$SB/query.edn" <<'EDN'
+{:mcps [{:id :qdocs :type :http :url "https://mcp.example.com/q?k=!bw://plant/ARG&v=1" :in :all
+         :acli [:omp :kimi :antigravity :codex]}
+        {:id :vdocs :type :http :url "https://mcp.example.com/v?k=$AUTH_TOK" :in :all
+         :acli [:omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/query.edn" outputs
+leaks argsecretvalue888 authtokvalue42
+python3 - "$SB/.kimi-code/mcp.json" <<'PY' || fail "a reference inside a URL was not resolved"
+import json, sys
+ms = json.load(open(sys.argv[1]))["mcpServers"]
+assert ms["qdocs"]["url"] == "https://mcp.example.com/q?k=argsecretvalue888&v=1", ms["qdocs"]
+assert ms["vdocs"]["url"] == "https://mcp.example.com/v?k=authtokvalue42", ms["vdocs"]
+PY
+sed -i.bak 's|k=!bw://plant/ARG|k=!bw://plant/NOPE|' "$SB/query.edn"
+held "$SB/query.edn" 'url.url' omp kimi antigravity codex
+
+echo "15. a spelling nothing resolves is a plan and validate finding, never silent"
+cat > "$SB/text.edn" <<'EDN'
+{:mcps [{:id :xdocs :command "/bin/echo" :args ["--opt" "$AGENTCTL_TEST_NEVER_SET"] :env {"MODE" "x !cmd://echo hi"}
+         :in :all :acli [:pi :kimi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply --all -t pi -t kimi -f "$SB/text.edn" > "$SB/text.txt" 2>&1; set -e
+for t in PI KIMI; do
+  sed -n "/^$t\$/,/^\$/p" "$SB/text.txt" | grep -qF 'args[1] holds `$AGENTCTL_TEST_NEVER_SET`, which nothing resolves there — written as text' \
+    || { cat "$SB/text.txt"; fail "$t: the plan does not report the unset variable"; }
+done
+grep -qF 'env.MODE holds `!cmd://…`' "$SB/text.txt" || { cat "$SB/text.txt"; fail "the plan does not report the embedded command"; }
+set +e; "$ROOT/agentctl" validate -f "$SB/text.edn" > "$SB/text.txt" 2>&1; set -e
+grep -qF 'xdocs.args[1]' "$SB/text.txt" && grep -qF 'xdocs.env.MODE' "$SB/text.txt" \
+  || { cat "$SB/text.txt"; fail "validate does not report the spellings written as text"; }
+
+pi_args() { # pi_args <server>: its argv as JSON
+  python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["mcpServers"][sys.argv[2]]["args"]))' "$SB/.pi/agent/mcp.json" "$1"
+}
+
+echo "16. two references in one string are both resolved, and the text between them kept"
+cat > "$SB/two.edn" <<'EDN'
+{:mcps [{:id :twodocs :command "/bin/echo" :args ["--creds=!bw://plant/ARG:!bw://plant/SHORT" "!bw://plant/ARG !bw://plant/SHORT"]
+         :in :all :acli [:pi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t pi -f "$SB/two.edn" -y > "$SB/apply.txt" 2>&1; set -e
+[ "$(pi_args twodocs)" = '["--creds=argsecretvalue888:Zq9x", "argsecretvalue888 Zq9x"]' ] \
+  || { cat "$SB/apply.txt"; pi_args twodocs; fail "two references in one string were not both resolved"; }
+
+echo "17. a !cmd:// inside an argument is text with a warning, never run"
+cat > "$SB/cmd.edn" <<'EDN'
+{:mcps [{:id :cmddocs :command "/bin/echo" :args ["--opt=!cmd://echo hi" "pre !cmd://echo t"] :in :all :acli [:pi]}]}
+EDN
+set +e
+"$ROOT/agentctl" apply --all -t pi -f "$SB/cmd.edn" > "$SB/cmd.txt" 2>&1
+"$ROOT/agentctl" apply! --all -t pi -f "$SB/cmd.edn" -y > "$SB/apply.txt" 2>&1
+set -e
+[ "$(pi_args cmddocs)" = '["--opt=!cmd://echo hi", "pre !cmd://echo t"]' ] || { pi_args cmddocs; fail "an embedded command ran"; }
+grep -qF 'args[0] holds `!cmd://…`' "$SB/cmd.txt" && grep -qF 'args[1] holds `!cmd://…`' "$SB/cmd.txt" \
+  || { cat "$SB/cmd.txt"; fail "an embedded command is not reported"; }
+
+echo "18. a reference glued to text is bounded by !{…}"
+cat > "$SB/dsn.edn" <<'EDN'
+{:mcps [{:id :dsndocs :command "/bin/echo" :args ["--dsn=postgres://app:!{bw://plant/ARG}@db/x" "pre !{cmd://echo z}"] :in :all :acli [:pi]}]}
+EDN
+set +e
+"$ROOT/agentctl" apply --all -t pi -f "$SB/dsn.edn" > "$SB/dsnplan.txt" 2>&1
+"$ROOT/agentctl" apply! --all -t pi -f "$SB/dsn.edn" -y > "$SB/apply.txt" 2>&1
+set -e
+grep -qF 'args[1] holds `!{cmd://…`' "$SB/dsnplan.txt" || { cat "$SB/dsnplan.txt"; fail "a braced command is not reported"; }
+[ "$(pi_args dsndocs)" = '["--dsn=postgres://app:argsecretvalue888@db/x", "pre !{cmd://echo z}"]' ] || { cat "$SB/apply.txt"; pi_args dsndocs; fail "a braced reference was not resolved"; }
+
+echo "19. a reference dropped from inside an argument leaves its old secret unprinted"
+cat > "$SB/gone.edn" <<'EDN'
+{:mcps [{:id :gdocs :command "/bin/echo" :args ["--opt=x !bw://plant/ARG y"] :in :all :acli [:pi :kimi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t pi -t kimi -f "$SB/gone.edn" -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] && [ "$(pi_args gdocs)" = '["--opt=x argsecretvalue888 y"]' ] || { cat "$SB/apply.txt"; fail "the embedded reference was not written resolved"; }
+st="$SB/.config/agentctl/state.edn"
+grep -q argsecretvalue888 "$st" && fail "the state file keeps a resolved value"
+[ "$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$st")" = 0o600 ] || fail "the state file holding digests is readable by others"
+sed -i.bak 's|"--opt=x !bw://plant/ARG y"|"--opt=x y"|' "$SB/gone.edn"
+CFG="$SB/gone.edn" outputs
+grep -q gdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped reference is not planned"; }
+leaks argsecretvalue888
+
+echo "20. a plain value after -k or -t is shown"
+cat > "$SB/plainflag.edn" <<'EDN'
+{:mcps [{:id :kdocs2 :command "/bin/echo" :args ["-k" "json" "-t" "fastmode"] :in :all :acli [:pi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply --all -t pi -f "$SB/plainflag.edn" -v > "$SB/pf.txt" 2>&1; set -e
+grep -qF '["-k" "json" "-t" "fastmode"]' "$SB/pf.txt" || { cat "$SB/pf.txt"; fail "a plain value after -k or -t was masked"; }
+
+echo "21. Claude keeps \${VAR} as written: it expands that spelling itself"
+mkdir -p "$SB/proj/.claude"
+cat > "$SB/claude.edn" <<'EDN'
+{:mcps [{:id :chttp :type :http :url "https://mcp.example.com/c?k=${AGENTCTL_TEST_NEVER_SET}"
+         :headers {"Authorization" "Bearer ${AUTH_TOK}" "x-d" "${AGENTCTL_TEST_NEVER_SET:-none}" "x-v" "!bw://plant/SHORT"}
+         :in "proj" :at :repo :acli [:claude]}
+        {:id :cstdio :command "/bin/echo" :args ["--token" "${AUTH_TOK}" "${AGENTCTL_TEST_NEVER_SET}/x" "--key" "$AUTH_TOK"]
+         :env {"T" "${AUTH_TOK}" "U" "${AGENTCTL_TEST_NEVER_SET}" "B" "$AUTH_TOK"} :in "proj" :at :repo :acli [:claude]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t claude -k mcps -f "$SB/claude.edn" -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "an unset variable held a Claude server back: exit $code"; }
+python3 - "$SB/proj/.mcp.json" <<'PY' || fail ".mcp.json does not keep \${VAR} as written"
+import json, sys
+ms = json.load(open(sys.argv[1]))["mcpServers"]
+h = ms["chttp"]
+assert h["url"] == "https://mcp.example.com/c?k=${AGENTCTL_TEST_NEVER_SET}", h
+assert h["headers"] == {"Authorization": "Bearer ${AUTH_TOK}", "x-d": "${AGENTCTL_TEST_NEVER_SET:-none}", "x-v": "Zq9x"}, h
+c = ms["cstdio"]
+# a bare $VAR Claude Code does not expand: agentctl resolves it, as before
+assert c["args"] == ["--token", "${AUTH_TOK}", "${AGENTCTL_TEST_NEVER_SET}/x", "--key", "authtokvalue42"], c
+assert c["env"] == {"T": "${AUTH_TOK}", "U": "${AGENTCTL_TEST_NEVER_SET}", "B": "authtokvalue42"}, c
+PY
+set +e; "$ROOT/agentctl" validate -f "$SB/claude.edn" > "$SB/val.txt" 2>&1; set -e
+grep -E '^ *[!✗].*AGENTCTL_TEST_NEVER_SET' "$SB/val.txt" && { cat "$SB/val.txt"; fail "validate reports a variable Claude expands itself"; }
+grep -q "plaintext secret.*claude.edn" "$SB/val.txt" && { cat "$SB/val.txt"; fail "a header spelled with a variable is called plaintext"; }
+
+echo "22. a Claude header whose text changes around the same secret is drift"
+python3 - "$SB/.claude.json" <<'PY'
+import json, os, sys
+f = sys.argv[1]
+d = json.load(open(f)) if os.path.exists(f) else {}
+d.setdefault("mcpServers", {})["udocs"] = {"type": "http", "url": "https://mcp.example.com/u",
+                                           "headers": {"Authorization": "argsecretvalue888"}}
+json.dump(d, open(f, "w"))
+PY
+cat > "$SB/user.edn" <<'EDN'
+{:mcps [{:id :udocs :type :http :url "https://mcp.example.com/u" :headers {"Authorization" "Bearer !bw://plant/ARG"}
+         :in :all :acli [:claude]}]}
+EDN
+set +e; "$ROOT/agentctl" apply --all -t claude -k mcps -f "$SB/user.edn" -v > "$SB/user.txt" 2>&1; code=$?; set -e
+[ "$code" = 2 ] && grep -q 'mcps/udocs' "$SB/user.txt" || { cat "$SB/user.txt"; fail "a changed header around the same secret plans no change: exit $code"; }
+grep -q argsecretvalue888 "$SB/user.txt" && fail "the header drift printed the secret"
+
+echo "23. a dropped secret with = or : in it is masked too"
+printf 'c2stdGVzdC1wYWQ=' > "$SB/padded"
+cat > "$SB/pad.edn" <<EDN
+{:mcps [{:id :pdocs :command "/bin/echo" :args ["--opt=x !file://$SB/padded y"] :in :all :acli [:pi :kimi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t pi -t kimi -f "$SB/pad.edn" -y > "$SB/apply.txt" 2>&1; set -e
+[ "$(pi_args pdocs)" = '["--opt=x c2stdGVzdC1wYWQ= y"]' ] || { cat "$SB/apply.txt"; pi_args pdocs; fail "the padded value was not written"; }
+sed -i.bak "s|--opt=x !file://$SB/padded y|--opt=x y|" "$SB/pad.edn"
+CFG="$SB/pad.edn" outputs
+grep -q pdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped padded reference is not planned"; }
+leaks c2stdGVzdC1wYWQ
+
+echo "24. a user-wide Claude server keeps \${VAR} too, and converges on it"
+cat > "$SB/cuser.edn" <<'EDN'
+{:mcps [{:id :cuser :type :http :url "https://mcp.example.com/cu" :headers {"Authorization" "Bearer ${AUTH_TOK}"}
+         :in :all :acli [:claude]}]}
+EDN
+cp "$SB/bin/claude" "$SB/claude.stub"
+printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done >> "%s"\nexit 0\n' "$SB/claude-argv" > "$SB/bin/claude"
+set +e; "$ROOT/agentctl" apply! --all -t claude -k mcps -f "$SB/cuser.edn" -y > "$SB/apply.txt" 2>&1; set -e
+mv "$SB/claude.stub" "$SB/bin/claude"
+grep -qF 'Authorization: Bearer ${AUTH_TOK}' "$SB/claude-argv" || { cat "$SB/apply.txt" "$SB/claude-argv"; fail "claude mcp add was not given \${VAR} as written"; }
+grep -q authtokvalue42 "$SB/claude-argv" && fail "claude mcp add was given the variable's value"
+python3 - "$SB/.claude.json" <<'PY'
+import json, os, sys
+f = sys.argv[1]
+d = json.load(open(f)) if os.path.exists(f) else {}
+d.setdefault("mcpServers", {})["cuser"] = {"type": "http", "url": "https://mcp.example.com/cu",
+                                           "headers": {"Authorization": "Bearer ${AUTH_TOK}"}}
+json.dump(d, open(f, "w"))
+PY
+set +e; "$ROOT/agentctl" apply --all -t claude -k mcps -f "$SB/cuser.edn" > "$SB/cuser.txt" 2>&1; set -e
+grep -q 'mcps/cuser' "$SB/cuser.txt" && { cat "$SB/cuser.txt"; fail "a header kept as \${VAR} is drift on the next plan"; }
+
+echo "25. references chained by any delimiter, dropped, leave none of their secrets printed"
+python3 - "$SB/chain.edn" <<'PY'
+import sys
+r = ["!{bw://plant/ENV}", "!{bw://plant/HDR}", "!{bw://plant/ARG}"]
+args = [f"--c{i}{n}=" + d.join(r[:n]) for i, d in enumerate([":", "=", " ", "@", "/", "?", "&", ","]) for n in (2, 3)]
+open(sys.argv[1], "w").write('{:mcps [{:id :chain :command "/bin/echo" :args [%s] :in :all :acli [:pi]}]}\n'
+                             % " ".join('"%s"' % a for a in args))
+PY
+set +e; "$ROOT/agentctl" apply! --all -t pi -f "$SB/chain.edn" -y > "$SB/apply.txt" 2>&1; set -e
+pi_args chain | grep -qF '"--c03=envsecretvalue444:hdrsecretvalue555:argsecretvalue888"' || { cat "$SB/apply.txt"; pi_args chain; fail "the chained references were not written"; }
+python3 - "$SB/chain.edn" <<'PY'
+import re, sys
+f = sys.argv[1]
+s = open(f).read()
+open(f, "w").write(re.sub(r':args \[.*\] :in', ':args ["--c=x"] :in', s))
+PY
+CFG="$SB/chain.edn" outputs
+grep -qF '"--c=x"' "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped chain is not planned"; }
+leaks envsecretvalue444 hdrsecretvalue555 argsecretvalue888
+
+echo "26. backups of files holding resolved secrets are readable by their owner only"
+b="$SB/.config/agentctl/backups"
+[ -d "$b" ] || fail "no backups were made"
+bad=$(python3 - "$b" <<'PY'
+import os, stat, sys
+root = sys.argv[1]
+for d, dirs, files in os.walk(root):
+    if stat.S_IMODE(os.lstat(d).st_mode) != 0o700: print("dir", d)
+    for f in files:
+        p = os.path.join(d, f)
+        m = os.lstat(p).st_mode
+        if stat.S_ISREG(m) and stat.S_IMODE(m) & 0o077: print("file", p)
+PY
+)
+[ -z "$bad" ] || { echo "$bad"; fail "a backup is readable by others"; }
 
 echo "all secrets e2e checks passed"

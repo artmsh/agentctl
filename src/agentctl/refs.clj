@@ -11,8 +11,9 @@
      \"!file://~/path\"         string   -> file contents (trimmed)
      \"!cmd://some command\"    string   -> stdout of command (trimmed)
      \"literal\"                string   -> literal value
+     \"Bearer !bw://item/f\"     string   -> template: text around embedded refs
 
-   Internal form: {:ref/kind :env|:bw|:file|:cmd|:literal ...}"
+   Internal form: {:ref/kind :env|:bw|:file|:cmd|:literal|:template ...}"
   (:require [agentctl.util :as u]
             [clojure.string :as str]))
 
@@ -41,6 +42,7 @@
                "invalid reference: :cmd requires a nonblank command")
         :literal (when-not (contains? r :ref/value)
                    "invalid reference: :literal requires :ref/value")
+        :template (some ref-error (filter ref? (:ref/parts r)))
         "invalid reference: unsupported kind"))))
 
 (defn- dollar
@@ -52,6 +54,47 @@
   (if-let [[_ n] (re-matches #"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?" s)]
     {:ref/kind :env :ref/var n :ref/raw s}
     {:ref/kind :literal :ref/value (u/expand s) :ref/raw s}))
+
+(declare parse)
+
+(def ^:private embedded-ref-pattern
+  ;; a reference inside a longer string. `!{bw://item/field}` is bounded
+  ;; explicitly, and is the spelling for one glued to text (a DSN's
+  ;; `user:!{bw://db/pw}@host`). A bare one runs up to a space, a quote,
+  ;; `:`, `!` (the next reference), or a URL's `&`/`#`. A `!cmd://` runs to
+  ;; the end of its line, so it is a reference only as a whole value
+  #"!\{(?:bw|env|file)://[^}]+\}|!(?:bw|env|file)://[^\s\"'&#,;!:]+")
+
+(def ^:private embedded-ref-or-var-pattern
+  #"!\{(?:bw|env|file)://[^}]+\}|!(?:bw|env|file)://[^\s\"'&#,;!:]+|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+(def ^:private ref-marker
+  #"!(?:bw|env|file|cmd)://|!\{(?:bw|env|file)://")
+
+(defn- embeds-ref?
+  "Whether a string holds a reference anywhere but as the whole of it: one
+   after its first character, as in `!bw://db/user:!bw://db/pw`, or a
+   braced one."
+  [v]
+  (or (str/starts-with? v "!{")
+      (boolean (re-find ref-marker (subs v 1)))))
+
+(defn- template
+  "`s` as a template — its text with the references in it — when it embeds
+   one: `Bearer !bw://docs/token`, `https://h/x?key=!bw://docs/key`."
+  [s pattern]
+  (let [m (re-matcher pattern s)]
+    (loop [pos 0, parts []]
+      (if (.find m)
+        (recur (.end m) (cond-> parts
+                          (< pos (.start m)) (conj (subs s pos (.start m)))
+                          true (conj (let [g (.group m)]
+                                       (parse (if (str/starts-with? g "!{")
+                                                (str "!" (subs g 2 (dec (count g))))
+                                                g))))))
+        (let [parts (cond-> parts (< pos (count s)) (conj (subs s pos)))]
+          (when (some ref? parts)
+            {:ref/kind :template :ref/parts parts :ref/raw s}))))))
 
 (defn parse
   "Normalize a declared value into a ref map. Non-secret scalars become :literal.
@@ -65,6 +108,10 @@
               (if (str/starts-with? s "$")
                 (dollar s)
                 {:ref/kind :literal :ref/value s :ref/raw s}))
+
+            (and (string? v) (seq v) (embeds-ref? v))
+            (or (template v embedded-ref-pattern)
+                {:ref/kind :literal :ref/value v :ref/raw v})
 
             (string? v)
             (cond
@@ -82,7 +129,8 @@
               (str/starts-with? v "!file://") {:ref/kind :file :ref/path (subs v 8) :ref/raw v}
               (str/starts-with? v "!cmd://") {:ref/kind :cmd :ref/cmd (subs v 7) :ref/raw v}
               (str/starts-with? v "$") (dollar v)
-              :else {:ref/kind :literal :ref/value v :ref/raw v})
+              :else (or (template v embedded-ref-pattern)
+                        {:ref/kind :literal :ref/value v :ref/raw v}))
 
             (nil? v) nil
             :else {:ref/kind :literal :ref/value v :ref/raw v})]
@@ -90,7 +138,25 @@
       (throw (ex-info error {:type ::invalid-ref})))
     r))
 
-(defn secret-ref? [r] (and (ref? r) (contains? #{:bw :env :file :cmd} (:ref/kind r))))
+(defn secret-ref? [r] (and (ref? r) (contains? #{:bw :env :file :cmd :template} (:ref/kind r))))
+
+(defn parse-embedded
+  "`parse`, for a value that carries its credential inside other text — an
+   HTTP header (`Bearer $TOKEN`) or a URL (`…?key=$KEY`): a `$VAR` inside
+   it is a reference too, resolved and masked as a whole `$VAR` is."
+  [v]
+  (let [r (parse v)]
+    (if (and (string? v) (= :literal (:ref/kind r)))
+      (or (template v embedded-ref-or-var-pattern) r)
+      r)))
+
+(defn uses-bw?
+  "Whether resolving `r` asks the vault."
+  [r]
+  (case (:ref/kind r)
+    :bw true
+    :template (boolean (some uses-bw? (filter ref? (:ref/parts r))))
+    false))
 
 (defn describe
   "Human-safe rendering of a ref. Never leaks a resolved secret."
@@ -104,6 +170,7 @@
             :bw (str "bw:" (str/join "/" (remove nil? [(:ref/folder r) (:ref/item r) (:ref/field r)])))
             :file (str "file:" (u/tilde (u/expand (:ref/path r))))
             :cmd (str "cmd:" (:ref/cmd r))
+            :template (apply str (map #(if (ref? %) (str "{" (describe %) "}") %) (:ref/parts r)))
             :literal (let [v (:ref/value r)]
                        (if (string? v) v (pr-str v))))))
 
@@ -213,7 +280,13 @@
                              (not (zero? exit)) {:status :error :message (str "command failed: " err)}
                              (str/blank? out) {:status :missing :message "command printed nothing"}
                              :else {:status :ok :value (str/trim out)}))
-                    :bw (bw-fetch r))]
+                    :bw (bw-fetch r)
+                    ;; every reference in it must resolve: a header with
+                    ;; half its credential authenticates nothing
+                    :template (let [rs (map #(if (ref? %) (resolve-ref %) {:status :ok :value %})
+                                            (:ref/parts r))]
+                                (or (first (remove #(= :ok (:status %)) rs))
+                                    {:status :ok :value (apply str (map :value rs))})))]
           (swap! cache assoc r res)
           ;; a value that names a file or directory (`$HOME`) is no secret,
           ;; and masked it would take every path under it along
@@ -260,7 +333,7 @@
    (`--token-file`, `--api-key-env`) takes a path or a name, and is not one."
   [a]
   (when-let [[_ nm] (and (string? a) (re-matches #"--?([A-Za-z][A-Za-z0-9_-]*)" a))]
-    (when (and (re-find secret-key-pattern nm)
+    (when (and (or (re-find secret-key-pattern nm) (re-matches #"(?i)auth|key" nm))
                (not (re-find indirection-key-pattern nm))
                (not (re-find #"(?i)[-_](file|path|dir|var|name)$" nm)))
       nm)))
@@ -270,23 +343,81 @@
     (let [r (try (parse a) (catch clojure.lang.ExceptionInfo _ nil))]
       (when (secret-ref? r) r))))
 
+(declare dollar-ref? takes-credential?)
+
+(defn braced-var?
+  "A whole `${VAR}`: the spelling Claude Code expands itself."
+  [r]
+  (and (dollar-ref? r) (str/starts-with? (str (:ref/raw r)) "${")))
+
+(defn expand-bare
+  "`s` with a leading `~` and every bare `$VAR` expanded, and every `${…}`
+   kept as written, for a tool that expands that spelling itself."
+  [s]
+  (when s
+    (-> (str s)
+        (str/replace #"^~(?=/|$)" (str u/home))
+        (str/replace #"\$\{[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+                     (fn [[whole v]] (or (when v (System/getenv v)) whole))))))
+
+(defn keep-braced
+  "`r` with every `${VAR}` in it kept as text, for a tool that expands that
+   spelling itself when it starts the server (Claude Code). A bare `$VAR`
+   and a `!bw://`-style reference in it still resolve."
+  [r]
+  (cond
+    (braced-var? r) {:ref/kind :literal :ref/value (:ref/raw r) :ref/raw (:ref/raw r)}
+    (= :template (:ref/kind r))
+    (let [parts (mapv #(if (braced-var? %) (:ref/raw %) %) (:ref/parts r))]
+      (if (some ref? parts)
+        (assoc r :ref/parts parts)
+        {:ref/kind :literal :ref/value (:ref/raw r) :ref/raw (:ref/raw r)}))
+    ;; `$HOME/${SUB}` had both expanded when it was read
+    (and (= :literal (:ref/kind r)) (string? (:ref/raw r)) (str/includes? (:ref/raw r) "${"))
+    (assoc r :ref/value (expand-bare (:ref/raw r)))
+    :else r))
+
 (defn arg-refs
-  "`[index flag ref prefix]` for every reference argv carries where a
-   credential goes: the argument after a credential-looking flag
-   (`--token !bw://docs/token`), or such a flag's `=value` (`prefix` is then
-   `--token=`). Anywhere else a `$VAR` is just text agentctl expands, and a
-   `!bw://` is text the server receives."
-  [args]
+  "`[index label ref prefix]` for every reference argv carries: a `!bw://`,
+   `!env://`, `!file://` or `!cmd://` anywhere, whole or embedded in an
+   argument (`Authorization: Bearer !bw://docs/token`), and a whole `$VAR`
+   where a credential goes — after a credential-looking flag or `-t`/`-k`,
+   or as such a flag's `=value` (`prefix` is then `--token=`). Anywhere else
+   a `$VAR` is text agentctl expands when it reads the config. `label` names
+   the place: the flag, or `args[i]`."
+  ([args] (arg-refs args {:braced? true}))
+  ([args {:keys [braced?]}]
   (loop [i 0, xs (seq args), flag nil, acc []]
     (if-not xs
       acc
       (let [a (first xs)
             [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
-            fv (when f (credential-flag f))]
+            ;; `:braced? false`: a `${VAR}` is the tool's to expand, not ours
+            ref (fn [x] (let [r (secret-ref-text x)] (when-not (and (not braced?) (braced-var? r)) r)))
+            rv (when f (ref v))
+            ra (ref a)]
         (cond
-          (and fv (secret-ref-text v)) (recur (inc i) (next xs) nil (conj acc [i fv (secret-ref-text v) (str f "=")]))
-          (and flag (secret-ref-text a)) (recur (inc i) (next xs) nil (conj acc [i flag (secret-ref-text a) ""]))
-          :else (recur (inc i) (next xs) (when-not f (credential-flag a)) acc))))))
+          ;; `--opt=!cmd://…` is a command inside a longer argument: text
+          (and rv (not= :cmd (:ref/kind rv)) (or (takes-credential? f) (not (dollar-ref? rv))))
+          (recur (inc i) (next xs) nil (conj acc [i f rv (str f "=")]))
+
+          (and ra (or flag (not (dollar-ref? ra))))
+          (recur (inc i) (next xs) nil (conj acc [i (or flag (str "args[" i "]")) ra ""]))
+
+          :else (recur (inc i) (next xs) (when (and (not f) (takes-credential? a)) a) acc)))))))
+
+(def ^:private literal-ref-pattern
+  #"!\{?(?:bw|env|file|cmd)://|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+(defn literal-ref
+  "The reference spelling `s` still carries once everything that resolves
+   has been resolved — a `$VAR` nothing expanded, a `!cmd://` inside other
+   text — or nil. It would be written as text. Only the scheme or the
+   variable's name is returned, never what follows."
+  [s]
+  (when (string? s)
+    (when-let [hit (re-find literal-ref-pattern s)]
+      (if (str/starts-with? hit "!") (str hit "…") hit))))
 
 (def credential-value-patterns
   "Vendor prefixes nothing but a credential carries."
@@ -368,25 +499,40 @@
   [v]
   (or (masked? v) (boolean (re-find #"^[$!]" v))))
 
+(def ^:private short-credential-flags
+  "One-letter flags that take a token in many CLIs (`-t`, `-k`). Too common
+   to mask whatever follows them, but a reference after one is a credential,
+   and is masked as any resolved value is."
+  #{"-t" "-k"})
+
+(defn- dollar-ref? [r]
+  (and (= :env (:ref/kind r)) (str/starts-with? (str (:ref/raw r)) "$")))
+
+(defn- takes-credential? [flag]
+  (boolean (or (credential-flag flag) (short-credential-flags flag))))
+
 (defn mask-argv
   "argv with the value at every credential position masked: the argument
    after a credential-looking flag, and such a flag's `=value`. Whatever
    the value is — resolved this run, read back from disk, or short enough
-   to be found nowhere else — the position says what it is."
+   to be found nowhere else — the position says what it is. `-t` and `-k`
+   take a timeout or a type as often as a token: a value after them is
+   masked when it came from a reference, as any is."
   [args]
-  (loop [xs (seq args), flag? false, out []]
+  (loop [xs (seq args), flag nil, out []]
     (if-not xs
       out
       (let [a (first xs)
-            [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))]
+            [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
+            hide? (fn [v] (not (shown-as-is? v)))]
         (cond
           (and f (credential-flag f))
-          (recur (next xs) false (conj out (if (shown-as-is? v) a (str f "=" (mask v)))))
+          (recur (next xs) nil (conj out (if (hide? v) (str f "=" (mask v)) a)))
 
-          (and flag? (string? a) (not (str/starts-with? a "-")))
-          (recur (next xs) false (conj out (if (shown-as-is? a) a (mask a))))
+          (and flag (string? a) (not (str/starts-with? a "-")))
+          (recur (next xs) nil (conj out (if (hide? a) (mask a) a)))
 
-          :else (recur (next xs) (boolean (and (not f) (credential-flag a))) (conj out a)))))))
+          :else (recur (next xs) (when (and (not f) (credential-flag a)) a) (conj out a)))))))
 
 (def ^:private flag-value-pattern
   #"(?<![\w-])(--?[A-Za-z][A-Za-z0-9_-]*)(=|\s+)([^\s\"',\]})]+)")
@@ -401,6 +547,69 @@
                    (str f sep (mask v))
                    whole))))
 
+(def ^:private known-digests
+  "Digests of every value a reference resolved to in a run that wrote, kept
+   in the state file (`remember-digests`). A value read back from disk that
+   no reference resolves to any more — the declaration dropped or replaced
+   it — is still found by its digest, never by keeping it."
+  (atom {:salt nil :digests #{}}))
+
+(defn- digest [salt v]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" %) (.digest md (.getBytes (str salt "\u0000" v) "UTF-8"))))))
+
+(defn load-digests!
+  "Take the digests the state file `st` keeps, for masking this run's output."
+  [st]
+  (reset! known-digests {:salt (:secret-salt st) :digests (set (:secret-digests st))}))
+
+(defn remember-digests
+  "`st` with the digest of every value resolved this run added. The salt is
+   made once per state file; at most the newest 1000 digests are kept."
+  [st]
+  (let [salt (or (:secret-salt st)
+                 (apply str (map #(format "%02x" %)
+                                 (let [b (byte-array 16)] (.nextBytes (java.security.SecureRandom.) b) b))))
+        fresh (map #(digest salt %) @resolved-secrets)
+        kept (vec (take-last 1000 (distinct (concat (:secret-digests st) fresh))))]
+    (if (empty? kept)
+      st
+      (assoc st :secret-salt salt :secret-digests kept))))
+
+(def ^:private delimiter
+  ;; what may sit between two values in one string: `=`, `:`, a space, `@`,
+  ;; `/`, `?`, `&`, `,`, a quote or a bracket
+  "[\\s\"'=:@/?&#,;()\\[\\]{}<>]")
+
+(def ^:private known-pattern
+  ;; a recorded value as a segment of its own: delimited on both sides
+  (memoize
+   (fn [tok]
+     (re-pattern (str "(?<!" "[^" (subs delimiter 1) ")" (java.util.regex.Pattern/quote tok)
+                      "(?!" "[^" (subs delimiter 1) ")")))))
+
+(defn- mask-known
+  "`s` with every value whose digest a past run recorded masked. `s` is
+   split at every delimiter, and each segment is checked: values joined in
+   one string (`--creds=<user>:<pw>`) are each found. A value that holds a
+   delimiter itself (base64 `=` padding, a `user:pass`) is found as a word
+   between spaces or quotes, or as what follows a word's first `=`."
+  [s]
+  (let [{:keys [salt digests]} @known-digests]
+    (if (or (empty? digests) (nil? salt))
+      s
+      (let [words (re-seq #"[^\s\"']+" s)
+            candidates (concat [s] words
+                               (keep #(second (re-matches #"[^=]*=(.+)" %)) words)
+                               (remove str/blank? (str/split s (re-pattern delimiter))))]
+        (reduce (fn [t tok]
+                  (if (and (not (masked? tok)) (contains? digests (digest salt tok)))
+                    (str/replace t (known-pattern tok) (java.util.regex.Matcher/quoteReplacement (mask tok)))
+                    t))
+                s
+                ;; longest first: a value is masked before a part of it
+                (sort-by (comp - count) (distinct candidates)))))))
+
 (defn scrub
   "`x` with every resolved value masked, at any depth and inside any string,
    and every credential position in argv masked, as a vector or as text.
@@ -412,11 +621,12 @@
               (mask-flag-values
                (if (some #(= s %) secrets)
                  (mask s)
-                 (reduce (fn [t sec]
-                           (if (>= (count sec) min-embedded)
-                             (str/replace t (embedded-pattern sec) (java.util.regex.Matcher/quoteReplacement (mask sec)))
-                             t))
-                         s secrets))))
+                 (mask-known
+                  (reduce (fn [t sec]
+                            (if (>= (count sec) min-embedded)
+                              (str/replace t (embedded-pattern sec) (java.util.regex.Matcher/quoteReplacement (mask sec)))
+                              t))
+                          s secrets)))))
             (walk [v]
               (cond
                 (string? v) (clean v)

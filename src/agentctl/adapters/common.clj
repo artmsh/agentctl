@@ -16,7 +16,7 @@
    that did not resolve under `:arg-issues`, which hold the server back as
    an unresolved env value does. An unresolved one stays as written."
   [m]
-  (let [found (refs/arg-refs (:args m))]
+  (let [found (refs/arg-refs (:args m) {:braced? (not (::own-vars m))})]
     (if (or (::args-resolved m) (empty? found))
       m
       (let [res (for [[i flag r prefix] found] [i flag r prefix (refs/resolve-ref r)])]
@@ -25,16 +25,18 @@
                :args (reduce (fn [args [i _ _ prefix {:keys [status value]}]]
                                (if (= :ok status) (assoc args i (str prefix value)) args))
                              (vec (:args m)) res)
-               :arg-refs (into {} (map (fn [[_ flag r]] [(str "--" flag) r])) res)
+               :arg-refs (into {} (map (fn [[_ label r]] [label r])) res)
                :arg-issues (for [[_ flag _ _ {:keys [status message]}] res
                                  :when (not= :ok status)]
-                             {:key (str "--" flag) :status status :message message :where "args"}))))))
+                             {:key flag :status status :message message :where "args"}))))))
 
 (defn url-ref
   "The reference an http server's `:url` is, when it is one (`!bw://…`,
-   `$VAR`): an endpoint can carry its credential in the path or the query."
+   `$VAR`), whole or inside it (`…?key=!bw://docs/key`): an endpoint can carry
+   its credential in the path or the query."
   [m]
-  (let [r (try (refs/parse (:url m)) (catch clojure.lang.ExceptionInfo _ nil))]
+  (let [r (try (cond-> (refs/parse-embedded (:url m)) (::own-vars m) refs/keep-braced)
+               (catch clojure.lang.ExceptionInfo _ nil))]
     (when (refs/secret-ref? r) r)))
 
 (defn resolve-url
@@ -49,6 +51,30 @@
         (not= :ok status) (assoc :url-issues [{:key "url" :status status :message message :where "url"}])))
     m))
 
+(def expands-env-tools
+  "Tools that expand `${VAR}` (and `${VAR:-default}`) in a server's command,
+   args, env, URL and headers themselves, when they start it: Claude Code,
+   in `.mcp.json` and `~/.claude.json`. agentctl leaves that spelling as
+   written there — resolved at plan time, an unset variable would hold the
+   server back, and a set one would bake the secret into a tracked file. A
+   bare `$VAR` Claude Code does not expand, so agentctl still resolves it."
+  #{:claude})
+
+(defn prepare-mcp
+  "An MCP server as `tool` gets it: `${VAR}` kept as written for a tool that
+   expands it (`expands-env-tools`), every other reference in argv and the
+   URL resolved."
+  [m tool]
+  (let [m (if (and (contains? expands-env-tools tool) (not (::own-vars m)))
+            (let [kv #(not-empty (into {} (map (fn [[k r]] [k (refs/keep-braced r)])) %))]
+              (cond-> (assoc m ::own-vars true)
+                (:command-written m) (assoc :command (:command-written m))
+                (:args-written m) (assoc :args (:args-written m))
+                (:env m) (update :env kv)
+                (:headers m) (update :headers kv)))
+            m)]
+    (-> m resolve-args resolve-url)))
+
 (defn for-this-tool
   "Apply a resource's :per-tool override for `tool`, if any.
 
@@ -60,7 +86,7 @@
   (cond-> (if-let [override (get-in res [:per-tool tool])]
             (merge res (into {} (remove (comp nil? val)) override))
             res)
-    (= :mcps (:kind res)) (-> resolve-args resolve-url)))
+    (= :mcps (:kind res)) (prepare-mcp tool)))
 
 (defn for-tool-resources
   "Resources targeting `tool`, each already merged with its per-tool override."
@@ -126,6 +152,30 @@
    and argv — what `holds-secret?` looks at."
   [m]
   (merge (:env m) (:headers m) (:arg-refs m) (when (:url-ref m) {"url" (:url-ref m)})))
+
+(defn text-refs
+  "`[place spelling]` for every reference spelling a server would still be
+   written with as text once its references are resolved: a `$VAR` left in
+   argv (nothing set it), or a `!cmd://` inside a longer env value, header or
+   URL, which cannot be told from the text after it. A server held back on
+   an unresolved reference has nothing written, and nothing to report."
+  [m tool]
+  (let [m (prepare-mcp m tool)]
+    (when-not (seq (mcp-issues m))
+      (let [scheme (fn [v] (when-let [hit (refs/literal-ref v)] (when (str/starts-with? hit "!") hit)))
+            literal (fn [r] (when (= :literal (:ref/kind r)) (:ref/value r)))]
+        (concat
+         ;; a tool that expands `${VAR}` itself reads it as one, not as text
+         (keep-indexed (fn [i a] (when-let [hit (refs/literal-ref a)]
+                                   (when-not (and (::own-vars m) (str/starts-with? hit "${"))
+                                     [(str "args[" i "]") hit])))
+                       (:args m))
+         (some->> (scheme (:url m)) (vector "url") vector)
+         (keep (fn [[k r]] (some->> (scheme (literal r)) (vector (str "env." (u/kw->str k))))) (:env m))
+         (keep (fn [[k r]] (some->> (scheme (literal r)) (vector (str "headers." (u/kw->str k))))) (:headers m)))))))
+
+(defn text-ref-message [[place spelling]]
+  (str "⚠ " place " holds `" spelling "`, which nothing resolves there — written as text"))
 
 (defn provider-issues
   "A provider's unresolved refs: its key, unless `key?` is false (a key the
@@ -312,7 +362,7 @@
   (into {} (keep (fn [mid]
                    (let [m (get-in cfg [:mcps mid])]
                      (when (and m (project-scopes (:scope m)) (contains? (:tools m) tool))
-                       [mid (-> m resolve-args resolve-url)]))))
+                       [mid (prepare-mcp m tool)]))))
         (sort (:mcp proj))))
 
 (defn project-scope-skip-ops

@@ -18,6 +18,7 @@
             [agentctl.toml :as toml]
             [agentctl.skills-cli :as skills-cli]
             [agentctl.sources :as sources]
+            [agentctl.refs :as refs]
             [agentctl.state :as state]
             [agentctl.statusline :as statusline]
             [agentctl.util :as u]
@@ -588,9 +589,24 @@
       (throw (ex-info (:summary (first gates)) {:path [:executors :codex :sandbox]}))
       (concat ops (map #(dissoc % :refuse-if-settings-change) gates)))))
 
+(defn- text-ref-ops
+  "A report per server and tool for a reference spelling written as text
+   (`common/text-refs`): the server is written, and its credential is not."
+  [cfg selected]
+  (for [[id m] (:mcps cfg)
+        t (sort-by name (:tools m))
+        :when (selected t)
+        :let [hits (common/text-refs (common/for-this-tool m t) t)]
+        :when (seq hits)]
+    (plan/op {:tool t :kind :mcps :id id :warn true
+              :summary (str/join "; " (map common/text-ref-message hits))})))
+
 (defn build-plan
-  "All ops for the current config. Pure: touches no state on disk."
+  "All ops for the current config. Touches no state on disk; it does load
+   the state's secret digests, for masking this run's output."
   [cfg st opts]
+  ;; a value a past run resolved and wrote is masked by its digest
+  (refs/load-digests! st)
   (let [selected (set (selected-tools cfg (if (seq (:tools opts)) opts
                                             (assoc opts :tools (into (config/active-tools cfg)
                                                                     (concat (map first (keys (:managed st)))
@@ -636,6 +652,7 @@
                 ;; after the user-wide installs they check for
                 (:ops dups)
                 (statusline/plan-ops cfg st opts)
+                (text-ref-ops cfg selected)
                 (filter #(selected (:tool %)) (statusline/derived-prune-ops cfg st claude/settings-file))
                 (filter #(selected (:tool %)) (ownership/prune-ops cfg st))
                 (filter #(selected (:tool %)) (entity-extra-ops cfg))
@@ -853,7 +870,8 @@
                $ owned)
        (reduce (fn [s key] (update s :managed dissoc key)) $ stale)
        (mark-approvals $ st cfg failed done)
-       (ownership/record $ cfg failed done)))))
+       (ownership/record $ cfg failed done)
+       (refs/remember-digests $)))))
 
 ;; ---------------------------------------------------------------- apply
 

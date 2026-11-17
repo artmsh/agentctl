@@ -134,6 +134,23 @@
   "Off for a local copy of a file whose real backup is made elsewhere."
   true)
 
+(defn- owner-only!
+  "`p` and everything under it readable by its owner only: a backup holds
+   whatever the file held, resolved secrets included, whatever its mode was.
+   A symlink is left as it is."
+  [p]
+  (when-not (fs/windows?)
+    (let [one (fn [f]
+                (cond
+                  (fs/sym-link? f) nil
+                  (fs/directory? f) (fs/set-posix-file-permissions f "rwx------")
+                  ;; a script keeps its owner's execute bit, to be put back as it was
+                  (fs/executable? f) (fs/set-posix-file-permissions f "rwx------")
+                  :else (fs/set-posix-file-permissions f "rw-------")))]
+      (one p)
+      (when (and (fs/directory? p) (not (fs/sym-link? p)))
+        (doseq [f (fs/glob p "**" {:hidden true})] (one f))))))
+
 (defn backup!
   "Copy `p` into this run's backup directory. Returns the backup path, or nil
    when there is nothing to back up.
@@ -148,10 +165,14 @@
       (if (fs/exists? dest {:nofollow-links true})
         (str dest)
         (do (fs/create-dirs (fs/parent dest))
+            (when-not (fs/windows?)
+              (doseq [d [*backup-root* (backup-dir)]]
+                (fs/set-posix-file-permissions d "rwx------")))
             (cond
               (fs/sym-link? src) (fs/create-sym-link dest (fs/read-link src))
               (fs/directory? src) (fs/copy-tree src dest)
               :else (fs/copy src dest))
+            (owner-only! dest)
             (str dest))))))
 
 ;; ---------------------------------------------------------------- process
