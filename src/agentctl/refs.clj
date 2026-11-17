@@ -11,8 +11,9 @@
      \"!file://~/path\"         string   -> file contents (trimmed)
      \"!cmd://some command\"    string   -> stdout of command (trimmed)
      \"literal\"                string   -> literal value
+     \"Bearer !bw://item/f\"     string   -> template: text around embedded refs
 
-   Internal form: {:ref/kind :env|:bw|:file|:cmd|:literal ...}"
+   Internal form: {:ref/kind :env|:bw|:file|:cmd|:literal|:template ...}"
   (:require [agentctl.util :as u]
             [clojure.string :as str]))
 
@@ -41,6 +42,7 @@
                "invalid reference: :cmd requires a nonblank command")
         :literal (when-not (contains? r :ref/value)
                    "invalid reference: :literal requires :ref/value")
+        :template (some ref-error (filter ref? (:ref/parts r)))
         "invalid reference: unsupported kind"))))
 
 (defn- dollar
@@ -52,6 +54,30 @@
   (if-let [[_ n] (re-matches #"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?" s)]
     {:ref/kind :env :ref/var n :ref/raw s}
     {:ref/kind :literal :ref/value (u/expand s) :ref/raw s}))
+
+(declare parse)
+
+(def ^:private embedded-ref-pattern
+  ;; a reference inside a longer string: up to a space, a quote, or a URL's
+  ;; `&`/`#` — `!cmd://` runs to the end of its line and cannot be embedded
+  #"!(?:bw|env|file)://[^\s\"'&#,;]+")
+
+(def ^:private embedded-ref-or-var-pattern
+  #"!(?:bw|env|file)://[^\s\"'&#,;]+|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+(defn- template
+  "`s` as a template — its text with the references in it — when it embeds
+   one: `Bearer !bw://docs/token`, `https://h/x?key=!bw://docs/key`."
+  [s pattern]
+  (let [m (re-matcher pattern s)]
+    (loop [pos 0, parts []]
+      (if (.find m)
+        (recur (.end m) (cond-> parts
+                          (< pos (.start m)) (conj (subs s pos (.start m)))
+                          true (conj (parse (.group m)))))
+        (let [parts (cond-> parts (< pos (count s)) (conj (subs s pos)))]
+          (when (some ref? parts)
+            {:ref/kind :template :ref/parts parts :ref/raw s}))))))
 
 (defn parse
   "Normalize a declared value into a ref map. Non-secret scalars become :literal.
@@ -82,7 +108,8 @@
               (str/starts-with? v "!file://") {:ref/kind :file :ref/path (subs v 8) :ref/raw v}
               (str/starts-with? v "!cmd://") {:ref/kind :cmd :ref/cmd (subs v 7) :ref/raw v}
               (str/starts-with? v "$") (dollar v)
-              :else {:ref/kind :literal :ref/value v :ref/raw v})
+              :else (or (template v embedded-ref-pattern)
+                        {:ref/kind :literal :ref/value v :ref/raw v}))
 
             (nil? v) nil
             :else {:ref/kind :literal :ref/value v :ref/raw v})]
@@ -90,7 +117,25 @@
       (throw (ex-info error {:type ::invalid-ref})))
     r))
 
-(defn secret-ref? [r] (and (ref? r) (contains? #{:bw :env :file :cmd} (:ref/kind r))))
+(defn secret-ref? [r] (and (ref? r) (contains? #{:bw :env :file :cmd :template} (:ref/kind r))))
+
+(defn parse-embedded
+  "`parse`, for a value that carries its credential inside other text — an
+   HTTP header (`Bearer $TOKEN`) or a URL (`…?key=$KEY`): a `$VAR` inside
+   it is a reference too, resolved and masked as a whole `$VAR` is."
+  [v]
+  (let [r (parse v)]
+    (if (and (string? v) (= :literal (:ref/kind r)))
+      (or (template v embedded-ref-or-var-pattern) r)
+      r)))
+
+(defn uses-bw?
+  "Whether resolving `r` asks the vault."
+  [r]
+  (case (:ref/kind r)
+    :bw true
+    :template (boolean (some uses-bw? (filter ref? (:ref/parts r))))
+    false))
 
 (defn describe
   "Human-safe rendering of a ref. Never leaks a resolved secret."
@@ -104,6 +149,7 @@
             :bw (str "bw:" (str/join "/" (remove nil? [(:ref/folder r) (:ref/item r) (:ref/field r)])))
             :file (str "file:" (u/tilde (u/expand (:ref/path r))))
             :cmd (str "cmd:" (:ref/cmd r))
+            :template (apply str (map #(if (ref? %) (str "{" (describe %) "}") %) (:ref/parts r)))
             :literal (let [v (:ref/value r)]
                        (if (string? v) v (pr-str v))))))
 
@@ -213,7 +259,13 @@
                              (not (zero? exit)) {:status :error :message (str "command failed: " err)}
                              (str/blank? out) {:status :missing :message "command printed nothing"}
                              :else {:status :ok :value (str/trim out)}))
-                    :bw (bw-fetch r))]
+                    :bw (bw-fetch r)
+                    ;; every reference in it must resolve: a header with
+                    ;; half its credential authenticates nothing
+                    :template (let [rs (map #(if (ref? %) (resolve-ref %) {:status :ok :value %})
+                                            (:ref/parts r))]
+                                (or (first (remove #(= :ok (:status %)) rs))
+                                    {:status :ok :value (apply str (map :value rs))})))]
           (swap! cache assoc r res)
           ;; a value that names a file or directory (`$HOME`) is no secret,
           ;; and masked it would take every path under it along
@@ -260,7 +312,7 @@
    (`--token-file`, `--api-key-env`) takes a path or a name, and is not one."
   [a]
   (when-let [[_ nm] (and (string? a) (re-matches #"--?([A-Za-z][A-Za-z0-9_-]*)" a))]
-    (when (and (re-find secret-key-pattern nm)
+    (when (and (or (re-find secret-key-pattern nm) (re-matches #"(?i)auth|key" nm))
                (not (re-find indirection-key-pattern nm))
                (not (re-find #"(?i)[-_](file|path|dir|var|name)$" nm)))
       nm)))
@@ -270,23 +322,32 @@
     (let [r (try (parse a) (catch clojure.lang.ExceptionInfo _ nil))]
       (when (secret-ref? r) r))))
 
+(declare dollar-ref? takes-credential?)
+
 (defn arg-refs
-  "`[index flag ref prefix]` for every reference argv carries where a
-   credential goes: the argument after a credential-looking flag
-   (`--token !bw://docs/token`), or such a flag's `=value` (`prefix` is then
-   `--token=`). Anywhere else a `$VAR` is just text agentctl expands, and a
-   `!bw://` is text the server receives."
+  "`[index label ref prefix]` for every reference argv carries: a `!bw://`,
+   `!env://`, `!file://` or `!cmd://` anywhere, whole or embedded in an
+   argument (`Authorization: Bearer !bw://docs/token`), and a whole `$VAR`
+   where a credential goes — after a credential-looking flag or `-t`/`-k`,
+   or as such a flag's `=value` (`prefix` is then `--token=`). Anywhere else
+   a `$VAR` is text agentctl expands when it reads the config. `label` names
+   the place: the flag, or `args[i]`."
   [args]
   (loop [i 0, xs (seq args), flag nil, acc []]
     (if-not xs
       acc
       (let [a (first xs)
             [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
-            fv (when f (credential-flag f))]
+            rv (when f (secret-ref-text v))
+            ra (secret-ref-text a)]
         (cond
-          (and fv (secret-ref-text v)) (recur (inc i) (next xs) nil (conj acc [i fv (secret-ref-text v) (str f "=")]))
-          (and flag (secret-ref-text a)) (recur (inc i) (next xs) nil (conj acc [i flag (secret-ref-text a) ""]))
-          :else (recur (inc i) (next xs) (when-not f (credential-flag a)) acc))))))
+          (and rv (or (takes-credential? f) (not (dollar-ref? rv))))
+          (recur (inc i) (next xs) nil (conj acc [i f rv (str f "=")]))
+
+          (and ra (or flag (not (dollar-ref? ra))))
+          (recur (inc i) (next xs) nil (conj acc [i (or flag (str "args[" i "]")) ra ""]))
+
+          :else (recur (inc i) (next xs) (when (and (not f) (takes-credential? a)) a) acc))))))
 
 (def credential-value-patterns
   "Vendor prefixes nothing but a credential carries."
@@ -368,25 +429,47 @@
   [v]
   (or (masked? v) (boolean (re-find #"^[$!]" v))))
 
+(def ^:private short-credential-flags
+  "One-letter flags that take a token in many CLIs (`-t`, `-k`). Too common
+   to mask whatever follows them, but a reference after one is a credential."
+  #{"-t" "-k"})
+
+(defn- dollar-ref? [r]
+  (and (= :env (:ref/kind r)) (str/starts-with? (str (:ref/raw r)) "$")))
+
+(defn- takes-credential? [flag]
+  (boolean (or (credential-flag flag) (short-credential-flags flag))))
+
+(defn- plain-arg?
+  "A value after `-t` or `-k` that is plainly no credential: those letters
+   take a timeout, a type or a key path as often as a token."
+  [v]
+  (boolean (or (re-matches #"-?\d+(\.\d+)?[a-z]{0,2}" v)
+               (contains? plain-words (str/lower-case v))
+               (re-find #"^[/~.]" v))))
+
 (defn mask-argv
   "argv with the value at every credential position masked: the argument
    after a credential-looking flag, and such a flag's `=value`. Whatever
    the value is — resolved this run, read back from disk, or short enough
-   to be found nowhere else — the position says what it is."
+   to be found nowhere else — the position says what it is. After `-t` or
+   `-k` a value is masked unless it is plainly something else."
   [args]
-  (loop [xs (seq args), flag? false, out []]
+  (loop [xs (seq args), flag nil, out []]
     (if-not xs
       out
       (let [a (first xs)
-            [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))]
+            [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
+            hide? (fn [flag v] (and (not (shown-as-is? v))
+                                    (or (credential-flag flag) (not (plain-arg? v)))))]
         (cond
-          (and f (credential-flag f))
-          (recur (next xs) false (conj out (if (shown-as-is? v) a (str f "=" (mask v)))))
+          (and f (takes-credential? f))
+          (recur (next xs) nil (conj out (if (hide? f v) (str f "=" (mask v)) a)))
 
-          (and flag? (string? a) (not (str/starts-with? a "-")))
-          (recur (next xs) false (conj out (if (shown-as-is? a) a (mask a))))
+          (and flag (string? a) (not (str/starts-with? a "-")))
+          (recur (next xs) nil (conj out (if (hide? flag a) (mask a) a)))
 
-          :else (recur (next xs) (boolean (and (not f) (credential-flag a))) (conj out a)))))))
+          :else (recur (next xs) (when (and (not f) (takes-credential? a)) a) (conj out a)))))))
 
 (def ^:private flag-value-pattern
   #"(?<![\w-])(--?[A-Za-z][A-Za-z0-9_-]*)(=|\s+)([^\s\"',\]})]+)")
@@ -397,7 +480,8 @@
   [s]
   (str/replace s flag-value-pattern
                (fn [[whole f sep v]]
-                 (if (and (credential-flag f) (not (str/starts-with? v "-")) (not (shown-as-is? v)))
+                 (if (and (takes-credential? f) (not (str/starts-with? v "-")) (not (shown-as-is? v))
+                          (or (credential-flag f) (not (plain-arg? v))))
                    (str f sep (mask v))
                    whole))))
 

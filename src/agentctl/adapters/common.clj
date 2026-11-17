@@ -25,16 +25,17 @@
                :args (reduce (fn [args [i _ _ prefix {:keys [status value]}]]
                                (if (= :ok status) (assoc args i (str prefix value)) args))
                              (vec (:args m)) res)
-               :arg-refs (into {} (map (fn [[_ flag r]] [(str "--" flag) r])) res)
+               :arg-refs (into {} (map (fn [[_ label r]] [label r])) res)
                :arg-issues (for [[_ flag _ _ {:keys [status message]}] res
                                  :when (not= :ok status)]
-                             {:key (str "--" flag) :status status :message message :where "args"}))))))
+                             {:key flag :status status :message message :where "args"}))))))
 
 (defn url-ref
   "The reference an http server's `:url` is, when it is one (`!bw://…`,
-   `$VAR`): an endpoint can carry its credential in the path or the query."
+   `$VAR`), whole or inside it (`…?key=!bw://docs/key`): an endpoint can carry
+   its credential in the path or the query."
   [m]
-  (let [r (try (refs/parse (:url m)) (catch clojure.lang.ExceptionInfo _ nil))]
+  (let [r (try (refs/parse-embedded (:url m)) (catch clojure.lang.ExceptionInfo _ nil))]
     (when (refs/secret-ref? r) r)))
 
 (defn resolve-url

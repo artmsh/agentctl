@@ -229,8 +229,11 @@
     (nil? decl) {}
     :else {:cmd (str decl)}))
 
-(defn- norm-headers [m]
-  (not-empty (into {} (map (fn [[k v]] [k (refs/parse v)])) m)))
+(defn- norm-headers
+  "A header's whole value is often a credential inside other text
+   (`Bearer $TOKEN`): a reference inside it resolves too."
+  [m]
+  (not-empty (into {} (map (fn [[k v]] [k (refs/parse-embedded v)])) m)))
 
 (defn- norm-mcp [id decl]
   (let [decl (mcp-decl decl)

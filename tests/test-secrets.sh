@@ -13,7 +13,7 @@ SB=$(mktemp -d "${TMPDIR:-/tmp}/agentctl-secrets.XXXXXX")
 trap 'rm -rf "$SB"' EXIT
 SB=$(cd "$SB" && pwd -P)
 
-export AGENTCTL_HOME="$SB" HOME="$SB"
+export AGENTCTL_HOME="$SB" HOME="$SB" AUTH_TOK=authtokvalue42
 unset DSH_HOME DSH_AGENTS_HOME KIMI_CODE_HOME
 fail() { echo "FAIL: $1" >&2; exit 1; }
 TOOLS=(-t pi -t omp -t kimi -t antigravity -t codex)
@@ -280,5 +280,68 @@ for t in omp kimi antigravity codex; do
 done
 set +e; "$ROOT/agentctl" validate -f "$SB/url.edn" > "$SB/url.txt" 2>&1; set -e
 grep -qF 'udocs.url' "$SB/url.txt" || { cat "$SB/url.txt"; fail "validate does not report the unresolved URL"; }
+
+held() { # held <cfg> <place> <tool>...: each tool holds the server back, naming the place
+  local cfg=$1 place=$2; shift 2
+  for t in "$@"; do
+    set +e; "$ROOT/agentctl" apply --all -t $t -k mcps -f "$cfg" > "$SB/held.txt" 2>&1; code=$?; set -e
+    [ "$code" = 2 ] && grep -qF "plant/NOPE ($place)" "$SB/held.txt" \
+      || { cat "$SB/held.txt"; fail "$t: an unresolved reference at $place is not held back"; }
+  done
+}
+written() { # written <server> <python expr over its pi entry `e`>
+  python3 - "$SB/.pi/agent/mcp.json" "$1" "$2" <<'PY' || fail "pi's $1 was not written resolved"
+import json, sys
+e = json.load(open(sys.argv[1]))["mcpServers"][sys.argv[2]]
+assert eval(sys.argv[3]), e
+PY
+}
+
+echo "12. a reference after -t, -k, --auth or --key is resolved, masked and held back"
+cat > "$SB/flags.edn" <<'EDN'
+{:mcps [{:id :fdocs :command "/bin/echo" :args ["-t" "!bw://plant/ARG" "--auth" "$AUTH_TOK" "--key" "!bw://plant/ARG" "-k" "$AUTH_TOK"]
+         :in :all :acli [:pi :omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/flags.edn" outputs
+grep -q fdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the flag servers are not planned"; }
+leaks argsecretvalue888 authtokvalue42
+written fdocs 'e["args"] == ["-t", "argsecretvalue888", "--auth", "authtokvalue42", "--key", "argsecretvalue888", "-k", "authtokvalue42"]'
+sed -i.bak 's|"-t" "!bw://plant/ARG"|"-t" "!bw://plant/NOPE"|' "$SB/flags.edn"
+held "$SB/flags.edn" 'args.-t' pi omp kimi antigravity codex
+
+echo "13. a reference inside one argument is resolved, masked and held back"
+cat > "$SB/inner.edn" <<'EDN'
+{:mcps [{:id :idocs :command "/bin/echo" :args ["--header" "Authorization: Bearer !bw://plant/ARG"]
+         :in :all :acli [:pi :omp :kimi :antigravity :codex]}
+        {:id :ihttp :type :http :url "https://mcp.example.com/i" :headers {"Authorization" "Bearer $AUTH_TOK"}
+         :in :all :acli [:omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/inner.edn" outputs
+leaks argsecretvalue888 authtokvalue42
+written idocs 'e["args"] == ["--header", "Authorization: Bearer argsecretvalue888"]'
+python3 - "$SB/.kimi-code/mcp.json" <<'PY' || fail "a variable inside a header was not resolved"
+import json, sys
+assert json.load(open(sys.argv[1]))["mcpServers"]["ihttp"]["headers"] == {"Authorization": "Bearer authtokvalue42"}
+PY
+sed -i.bak 's|Bearer !bw://plant/ARG|Bearer !bw://plant/NOPE|' "$SB/inner.edn"
+held "$SB/inner.edn" 'args.args[1]' pi omp kimi antigravity codex
+
+echo "14. a reference inside a URL is resolved, masked and held back"
+cat > "$SB/query.edn" <<'EDN'
+{:mcps [{:id :qdocs :type :http :url "https://mcp.example.com/q?k=!bw://plant/ARG&v=1" :in :all
+         :acli [:omp :kimi :antigravity :codex]}
+        {:id :vdocs :type :http :url "https://mcp.example.com/v?k=$AUTH_TOK" :in :all
+         :acli [:omp :kimi :antigravity :codex]}]}
+EDN
+CFG="$SB/query.edn" outputs
+leaks argsecretvalue888 authtokvalue42
+python3 - "$SB/.kimi-code/mcp.json" <<'PY' || fail "a reference inside a URL was not resolved"
+import json, sys
+ms = json.load(open(sys.argv[1]))["mcpServers"]
+assert ms["qdocs"]["url"] == "https://mcp.example.com/q?k=argsecretvalue888&v=1", ms["qdocs"]
+assert ms["vdocs"]["url"] == "https://mcp.example.com/v?k=authtokvalue42", ms["vdocs"]
+PY
+sed -i.bak 's|k=!bw://plant/ARG|k=!bw://plant/NOPE|' "$SB/query.edn"
+held "$SB/query.edn" 'url.url' omp kimi antigravity codex
 
 echo "all secrets e2e checks passed"

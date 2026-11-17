@@ -755,16 +755,16 @@ An MCP argument that follows a credential-looking flag — `--api-key X`,
 (`!bw://docs/api-key`); a flag naming where the credential lives, such as
 `--token-file`, keeps its value.
 
-An MCP server's argv takes a reference wherever a credential goes: the
-argument after a flag whose name says credential (`--token`, `--api-key`,
-`--password`), or such a flag's `=value`. It is resolved when the plan is made,
-masked in every output, and held back like an env value when it does not
-resolve; `validate` checks it. Anywhere else in argv, `$VAR` is expanded when
-the config is read and `!bw://` is plain text.
-
-```clojure
-{:mcps [{:id :docs :cmd "docs-mcp --api-key !bw://vendor/docs/api-key" :in :all}]}
-```
+An MCP server's argv takes a reference wherever a credential goes. A
+`!bw://`, `!env://`, `!file://` or `!cmd://` argument is one anywhere, and so
+is one embedded in a longer argument (`"Authorization: Bearer !bw://docs/token"`).
+A whole `$VAR` is one after a flag whose name says credential (`--token`,
+`--api-key`, `--password`, `--auth`, `--key`) or after `-t` or `-k`, and as
+such a flag's `=value`. Each is resolved when the plan is made, masked in
+every output, and held back like an env value when it does not resolve;
+`validate` checks it. Anywhere else in argv a `$VAR` is expanded when the
+config is read. A value after `-t` or `-k` is masked unless it is plainly
+something else (a number, a common word, a path).
 
 For Codex HTTP servers, import maps `http_headers` to `:headers` and
 `bearer_token_env_var` to `:bearer-token-env`. Header values are redacted to
@@ -777,8 +777,11 @@ manifest records the names agentctl declared, and a name the declaration drops
 is removed from the server, as for Claude.
 
 An http server's `:url` may itself be a reference (`!bw://vendor/docs/url`),
-for an endpoint that carries its credential in the path or the query. It is
-resolved, masked and held back like a header, and `validate` checks it.
+or carry one (`https://mcp.example.com/x?key=!bw://vendor/docs/key`, or
+`…?key=$DOCS_KEY`), for an endpoint that carries its credential in the path or
+the query. A header value may carry one the same way (`"Bearer $DOCS_TOKEN"`).
+Each is resolved, masked and held back like a whole header, and `validate`
+checks it.
 
 OMP writes an http or sse server's `:headers` resolved into the server's
 `headers` map in `~/.omp/agent/mcp.json`; a header that does not resolve holds
