@@ -459,4 +459,16 @@ set +e; "$ROOT/agentctl" apply --all -t claude -k mcps -f "$SB/user.edn" -v > "$
 [ "$code" = 2 ] && grep -q 'mcps/udocs' "$SB/user.txt" || { cat "$SB/user.txt"; fail "a changed header around the same secret plans no change: exit $code"; }
 grep -q argsecretvalue888 "$SB/user.txt" && fail "the header drift printed the secret"
 
+echo "23. a dropped secret with = or : in it is masked too"
+printf 'c2stdGVzdC1wYWQ=' > "$SB/padded"
+cat > "$SB/pad.edn" <<EDN
+{:mcps [{:id :pdocs :command "/bin/echo" :args ["--opt=x !file://$SB/padded y"] :in :all :acli [:pi :kimi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t pi -t kimi -f "$SB/pad.edn" -y > "$SB/apply.txt" 2>&1; set -e
+[ "$(pi_args pdocs)" = '["--opt=x c2stdGVzdC1wYWQ= y"]' ] || { cat "$SB/apply.txt"; pi_args pdocs; fail "the padded value was not written"; }
+sed -i.bak "s|--opt=x !file://$SB/padded y|--opt=x y|" "$SB/pad.edn"
+CFG="$SB/pad.edn" outputs
+grep -q pdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped padded reference is not planned"; }
+leaks c2stdGVzdC1wYWQ
+
 echo "all secrets e2e checks passed"

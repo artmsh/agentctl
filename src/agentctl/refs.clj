@@ -589,7 +589,12 @@
                   (str/replace t (embedded-pattern tok) (java.util.regex.Matcher/quoteReplacement (mask tok)))
                   t))
               s
-              (distinct (cons s (re-seq token-pattern s)))))))
+              ;; a secret may hold `=`, `:` or `@` itself (base64 padding,
+              ;; a `user:pass`): a word between spaces or quotes is one
+              ;; candidate too, and so is what follows its first `=`
+              (let [words (re-seq #"[^\s\"']+" s)]
+                (distinct (concat [s] (re-seq token-pattern s) words
+                                  (keep #(second (re-matches #"[^=]*=(.+)" %)) words))))))))
 
 (defn scrub
   "`x` with every resolved value masked, at any depth and inside any string,
