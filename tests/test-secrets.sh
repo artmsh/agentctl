@@ -359,4 +359,17 @@ set +e; "$ROOT/agentctl" validate -f "$SB/text.edn" > "$SB/text.txt" 2>&1; set -
 grep -qF 'xdocs.args[1]' "$SB/text.txt" && grep -qF 'xdocs.env.MODE' "$SB/text.txt" \
   || { cat "$SB/text.txt"; fail "validate does not report the spellings written as text"; }
 
+pi_args() { # pi_args <server>: its argv as JSON
+  python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["mcpServers"][sys.argv[2]]["args"]))' "$SB/.pi/agent/mcp.json" "$1"
+}
+
+echo "16. two references in one string are both resolved, and the text between them kept"
+cat > "$SB/two.edn" <<'EDN'
+{:mcps [{:id :twodocs :command "/bin/echo" :args ["--creds=!bw://plant/ARG:!bw://plant/SHORT" "!bw://plant/ARG !bw://plant/SHORT"]
+         :in :all :acli [:pi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t pi -f "$SB/two.edn" -y > "$SB/apply.txt" 2>&1; set -e
+[ "$(pi_args twodocs)" = '["--creds=argsecretvalue888:Zq9x", "argsecretvalue888 Zq9x"]' ] \
+  || { cat "$SB/apply.txt"; pi_args twodocs; fail "two references in one string were not both resolved"; }
+
 echo "all secrets e2e checks passed"

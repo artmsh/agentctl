@@ -58,12 +58,22 @@
 (declare parse)
 
 (def ^:private embedded-ref-pattern
-  ;; a reference inside a longer string: up to a space, a quote, or a URL's
-  ;; `&`/`#` — `!cmd://` runs to the end of its line and cannot be embedded
-  #"!(?:bw|env|file)://[^\s\"'&#,;]+")
+  ;; a reference inside a longer string: up to a space, a quote, `:`, `!`
+  ;; (the next reference), or a URL's `&`/`#` — `!cmd://` runs to the end
+  ;; of its line and cannot be embedded
+  #"!(?:bw|env|file)://[^\s\"'&#,;!:]+")
 
 (def ^:private embedded-ref-or-var-pattern
-  #"!(?:bw|env|file)://[^\s\"'&#,;]+|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+  #"!(?:bw|env|file)://[^\s\"'&#,;!:]+|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+(def ^:private ref-marker
+  #"!(?:bw|env|file|cmd)://")
+
+(defn- embeds-ref?
+  "Whether a string holds a reference anywhere but as the whole of it: one
+   after its first character, as in `!bw://db/user:!bw://db/pw`."
+  [v]
+  (boolean (re-find ref-marker (subs v 1))))
 
 (defn- template
   "`s` as a template — its text with the references in it — when it embeds
@@ -91,6 +101,10 @@
               (if (str/starts-with? s "$")
                 (dollar s)
                 {:ref/kind :literal :ref/value s :ref/raw s}))
+
+            (and (string? v) (seq v) (embeds-ref? v))
+            (or (template v embedded-ref-pattern)
+                {:ref/kind :literal :ref/value v :ref/raw v})
 
             (string? v)
             (cond

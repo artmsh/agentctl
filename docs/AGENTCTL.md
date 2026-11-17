@@ -763,6 +763,9 @@ An MCP argument that follows a credential-looking flag — `--api-key X`,
 An MCP server's argv takes a reference wherever a credential goes. A
 `!bw://`, `!env://`, `!file://` or `!cmd://` argument is one anywhere, and so
 is one embedded in a longer argument (`"Authorization: Bearer !bw://docs/token"`).
+Several may share one argument (`--creds=!bw://db/user:!bw://db/pw`), each
+resolved and the text between them kept: an embedded reference ends at a
+space, a quote, `:`, `!`, `&`, `#`, `,` or `;`.
 A whole `$VAR` is one after a flag whose name says credential (`--token`,
 `--api-key`, `--password`, `--auth`, `--key`) or after `-t` or `-k`, and as
 such a flag's `=value`. Each is resolved when the plan is made, masked in
