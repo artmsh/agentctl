@@ -5,6 +5,7 @@
    agents.edn would be invisible. Anything NOT recorded here is treated as
    hand-made and is never deleted."
   (:require [agentctl.util :as u]
+            [babashka.fs :as fs]
             [clojure.pprint :as pp]))
 
 (def path (str u/home "/.config/agentctl/state.edn"))
@@ -14,8 +15,16 @@
 (defn load-state []
   (or (u/read-edn path) empty-state))
 
+(defn- private!
+  "Keep a manifest that holds secret digests (`refs/remember-digests`) to its
+   owner: a digest of a short secret is no harder to reverse than to guess."
+  [p state]
+  (when (and (:secret-digests state) (not (fs/windows?)))
+    (fs/set-posix-file-permissions (u/expand p) "rw-------")))
+
 (defn save! [state]
-  (u/write-text! path (with-out-str (pp/pprint (assoc state :version 2)))))
+  (u/write-text! path (with-out-str (pp/pprint (assoc state :version 2))))
+  (private! path state))
 
 (defn host-path
   "A host's manifest. Kept apart from `path`: a local run reads every entry in
@@ -27,7 +36,8 @@
   (or (u/read-edn (host-path host-id)) empty-state))
 
 (defn save-host! [host-id state]
-  (u/write-text! (host-path host-id) (with-out-str (pp/pprint (assoc state :version 2)))))
+  (u/write-text! (host-path host-id) (with-out-str (pp/pprint (assoc state :version 2))))
+  (private! (host-path host-id) state))
 
 (defn key-for [tool kind id] [tool kind (u/id->str id)])
 

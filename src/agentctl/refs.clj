@@ -520,6 +520,50 @@
                    (str f sep (mask v))
                    whole))))
 
+(def ^:private known-digests
+  "Digests of every value a reference resolved to in a run that wrote, kept
+   in the state file (`remember-digests`). A value read back from disk that
+   no reference resolves to any more — the declaration dropped or replaced
+   it — is still found by its digest, never by keeping it."
+  (atom {:salt nil :digests #{}}))
+
+(defn- digest [salt v]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" %) (.digest md (.getBytes (str salt "\u0000" v) "UTF-8"))))))
+
+(defn load-digests!
+  "Take the digests the state file `st` keeps, for masking this run's output."
+  [st]
+  (reset! known-digests {:salt (:secret-salt st) :digests (set (:secret-digests st))}))
+
+(defn remember-digests
+  "`st` with the digest of every value resolved this run added. The salt is
+   made once per state file; at most the newest 1000 digests are kept."
+  [st]
+  (let [salt (or (:secret-salt st)
+                 (apply str (map #(format "%02x" %)
+                                 (let [b (byte-array 16)] (.nextBytes (java.security.SecureRandom.) b) b))))
+        fresh (map #(digest salt %) @resolved-secrets)
+        kept (vec (take-last 1000 (distinct (concat (:secret-digests st) fresh))))]
+    (if (empty? kept)
+      st
+      (assoc st :secret-salt salt :secret-digests kept))))
+
+(def ^:private token-pattern #"[^\s\"'=:,;&@?#\[\]{}()<>]+")
+
+(defn- mask-known
+  "`s` with every token whose digest a past run recorded masked."
+  [s]
+  (let [{:keys [salt digests]} @known-digests]
+    (if (or (empty? digests) (nil? salt))
+      s
+      (reduce (fn [t tok]
+                (if (and (not (masked? tok)) (contains? digests (digest salt tok)))
+                  (str/replace t (embedded-pattern tok) (java.util.regex.Matcher/quoteReplacement (mask tok)))
+                  t))
+              s
+              (distinct (cons s (re-seq token-pattern s)))))))
+
 (defn scrub
   "`x` with every resolved value masked, at any depth and inside any string,
    and every credential position in argv masked, as a vector or as text.
@@ -531,11 +575,12 @@
               (mask-flag-values
                (if (some #(= s %) secrets)
                  (mask s)
-                 (reduce (fn [t sec]
-                           (if (>= (count sec) min-embedded)
-                             (str/replace t (embedded-pattern sec) (java.util.regex.Matcher/quoteReplacement (mask sec)))
-                             t))
-                         s secrets))))
+                 (mask-known
+                  (reduce (fn [t sec]
+                            (if (>= (count sec) min-embedded)
+                              (str/replace t (embedded-pattern sec) (java.util.regex.Matcher/quoteReplacement (mask sec)))
+                              t))
+                          s secrets)))))
             (walk [v]
               (cond
                 (string? v) (clean v)

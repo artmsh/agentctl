@@ -395,4 +395,18 @@ set -e
 grep -qF 'args[1] holds `!{cmd://…`' "$SB/dsnplan.txt" || { cat "$SB/dsnplan.txt"; fail "a braced command is not reported"; }
 [ "$(pi_args dsndocs)" = '["--dsn=postgres://app:argsecretvalue888@db/x", "pre !{cmd://echo z}"]' ] || { cat "$SB/apply.txt"; pi_args dsndocs; fail "a braced reference was not resolved"; }
 
+echo "19. a reference dropped from inside an argument leaves its old secret unprinted"
+cat > "$SB/gone.edn" <<'EDN'
+{:mcps [{:id :gdocs :command "/bin/echo" :args ["--opt=x !bw://plant/ARG y"] :in :all :acli [:pi :kimi]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t pi -t kimi -f "$SB/gone.edn" -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] && [ "$(pi_args gdocs)" = '["--opt=x argsecretvalue888 y"]' ] || { cat "$SB/apply.txt"; fail "the embedded reference was not written resolved"; }
+st="$SB/.config/agentctl/state.edn"
+grep -q argsecretvalue888 "$st" && fail "the state file keeps a resolved value"
+[ "$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$st")" = 0o600 ] || fail "the state file holding digests is readable by others"
+sed -i.bak 's|"--opt=x !bw://plant/ARG y"|"--opt=x y"|' "$SB/gone.edn"
+CFG="$SB/gone.edn" outputs
+grep -q gdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped reference is not planned"; }
+leaks argsecretvalue888
+
 echo "all secrets e2e checks passed"

@@ -1052,7 +1052,11 @@ argument after a credential-looking flag, or such a flag's `=value`, is masked
 in diffs, summaries, command lines and failure messages whatever it holds,
 however short. A resolved value found inside other text is masked only as a
 token of its own, so one that is also a word in a host or a path leaves the
-URL or the path readable.
+URL or the path readable. A value a reference resolved to in an earlier
+`apply!` is masked too after the reference is gone — dropped from inside an
+argument, say — though nothing resolves it now: the state file keeps a salted
+SHA-256 digest of each (never the value), and is then readable by its owner
+only.
 
 A Bitwarden field that exists but holds `""` or the text `"null"` is missing,
 not a value: written out, it is a header that authenticates nothing. So is an
