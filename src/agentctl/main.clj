@@ -133,7 +133,8 @@
 (defn- op->data
   "An op as `--json` prints it: masked exactly as the text plan is."
   [o]
-  (-> o (dissoc :exec!) plan/mask-op
+  ;; withheld changes are listed once, under the document's `withheld`
+  (-> o (dissoc :exec! :withheld-changes) plan/mask-op
       (update :tool u/kw->str) (update :kind u/kw->str) (update :id u/kw->str)))
 
 (defn- load! [opts]

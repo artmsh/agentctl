@@ -665,7 +665,7 @@
          (when (pos? withheld) (format ", %d withheld" withheld)))))
 
 (defn withheld-changes
-  "Every change the plan withheld, as data: `{:action :kind :id :target :keys}`."
+  "Every change the plan withheld, as data: `{:tool :project :action :kind :id :target :keys}`."
   [ops]
   (vec (mapcat :withheld-changes ops)))
 

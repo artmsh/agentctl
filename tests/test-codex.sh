@@ -276,6 +276,8 @@ d = json.load(open(sys.argv[1]))
 w = d["withheld"]
 assert any(e["kind"] == "settings" and e["id"] == "global" and "model" in e["keys"] and e["action"] == "update"
            and e["target"].endswith(".codex/config.toml") for e in w), w
+assert all(e["tool"] == "codex" and "project" in e for e in w), w
+assert not any("withheld-changes" in o for o in d.get("ops", [])), "the per-op copy is still printed"
 assert "withheld" in d["summary"], d["summary"]
 PY2
 c=$(code_of run apply! -f "$SB/l.edn" --all -t codex -y)

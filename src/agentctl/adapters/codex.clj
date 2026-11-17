@@ -624,7 +624,8 @@
                          :withheld (count hit)
                          ;; what --json prints for each
                          :withheld-changes (vec (for [o hit]
-                                                  {:action (name (:action o)) :kind (name (:kind o))
+                                                  {:tool (name tool) :project (some-> (:project o) u/kw->str)
+                                                   :action (name (:action o)) :kind (name (:kind o))
                                                    :id (u/kw->str (:id o)) :target shown
                                                    :keys (vec (distinct (keep #(some-> (:key %) u/kw->str) (:diffs o))))}))
                          :summary (str/join "\n    "
