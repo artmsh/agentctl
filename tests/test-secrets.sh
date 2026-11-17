@@ -471,4 +471,26 @@ CFG="$SB/pad.edn" outputs
 grep -q pdocs "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped padded reference is not planned"; }
 leaks c2stdGVzdC1wYWQ
 
+echo "24. a user-wide Claude server keeps \${VAR} too, and converges on it"
+cat > "$SB/cuser.edn" <<'EDN'
+{:mcps [{:id :cuser :type :http :url "https://mcp.example.com/cu" :headers {"Authorization" "Bearer ${AUTH_TOK}"}
+         :in :all :acli [:claude]}]}
+EDN
+cp "$SB/bin/claude" "$SB/claude.stub"
+printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done >> "%s"\nexit 0\n' "$SB/claude-argv" > "$SB/bin/claude"
+set +e; "$ROOT/agentctl" apply! --all -t claude -k mcps -f "$SB/cuser.edn" -y > "$SB/apply.txt" 2>&1; set -e
+mv "$SB/claude.stub" "$SB/bin/claude"
+grep -qF 'Authorization: Bearer ${AUTH_TOK}' "$SB/claude-argv" || { cat "$SB/apply.txt" "$SB/claude-argv"; fail "claude mcp add was not given \${VAR} as written"; }
+grep -q authtokvalue42 "$SB/claude-argv" && fail "claude mcp add was given the variable's value"
+python3 - "$SB/.claude.json" <<'PY'
+import json, os, sys
+f = sys.argv[1]
+d = json.load(open(f)) if os.path.exists(f) else {}
+d.setdefault("mcpServers", {})["cuser"] = {"type": "http", "url": "https://mcp.example.com/cu",
+                                           "headers": {"Authorization": "Bearer ${AUTH_TOK}"}}
+json.dump(d, open(f, "w"))
+PY
+set +e; "$ROOT/agentctl" apply --all -t claude -k mcps -f "$SB/cuser.edn" > "$SB/cuser.txt" 2>&1; set -e
+grep -q 'mcps/cuser' "$SB/cuser.txt" && { cat "$SB/cuser.txt"; fail "a header kept as \${VAR} is drift on the next plan"; }
+
 echo "all secrets e2e checks passed"
