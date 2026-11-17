@@ -314,7 +314,7 @@ STUB
   for d in /usr/bin /bin; do
     for f in "$d"/*; do
       case "${f##*/}" in setsid|perl|perl5*|pkill|pgrep|sh) continue;; esac
-      [ -e "$SB/sysbin/${f##*/}" ] || ln -s "$f" "$SB/sysbin/${f##*/}"
+      [ -e "$SB/sysbin/${f##*/}" ] || [ -L "$SB/sysbin/${f##*/}" ] || ln -s "$f" "$SB/sysbin/${f##*/}"
     done
   done
   # the remote command is `sh -s`: that sh is dash too
