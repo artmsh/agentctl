@@ -513,4 +513,20 @@ CFG="$SB/chain.edn" outputs
 grep -qF '"--c=x"' "$SB/plain.txt" || { cat "$SB/plain.txt"; fail "the dropped chain is not planned"; }
 leaks envsecretvalue444 hdrsecretvalue555 argsecretvalue888
 
+echo "26. backups of files holding resolved secrets are readable by their owner only"
+b="$SB/.config/agentctl/backups"
+[ -d "$b" ] || fail "no backups were made"
+bad=$(python3 - "$b" <<'PY'
+import os, stat, sys
+root = sys.argv[1]
+for d, dirs, files in os.walk(root):
+    if stat.S_IMODE(os.lstat(d).st_mode) != 0o700: print("dir", d)
+    for f in files:
+        p = os.path.join(d, f)
+        m = os.lstat(p).st_mode
+        if stat.S_ISREG(m) and stat.S_IMODE(m) & 0o077: print("file", p)
+PY
+)
+[ -z "$bad" ] || { echo "$bad"; fail "a backup is readable by others"; }
+
 echo "all secrets e2e checks passed"

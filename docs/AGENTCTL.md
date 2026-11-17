@@ -44,7 +44,9 @@ agentctl gui         # the same, in a browser, with the dry run live beside it
 5. **Unknown ≠ failure.** A locked Bitwarden vault or an unreachable endpoint
    is reported as `?`, not as an error.
 6. Every mutation is backed up under `~/.config/agentctl/backups/<run>/`, one
-   directory per run, first-write-wins so the copy is the pre-run state.
+   directory per run, first-write-wins so the copy is the pre-run state. A
+   backup holds what the file held, resolved secrets included, so its
+   directories are `0700` and its files `0600` (`0700` for an executable).
 
 ## Entities
 
