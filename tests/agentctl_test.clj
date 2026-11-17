@@ -3692,7 +3692,7 @@
         (is (= "/bin/echo" (:command m)) "the placement row borrows the definition")
         (is (= :global (common/mcp-scope m :codex)))
         (is (= :local (common/mcp-scope m :claude)))
-        (is (= {:srv m} (common/project-mcps (#'core/tool-cfg cfg :claude) (get-in cfg [:projects pid]) :claude))
+        (is (= {:srv (common/prepare-mcp m :claude)} (common/project-mcps (#'core/tool-cfg cfg :claude) (get-in cfg [:projects pid]) :claude))
             "claude keeps it in the project")
         (is (empty? (common/global-mcps (:mcps (#'core/tool-cfg cfg :claude)) :claude))
             "and not user-wide")

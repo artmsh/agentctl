@@ -809,6 +809,15 @@ the query. A header value may carry one the same way (`"Bearer $DOCS_TOKEN"`).
 Each is resolved, masked and held back like a whole header, and `validate`
 checks it.
 
+Claude Code expands `${VAR}` and `${VAR:-default}` itself, in a server's
+command, args, env, URL and headers, when it starts the server. For Claude
+agentctl writes that spelling as it is — into `.mcp.json` and
+`~/.claude.json` alike — so an unset variable holds nothing back and a set
+one stays out of a tracked file; `validate` does not report it. A bare `$VAR`
+Claude Code does not expand, so agentctl resolves it as for every other tool,
+as it does `!bw://`, `!env://`, `!file://` and `!cmd://`. For every other
+tool agentctl resolves `${VAR}` too.
+
 OMP writes an http or sse server's `:headers` resolved into the server's
 `headers` map in `~/.omp/agent/mcp.json`; a header that does not resolve holds
 the server back, as an env value does.

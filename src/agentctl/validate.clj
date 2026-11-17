@@ -151,12 +151,19 @@
                    relative? (f :warn [:mcps id]
                                 (str "relative command resolved by the tool: " cmd))
                    :else (f :error [:mcps id] (str "command not executable: " cmd)))]))
-      (ref-findings [:mcps id :env] (:env m))
-      (ref-findings [:mcps id :headers] (:headers m))
-      (when-let [r (common/url-ref m)] (ref-findings [:mcps id] {:url r}))
-      (for [[place spelling :as hit] (common/text-refs m)]
-        (f :warn [:mcps id place] (subs (common/text-ref-message hit) 2)))
-      (ref-findings [:mcps id :args] (into {} (map (fn [[_ label r]] [label r])) (refs/arg-refs (:args m))))
+      ;; a server only tools that expand `${VAR}` themselves get is checked
+      ;; as they read it: such a variable is theirs to resolve, not ours
+      (let [own? (and (seq (:tools m)) (every? common/expands-env-tools (:tools m)))
+            kv #(if own? (into {} (map (fn [[k r]] [k (refs/keep-braced r)])) %) %)]
+        (concat
+         (ref-findings [:mcps id :env] (kv (:env m)))
+         (ref-findings [:mcps id :headers] (kv (:headers m)))
+         (when-let [r (common/url-ref (cond-> m own? (assoc ::common/own-vars true)))] (ref-findings [:mcps id] {:url r}))
+         (for [[place spelling :as hit] (common/text-refs m (if own? :claude :any))]
+           (f :warn [:mcps id place] (subs (common/text-ref-message hit) 2)))
+         (ref-findings [:mcps id :args] (into {} (map (fn [[_ label r]] [label r]))
+                                              (refs/arg-refs (if own? (or (:args-written m) (:args m)) (:args m))
+                                                             {:braced? (not own?)})))))
       (when (and deep? (= :http (:transport m)))
         (let [{:keys [exit]} (u/sh "curl" "-sS" "-o" "/dev/null" "--max-time" "8" (:url m))]
           [(if (zero? exit)
@@ -415,7 +422,7 @@
                  :when (and (string? v) (>= (count v) 12)
                             (re-find refs/secret-key-pattern (u/kw->str k))
                             (not (re-find refs/indirection-key-pattern (u/kw->str k)))
-                            (= :literal (:ref/kind (refs/parse v))))]
+                            (= :literal (:ref/kind (refs/parse-embedded v))))]
            (vswap! hits conj (u/kw->str k))))
        x)
      (:raw cfg))

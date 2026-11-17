@@ -596,7 +596,7 @@
   (for [[id m] (:mcps cfg)
         t (sort-by name (:tools m))
         :when (selected t)
-        :let [hits (common/text-refs (common/for-this-tool m t))]
+        :let [hits (common/text-refs (common/for-this-tool m t) t)]
         :when (seq hits)]
     (plan/op {:tool t :kind :mcps :id id :warn true
               :summary (str/join "; " (map common/text-ref-message hits))})))

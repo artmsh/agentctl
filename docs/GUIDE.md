@@ -416,7 +416,8 @@ argv (`--token !bw://docs/token`, `-t $DOCS_TOKEN`,
 `:settings` `:env`, may be or carry a reference (`$VAR`, `!env://`, `!bw://`, `!file://`, `!cmd://`)
 that is resolved when `apply!` runs. A settings `env` is where a project's
 `.mcp.json` server that reads `${DOCS_API_KEY}` from the environment gets its
-value:
+value (Claude Code expands `${VAR}` itself, so agentctl writes that spelling
+for Claude as it is, and an unset one holds nothing back):
 
 ```clojure
 {:settings [{:env {"DOCS_API_KEY" "!bw://vendor/docs-api-key"} :acli [:claude] :in "projects/sample"}]}

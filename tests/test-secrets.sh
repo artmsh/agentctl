@@ -416,4 +416,30 @@ EDN
 set +e; "$ROOT/agentctl" apply --all -t pi -f "$SB/plainflag.edn" -v > "$SB/pf.txt" 2>&1; set -e
 grep -qF '["-k" "json" "-t" "fastmode"]' "$SB/pf.txt" || { cat "$SB/pf.txt"; fail "a plain value after -k or -t was masked"; }
 
+echo "21. Claude keeps \${VAR} as written: it expands that spelling itself"
+mkdir -p "$SB/proj/.claude"
+cat > "$SB/claude.edn" <<'EDN'
+{:mcps [{:id :chttp :type :http :url "https://mcp.example.com/c?k=${AGENTCTL_TEST_NEVER_SET}"
+         :headers {"Authorization" "Bearer ${AUTH_TOK}" "x-d" "${AGENTCTL_TEST_NEVER_SET:-none}" "x-v" "!bw://plant/SHORT"}
+         :in "proj" :at :repo :acli [:claude]}
+        {:id :cstdio :command "/bin/echo" :args ["--token" "${AUTH_TOK}" "${AGENTCTL_TEST_NEVER_SET}/x" "--key" "$AUTH_TOK"]
+         :env {"T" "${AUTH_TOK}" "U" "${AGENTCTL_TEST_NEVER_SET}" "B" "$AUTH_TOK"} :in "proj" :at :repo :acli [:claude]}]}
+EDN
+set +e; "$ROOT/agentctl" apply! --all -t claude -k mcps -f "$SB/claude.edn" -y > "$SB/apply.txt" 2>&1; code=$?; set -e
+[ "$code" = 0 ] || { cat "$SB/apply.txt"; fail "an unset variable held a Claude server back: exit $code"; }
+python3 - "$SB/proj/.mcp.json" <<'PY' || fail ".mcp.json does not keep \${VAR} as written"
+import json, sys
+ms = json.load(open(sys.argv[1]))["mcpServers"]
+h = ms["chttp"]
+assert h["url"] == "https://mcp.example.com/c?k=${AGENTCTL_TEST_NEVER_SET}", h
+assert h["headers"] == {"Authorization": "Bearer ${AUTH_TOK}", "x-d": "${AGENTCTL_TEST_NEVER_SET:-none}", "x-v": "Zq9x"}, h
+c = ms["cstdio"]
+# a bare $VAR Claude Code does not expand: agentctl resolves it, as before
+assert c["args"] == ["--token", "${AUTH_TOK}", "${AGENTCTL_TEST_NEVER_SET}/x", "--key", "authtokvalue42"], c
+assert c["env"] == {"T": "${AUTH_TOK}", "U": "${AGENTCTL_TEST_NEVER_SET}", "B": "authtokvalue42"}, c
+PY
+set +e; "$ROOT/agentctl" validate -f "$SB/claude.edn" > "$SB/val.txt" 2>&1; set -e
+grep -E '^ *[!✗].*AGENTCTL_TEST_NEVER_SET' "$SB/val.txt" && { cat "$SB/val.txt"; fail "validate reports a variable Claude expands itself"; }
+grep -q "plaintext secret.*claude.edn" "$SB/val.txt" && { cat "$SB/val.txt"; fail "a header spelled with a variable is called plaintext"; }
+
 echo "all secrets e2e checks passed"

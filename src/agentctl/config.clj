@@ -251,12 +251,17 @@
                        url :http
                        :else :stdio)
       :command (some-> cmd u/expand)
+      ;; as a tool that expands `${VAR}` itself gets them (`common/prepare-mcp`)
+      :command-written (some-> cmd refs/expand-bare)
       ;; a reference where a credential goes is resolved when the plan is
       ;; made, as env and headers are; expanded here, an unset variable
       ;; would reach the server as its own name
       :args (let [raw (vec (concat (when-not (:command decl) (rest tokens)) (:args decl)))
                   kept (set (map first (refs/arg-refs raw)))]
               (vec (map-indexed (fn [i a] (if (kept i) (str a) (str (u/expand a)))) raw)))
+      :args-written (let [raw (vec (concat (when-not (:command decl) (rest tokens)) (:args decl)))
+                          kept (set (map first (refs/arg-refs raw)))]
+                      (vec (map-indexed (fn [i a] (if (kept i) (str a) (refs/expand-bare a))) raw)))
       :env (not-empty env)
       :url url
       :headers headers

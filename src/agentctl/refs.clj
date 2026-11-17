@@ -345,6 +345,38 @@
 
 (declare dollar-ref? takes-credential?)
 
+(defn braced-var?
+  "A whole `${VAR}`: the spelling Claude Code expands itself."
+  [r]
+  (and (dollar-ref? r) (str/starts-with? (str (:ref/raw r)) "${")))
+
+(defn expand-bare
+  "`s` with a leading `~` and every bare `$VAR` expanded, and every `${…}`
+   kept as written, for a tool that expands that spelling itself."
+  [s]
+  (when s
+    (-> (str s)
+        (str/replace #"^~(?=/|$)" (str u/home))
+        (str/replace #"\$\{[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+                     (fn [[whole v]] (or (when v (System/getenv v)) whole))))))
+
+(defn keep-braced
+  "`r` with every `${VAR}` in it kept as text, for a tool that expands that
+   spelling itself when it starts the server (Claude Code). A bare `$VAR`
+   and a `!bw://`-style reference in it still resolve."
+  [r]
+  (cond
+    (braced-var? r) {:ref/kind :literal :ref/value (:ref/raw r) :ref/raw (:ref/raw r)}
+    (= :template (:ref/kind r))
+    (let [parts (mapv #(if (braced-var? %) (:ref/raw %) %) (:ref/parts r))]
+      (if (some ref? parts)
+        (assoc r :ref/parts parts)
+        {:ref/kind :literal :ref/value (:ref/raw r) :ref/raw (:ref/raw r)}))
+    ;; `$HOME/${SUB}` had both expanded when it was read
+    (and (= :literal (:ref/kind r)) (string? (:ref/raw r)) (str/includes? (:ref/raw r) "${"))
+    (assoc r :ref/value (expand-bare (:ref/raw r)))
+    :else r))
+
 (defn arg-refs
   "`[index label ref prefix]` for every reference argv carries: a `!bw://`,
    `!env://`, `!file://` or `!cmd://` anywhere, whole or embedded in an
@@ -353,14 +385,17 @@
    or as such a flag's `=value` (`prefix` is then `--token=`). Anywhere else
    a `$VAR` is text agentctl expands when it reads the config. `label` names
    the place: the flag, or `args[i]`."
-  [args]
+  ([args] (arg-refs args {:braced? true}))
+  ([args {:keys [braced?]}]
   (loop [i 0, xs (seq args), flag nil, acc []]
     (if-not xs
       acc
       (let [a (first xs)
             [_ f v] (when (string? a) (re-matches #"(--?[A-Za-z][A-Za-z0-9_-]*)=(.+)" a))
-            rv (when f (secret-ref-text v))
-            ra (secret-ref-text a)]
+            ;; `:braced? false`: a `${VAR}` is the tool's to expand, not ours
+            ref (fn [x] (let [r (secret-ref-text x)] (when-not (and (not braced?) (braced-var? r)) r)))
+            rv (when f (ref v))
+            ra (ref a)]
         (cond
           ;; `--opt=!cmd://…` is a command inside a longer argument: text
           (and rv (not= :cmd (:ref/kind rv)) (or (takes-credential? f) (not (dollar-ref? rv))))
@@ -369,7 +404,7 @@
           (and ra (or flag (not (dollar-ref? ra))))
           (recur (inc i) (next xs) nil (conj acc [i (or flag (str "args[" i "]")) ra ""]))
 
-          :else (recur (inc i) (next xs) (when (and (not f) (takes-credential? a)) a) acc))))))
+          :else (recur (inc i) (next xs) (when (and (not f) (takes-credential? a)) a) acc)))))))
 
 (def ^:private literal-ref-pattern
   #"!\{?(?:bw|env|file|cmd)://|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
