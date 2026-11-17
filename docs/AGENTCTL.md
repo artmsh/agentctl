@@ -626,8 +626,10 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
-codex, pi, omp and antigravity have no project-level MCP config; they report the
-skip as a warning rather than silently installing the server user-wide.
+codex writes a project's servers to `<project>/.codex/config.toml` (read for a
+trusted project only). pi, omp and antigravity have no project-level MCP config;
+they report the skip as a warning rather than silently installing the server
+user-wide.
 
 A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
 the project's `.claude/settings.local.json`, the list Claude Code reads, so it

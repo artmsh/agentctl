@@ -664,6 +664,11 @@
          (when (pos? held) (format ", %d unresolved" held))
          (when (pos? withheld) (format ", %d withheld" withheld)))))
 
+(defn withheld-changes
+  "Every change the plan withheld, as data: `{:action :kind :id :target :keys}`."
+  [ops]
+  (vec (mapcat :withheld-changes ops)))
+
 (defn withheld?
   "Does the plan hold back changes it could not make (`:withheld`)? It has
    not converged, whatever else it does."

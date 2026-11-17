@@ -187,7 +187,8 @@ setting below is written key by key into its own table, so that state survives.
 A `config.toml` that is a symlink, into a dotfiles checkout say, is left alone:
 agentctl does not write through it. The plan says so in one warning that lists
 each change withheld, and counts them as pending: `apply` exits 2 and `apply!` 1
-until the link is replaced or the declaration matches the file.
+until the link is replaced or the declaration matches the file. Under `--json` each
+one is an entry of `withheld`: `{action, kind, id, target, keys}`.
 
 A model switch two keys away: bind the presets browser and put `/model` in slot 0.
 
@@ -347,8 +348,10 @@ scope private to this machine, which is where a server carrying a token belongs.
 | `:project` | `<project>/.mcp.json`, merged onto what is there, and approved in `<project>/.claude/settings.local.json` | a server the whole team should get from the repo |
 | `:global` (default otherwise) | `~/.claude.json`, user-wide | a server wanted everywhere |
 
-Codex, Pi and OMP have no project-level MCP config; they report the skip as a
-warning rather than silently installing the server user-wide.
+Codex writes a project's servers to `<project>/.codex/config.toml`, which it
+reads for a trusted project only; an untrusted one gets a warning to add a
+`:trust` row. Pi and OMP have no project-level MCP config; they report the skip
+as a warning rather than silently installing the server user-wide.
 
 A `:project` server is approved by adding its name to `enabledMcpjsonServers` in
 the project's `.claude/settings.local.json`, the list Claude Code reads, so it

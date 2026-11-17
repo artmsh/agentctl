@@ -158,8 +158,9 @@ releases; report vulnerabilities privately as [SECURITY.md](SECURITY.md) describ
 
 ## Limitations
 
-- Codex, Pi, OMP, Kimi and Antigravity have no project-level MCP config, so a project-scoped
-  server is skipped for them with a warning.
+- Pi, OMP, Kimi and Antigravity have no project-level MCP config, so a project-scoped
+  server is skipped for them with a warning. Codex writes it to the project's
+  `.codex/config.toml`, which Codex reads only for a trusted project.
 - The DeepSeek Harness keeps settings, MCP servers and providers in Cordis patch files that
   agentctl does not write; `:dsh` entries there are reported by `validate` and the plan.
 - Removing a project from the config leaves its project-scoped MCP entries behind.
