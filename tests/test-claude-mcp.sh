@@ -200,14 +200,17 @@ apply -k mcps
 plan -k mcps
 [ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "not converged after a resolved apply!: exit $code"; }
 
-echo "6. a header or env name missing from the user-scope entry is drift; its value is not compared"
+echo "6. a header or env name missing from the user-scope entry is drift, and so is a declared header's value"
 python3 -c "import json,sys; f=sys.argv[1]; d=json.load(open(f)); d['mcpServers']['docs']['headers']['api-key']='rotated'; json.dump(d, open(f, 'w'))" "$SB/.claude.json"
 plan -k mcps
-[ "$code" = 0 ] || { cat "$SB/plan.txt"; fail "a header value was compared: exit $code"; }
+[ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a declared header's value was not compared: exit $code"; }
+grep -q "$SECRET" "$SB/plan.txt" && fail "the header drift printed a resolved secret"
+apply -k mcps
+[ "$(json "$SB/.claude.json" "d['mcpServers']['docs']['headers']['api-key']")" = "$SECRET" ] || fail "a changed header was not put back"
 python3 -c "import json,sys; f=sys.argv[1]; d=json.load(open(f)); d['mcpServers']['docs'].pop('headers'); d['mcpServers']['search']['env']={}; json.dump(d, open(f, 'w'))" "$SB/.claude.json"
 plan -k mcps
 [ "$code" = 2 ] || { cat "$SB/plan.txt"; fail "a missing header name was not drift: exit $code"; }
-grep -q '+ headers: \["api-key"\]' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not name the missing header"; }
+grep -Eq '\+ (docs\.)?headers: \["api-key"\]' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not name the missing header"; }
 grep -q '+ env: \["SEARCH_TOKEN"\]' "$SB/plan.txt" || { cat "$SB/plan.txt"; fail "the plan does not name the missing env var"; }
 grep -q "$SECRET" "$SB/plan.txt" && fail "the plan printed a resolved secret"
 apply -k mcps

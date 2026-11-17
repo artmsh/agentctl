@@ -442,4 +442,21 @@ set +e; "$ROOT/agentctl" validate -f "$SB/claude.edn" > "$SB/val.txt" 2>&1; set 
 grep -E '^ *[!✗].*AGENTCTL_TEST_NEVER_SET' "$SB/val.txt" && { cat "$SB/val.txt"; fail "validate reports a variable Claude expands itself"; }
 grep -q "plaintext secret.*claude.edn" "$SB/val.txt" && { cat "$SB/val.txt"; fail "a header spelled with a variable is called plaintext"; }
 
+echo "22. a Claude header whose text changes around the same secret is drift"
+python3 - "$SB/.claude.json" <<'PY'
+import json, os, sys
+f = sys.argv[1]
+d = json.load(open(f)) if os.path.exists(f) else {}
+d.setdefault("mcpServers", {})["udocs"] = {"type": "http", "url": "https://mcp.example.com/u",
+                                           "headers": {"Authorization": "argsecretvalue888"}}
+json.dump(d, open(f, "w"))
+PY
+cat > "$SB/user.edn" <<'EDN'
+{:mcps [{:id :udocs :type :http :url "https://mcp.example.com/u" :headers {"Authorization" "Bearer !bw://plant/ARG"}
+         :in :all :acli [:claude]}]}
+EDN
+set +e; "$ROOT/agentctl" apply --all -t claude -k mcps -f "$SB/user.edn" -v > "$SB/user.txt" 2>&1; code=$?; set -e
+[ "$code" = 2 ] && grep -q 'mcps/udocs' "$SB/user.txt" || { cat "$SB/user.txt"; fail "a changed header around the same secret plans no change: exit $code"; }
+grep -q argsecretvalue888 "$SB/user.txt" && fail "the header drift printed the secret"
+
 echo "all secrets e2e checks passed"

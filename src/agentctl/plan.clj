@@ -103,7 +103,7 @@
 (def ^:private secret-maps
   "Maps whose every value may be a credential under a name that does not say
    so: an MCP server's environment and its HTTP headers."
-  #{"env" "headers" "http_headers" "env_http_headers"})
+  #{"env" "headers" "http_headers" "env_http_headers" "header-values"})
 
 (defn- plain-value?
   "A value in an env or header map that is no one's secret: a boolean, a
