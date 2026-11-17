@@ -58,22 +58,26 @@
 (declare parse)
 
 (def ^:private embedded-ref-pattern
-  ;; a reference inside a longer string: up to a space, a quote, `:`, `!`
-  ;; (the next reference), or a URL's `&`/`#` — `!cmd://` runs to the end
-  ;; of its line and cannot be embedded
-  #"!(?:bw|env|file)://[^\s\"'&#,;!:]+")
+  ;; a reference inside a longer string. `!{bw://item/field}` is bounded
+  ;; explicitly, and is the spelling for one glued to text (a DSN's
+  ;; `user:!{bw://db/pw}@host`). A bare one runs up to a space, a quote,
+  ;; `:`, `!` (the next reference), or a URL's `&`/`#`. A `!cmd://` runs to
+  ;; the end of its line, so it is a reference only as a whole value
+  #"!\{(?:bw|env|file)://[^}]+\}|!(?:bw|env|file)://[^\s\"'&#,;!:]+")
 
 (def ^:private embedded-ref-or-var-pattern
-  #"!(?:bw|env|file)://[^\s\"'&#,;!:]+|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+  #"!\{(?:bw|env|file)://[^}]+\}|!(?:bw|env|file)://[^\s\"'&#,;!:]+|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
 (def ^:private ref-marker
-  #"!(?:bw|env|file|cmd)://")
+  #"!(?:bw|env|file|cmd)://|!\{(?:bw|env|file)://")
 
 (defn- embeds-ref?
   "Whether a string holds a reference anywhere but as the whole of it: one
-   after its first character, as in `!bw://db/user:!bw://db/pw`."
+   after its first character, as in `!bw://db/user:!bw://db/pw`, or a
+   braced one."
   [v]
-  (boolean (re-find ref-marker (subs v 1))))
+  (or (str/starts-with? v "!{")
+      (boolean (re-find ref-marker (subs v 1)))))
 
 (defn- template
   "`s` as a template — its text with the references in it — when it embeds
@@ -84,7 +88,10 @@
       (if (.find m)
         (recur (.end m) (cond-> parts
                           (< pos (.start m)) (conj (subs s pos (.start m)))
-                          true (conj (parse (.group m)))))
+                          true (conj (let [g (.group m)]
+                                       (parse (if (str/starts-with? g "!{")
+                                                (str "!" (subs g 2 (dec (count g))))
+                                                g))))))
         (let [parts (cond-> parts (< pos (count s)) (conj (subs s pos)))]
           (when (some ref? parts)
             {:ref/kind :template :ref/parts parts :ref/raw s}))))))
@@ -365,7 +372,7 @@
           :else (recur (inc i) (next xs) (when (and (not f) (takes-credential? a)) a) acc))))))
 
 (def ^:private literal-ref-pattern
-  #"!(?:bw|env|file|cmd)://|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+  #"!\{?(?:bw|env|file|cmd)://|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
 (defn literal-ref
   "The reference spelling `s` still carries once everything that resolves

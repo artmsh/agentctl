@@ -765,7 +765,10 @@ An MCP server's argv takes a reference wherever a credential goes. A
 is one embedded in a longer argument (`"Authorization: Bearer !bw://docs/token"`).
 Several may share one argument (`--creds=!bw://db/user:!bw://db/pw`), each
 resolved and the text between them kept: an embedded reference ends at a
-space, a quote, `:`, `!`, `&`, `#`, `,` or `;`.
+space, a quote, `:`, `!`, `&`, `#`, `,` or `;`. One glued to text that may
+continue it — a DSN's password, a URL's userinfo — is written braced:
+`--dsn=postgres://app:!{bw://db/pw}@db/app`. `!{cmd://…}` is no reference:
+an embedded command is text.
 A whole `$VAR` is one after a flag whose name says credential (`--token`,
 `--api-key`, `--password`, `--auth`, `--key`) or after `-t` or `-k`, and as
 such a flag's `=value`. Each is resolved when the plan is made, masked in
@@ -1030,6 +1033,7 @@ and a `statusLine` edited since it was written is kept. See
 | `"!bw://item"` | the item's login password |
 | `"!file://~/path"` | file contents, trimmed |
 | `"!cmd://some command"` | stdout of a command |
+| `"x:!{bw://item/field}@y"` | a reference inside other text, bounded by braces (`bw`, `env`, `file`) |
 | `"anything else"` | literal |
 
 Plans print `bw:dev-keys/hosted/api-key`, never the resolved value. Changes that

@@ -384,4 +384,15 @@ set -e
 grep -qF 'args[0] holds `!cmd://…`' "$SB/cmd.txt" && grep -qF 'args[1] holds `!cmd://…`' "$SB/cmd.txt" \
   || { cat "$SB/cmd.txt"; fail "an embedded command is not reported"; }
 
+echo "18. a reference glued to text is bounded by !{…}"
+cat > "$SB/dsn.edn" <<'EDN'
+{:mcps [{:id :dsndocs :command "/bin/echo" :args ["--dsn=postgres://app:!{bw://plant/ARG}@db/x" "pre !{cmd://echo z}"] :in :all :acli [:pi]}]}
+EDN
+set +e
+"$ROOT/agentctl" apply --all -t pi -f "$SB/dsn.edn" > "$SB/dsnplan.txt" 2>&1
+"$ROOT/agentctl" apply! --all -t pi -f "$SB/dsn.edn" -y > "$SB/apply.txt" 2>&1
+set -e
+grep -qF 'args[1] holds `!{cmd://…`' "$SB/dsnplan.txt" || { cat "$SB/dsnplan.txt"; fail "a braced command is not reported"; }
+[ "$(pi_args dsndocs)" = '["--dsn=postgres://app:argsecretvalue888@db/x", "pre !{cmd://echo z}"]' ] || { cat "$SB/apply.txt"; pi_args dsndocs; fail "a braced reference was not resolved"; }
+
 echo "all secrets e2e checks passed"
