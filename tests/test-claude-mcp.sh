@@ -548,6 +548,8 @@ echo "24. validate reports header and settings env refs a locked vault keeps"
 export BW_STATE=locked
 validate
 grep -q "? bitwarden *vault locked" "$SB/validate.txt" || { cat "$SB/validate.txt"; fail "a header-only bw ref does not report the locked vault"; }
+grep -q 'vault locked — .*BW_SESSION.*export BW_SESSION=\$(bw unlock --raw)' "$SB/validate.txt" \
+  || { cat "$SB/validate.txt"; fail "a locked vault does not say how to export BW_SESSION"; }
 grep -q "? hdocs.headers.api-key *bw:vendor/KEY — bitwarden vault locked" "$SB/validate.txt" \
   || { cat "$SB/validate.txt"; fail "the header ref is not reported"; }
 grep -q "? claude.env.DOCS_KEY *bw:vendor/KEY — bitwarden vault locked" "$SB/validate.txt" \

@@ -211,7 +211,15 @@
     (when needs-bw
       [(case @refs/bw-state
          :absent (f :error [:vault :bitwarden] "bw CLI not installed but !bw:// refs are used")
-         :locked (f :unknown [:vault :bitwarden] "vault locked — run `bw unlock`; refs reported as unknown")
+         :locked (f :unknown [:vault :bitwarden]
+                    ;; `bw unlock` only prints a session key: the vault it
+                    ;; unlocked still reads as locked to any process that
+                    ;; has no BW_SESSION
+                    (str "vault locked — "
+                         (if (str/blank? (System/getenv "BW_SESSION"))
+                           "BW_SESSION is not set (`bw unlock` alone does not export it)"
+                           "bw rejects BW_SESSION (expired, or `bw lock` ran)")
+                         ": run `export BW_SESSION=$(bw unlock --raw)`; refs reported as unknown"))
          (f :ok [:vault :bitwarden] "unlocked"))])))
 
 ;; ---------------------------------------------------------------- settings schema
